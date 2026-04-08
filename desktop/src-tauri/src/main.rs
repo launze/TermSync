@@ -57,6 +57,12 @@ fn main() {
             commands::register_device,
             commands::generate_pairing_code,
             commands::debug_log,
+            commands::write_clipboard_text,
+            commands::read_clipboard_text,
+            commands::window_minimize,
+            commands::window_toggle_maximize,
+            commands::window_is_maximized,
+            commands::window_close,
             commands::proxy_ai_request,
         ])
         .setup(|app| {
@@ -66,6 +72,17 @@ fn main() {
             app.manage(pty_manager::PtyManager::default());
             if let Some(window) = app.get_webview_window("main") {
                 log_debug(&format!("setup:window-ready label={}", window.label()));
+                #[cfg(target_os = "windows")]
+                {
+                    if let Err(err) = window.set_decorations(false) {
+                        log_debug(&format!(
+                            "setup:window-undecorated-failed error={}",
+                            err
+                        ));
+                    } else {
+                        log_debug("setup:window-undecorated");
+                    }
+                }
                 if let Err(err) = window.maximize() {
                     log_debug(&format!("setup:window-maximize-failed error={}", err));
                 } else {

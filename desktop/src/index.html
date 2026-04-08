@@ -21,13 +21,18 @@
         /* Tab Bar */
         .tab-bar {
             display: flex;
-            justify-content: space-between;
+            justify-content: flex-start;
             background-color: #2d2d2d;
             border-bottom: 1px solid #3c3c3c;
             height: 35px;
             align-items: center;
             padding: 0 6px 0 4px;
             gap: 8px;
+            overflow: hidden;
+        }
+        body.windows-custom-frame .tab-bar {
+            padding-right: 0;
+            gap: 6px;
         }
         .tab-strip {
             display: flex;
@@ -35,6 +40,16 @@
             flex: 1;
             min-width: 0;
             overflow-x: auto;
+        }
+        .titlebar-drag-region {
+            display: none;
+            align-self: stretch;
+            flex: 0 1 72px;
+            min-width: 32px;
+        }
+        body.windows-custom-frame .titlebar-drag-region {
+            display: block;
+            cursor: move;
         }
         .tab {
             display: flex;
@@ -112,6 +127,9 @@
             gap: 6px;
             flex-shrink: 0;
         }
+        body.windows-custom-frame .tab-bar-actions {
+            gap: 4px;
+        }
         .tab-icon-btn {
             width: 24px;
             height: 24px;
@@ -129,6 +147,82 @@
         .tab-icon-btn:hover {
             color: #ffffff;
             background-color: #3c3c3c;
+        }
+        .window-controls {
+            display: none;
+            align-self: stretch;
+            flex-shrink: 0;
+            margin-left: 2px;
+        }
+        body.windows-custom-frame .window-controls {
+            display: flex;
+        }
+        .window-control-btn {
+            width: 46px;
+            height: 100%;
+            border: none;
+            border-radius: 0;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background: transparent;
+            color: #d4d4d4;
+            cursor: pointer;
+            padding: 0;
+        }
+        .window-control-btn:hover {
+            background-color: #3c3c3c;
+        }
+        .window-control-btn.close:hover {
+            background-color: #c42b1c;
+            color: #ffffff;
+        }
+        .window-control-icon {
+            position: relative;
+            width: 12px;
+            height: 12px;
+            pointer-events: none;
+        }
+        .window-control-btn.minimize .window-control-icon::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            right: 0;
+            bottom: 1px;
+            height: 1px;
+            background: currentColor;
+        }
+        .window-control-btn.maximize .window-control-icon::before {
+            content: '';
+            position: absolute;
+            inset: 1px;
+            border: 1px solid currentColor;
+        }
+        body.window-maximized .window-control-btn.maximize .window-control-icon::before {
+            inset: 3px 1px 1px 3px;
+            background: #2d2d2d;
+        }
+        body.window-maximized .window-control-btn.maximize .window-control-icon::after {
+            content: '';
+            position: absolute;
+            inset: 1px 3px 3px 1px;
+            border: 1px solid currentColor;
+        }
+        .window-control-btn.close .window-control-icon::before,
+        .window-control-btn.close .window-control-icon::after {
+            content: '';
+            position: absolute;
+            left: 5px;
+            top: 0;
+            width: 1px;
+            height: 12px;
+            background: currentColor;
+        }
+        .window-control-btn.close .window-control-icon::before {
+            transform: rotate(45deg);
+        }
+        .window-control-btn.close .window-control-icon::after {
+            transform: rotate(-45deg);
         }
         .connection-status {
             position: relative;
@@ -180,10 +274,30 @@
             flex: 1;
             position: relative;
             overflow: hidden;
+            min-height: 0;
         }
-        .split-node { display: flex; height: 100%; width: 100%; }
+        .split-node {
+            display: flex;
+            min-width: 0;
+            min-height: 0;
+        }
+        .split-root {
+            width: 100%;
+            height: 100%;
+        }
         .split-node.horizontal { flex-direction: row; }
         .split-node.vertical { flex-direction: column; }
+        .split-node > .terminal-pane,
+        .split-node > .split-node {
+            min-width: 0;
+            min-height: 0;
+        }
+        .terminal-area > .terminal-pane {
+            width: 100%;
+            height: 100%;
+            min-width: 0;
+            min-height: 0;
+        }
 
         .terminal-pane {
             flex: 1;
@@ -569,10 +683,22 @@
         <div class="tab-strip" id="tabBar">
             <button class="tab-add" onclick="window.app.createNewTab()" title="新建标签页">+</button>
         </div>
+        <div class="titlebar-drag-region" id="titlebarDragRegion" data-tauri-drag-region aria-hidden="true" hidden></div>
         <div class="tab-bar-actions">
             <button class="tab-icon-btn connection-status status-local" id="connStatus" onclick="window.app.toggleConnection()" title="本地模式" aria-label="连接状态"></button>
             <button class="tab-icon-btn" onclick="window.app.toggleAiPanel()" title="AI 助手" aria-label="AI 助手">AI</button>
             <button class="tab-icon-btn" onclick="window.app.showSettings()" title="设置" aria-label="设置">⚙</button>
+        </div>
+        <div class="window-controls" id="windowControls" aria-label="窗口控制" hidden>
+            <button class="window-control-btn minimize" id="windowMinimizeBtn" title="最小化" aria-label="最小化">
+                <span class="window-control-icon" aria-hidden="true"></span>
+            </button>
+            <button class="window-control-btn maximize" id="windowMaximizeBtn" title="最大化" aria-label="最大化">
+                <span class="window-control-icon" aria-hidden="true"></span>
+            </button>
+            <button class="window-control-btn close" id="windowCloseBtn" title="关闭窗口" aria-label="关闭窗口">
+                <span class="window-control-icon" aria-hidden="true"></span>
+            </button>
         </div>
     </div>
 
@@ -820,6 +946,7 @@
         const XtermTerminal = window.Terminal;
         const XtermFitAddon = window.FitAddon?.FitAddon;
         const XtermWebLinksAddon = window.WebLinksAddon?.WebLinksAddon;
+        const IS_WINDOWS_DESKTOP = typeof invoke !== 'undefined' && /\bWindows\b/i.test(navigator.userAgent);
 
         function pushDebugLog(message, payload) {
             const text = payload === undefined
@@ -832,6 +959,11 @@
         }
 
         async function writeClipboardText(text) {
+            if (typeof invoke !== 'undefined') {
+                await invoke('write_clipboard_text', { text: String(text || '') });
+                return;
+            }
+
             if (navigator.clipboard?.writeText) {
                 await navigator.clipboard.writeText(text);
                 return;
@@ -851,6 +983,10 @@
         }
 
         async function readClipboardText() {
+            if (typeof invoke !== 'undefined') {
+                return await invoke('read_clipboard_text');
+            }
+
             if (navigator.clipboard?.readText) {
                 return await navigator.clipboard.readText();
             }
@@ -1323,22 +1459,23 @@
             getActivePaneIds() { return Array.from(this.panes.keys()); }
             render() {
                 this.container.innerHTML = '';
-                const rootEl = this._renderNode(this.root);
+                const rootEl = this._renderNode(this.root, true);
                 this.container.appendChild(rootEl);
             }
-            _renderNode(node) {
+            _renderNode(node, isRoot = false) {
                 if (node.type === 'leaf') return this._createPaneElement(node.paneId);
                 const container = document.createElement('div');
-                container.className = 'split-node ' + node.type;
-                const totalSize = node.children.reduce((sum, c) => sum + c.size, 0);
+                container.className = 'split-node ' + node.type + (isRoot ? ' split-root' : '');
                 node.children.forEach((child, index) => {
-                    const childEl = this._renderNode(child);
-                    childEl.style.flex = child.size / totalSize;
+                    const childEl = this._renderNode(child, false);
+                    childEl.style.flexGrow = String(child.size);
+                    childEl.style.flexShrink = '1';
+                    childEl.style.flexBasis = '0';
                     container.appendChild(childEl);
                     if (index < node.children.length - 1) {
                         const splitter = document.createElement('div');
                         splitter.className = 'splitter splitter-' + (node.type === 'horizontal' ? 'horizontal' : 'vertical');
-                        splitter.addEventListener('mousedown', (e) => this._startDrag(e, node, index));
+                        splitter.addEventListener('mousedown', (e) => this._startDrag(e, node, index, container));
                         container.appendChild(splitter);
                     }
                 });
@@ -1384,21 +1521,31 @@
             forgetPane(paneId) {
                 this.paneElements.delete(paneId);
             }
-            _startDrag(e, parentNode, childIndex) {
+            _startDrag(e, parentNode, childIndex, groupEl) {
                 e.preventDefault();
-                const splitter = e.target;
+                const splitter = e.currentTarget;
                 splitter.classList.add('dragging');
                 const isH = parentNode.type === 'horizontal';
                 const startPos = isH ? e.clientX : e.clientY;
                 const left = parentNode.children[childIndex];
                 const right = parentNode.children[childIndex + 1];
-                const sL = left.size, sR = right.size;
-                const totalPx = isH ? this.container.getBoundingClientRect().width : this.container.getBoundingClientRect().height;
-                const onMove = (e) => {
-                    const cur = isH ? e.clientX : e.clientY;
-                    const delta = (cur - startPos) / totalPx;
-                    left.size = Math.max(0.1, Math.min(0.9, sL + delta));
-                    right.size = sL + sR - left.size;
+                const startLeft = left.size;
+                const startRight = right.size;
+                const pairSize = startLeft + startRight;
+                const totalSize = parentNode.children.reduce((sum, child) => sum + child.size, 0);
+                const splitterSize = 4;
+                const groupRect = groupEl.getBoundingClientRect();
+                const groupPx = isH ? groupRect.width : groupRect.height;
+                const usablePx = Math.max(1, groupPx - (parentNode.children.length - 1) * splitterSize);
+                const minPanePx = isH ? 100 : 80;
+                const desiredMinSize = (minPanePx / usablePx) * totalSize;
+                const minSize = Math.max(0.02, Math.min(desiredMinSize, pairSize / 2 - 0.02));
+                const onMove = (event) => {
+                    event.preventDefault();
+                    const cur = isH ? event.clientX : event.clientY;
+                    const deltaSize = ((cur - startPos) / usablePx) * totalSize;
+                    left.size = Math.max(minSize, Math.min(pairSize - minSize, startLeft + deltaSize));
+                    right.size = pairSize - left.size;
                     this.render();
                 };
                 const onUp = () => {
@@ -1713,6 +1860,8 @@
                 this.aiRequestPending = false;
                 this.aiResponseBlocks = [];
                 this.aiInputsBound = false;
+                this.windowControlsEnabled = IS_WINDOWS_DESKTOP;
+                this.windowStateSyncTimer = null;
             }
 
             debug(message, payload) {
@@ -1729,6 +1878,7 @@
                     hasInvoke: typeof invoke !== 'undefined',
                     hasListen: typeof listen !== 'undefined'
                 });
+                this.setupWindowChrome();
                 this.refreshConnectionInputs();
                 this.syncAiConfigInputs();
                 await this.setupTauriListeners();
@@ -3746,6 +3896,83 @@
                 if (tabBar) {
                     tabBar.classList.toggle('single-tab', this.tabs.size <= 1);
                 }
+            }
+
+            setupWindowChrome() {
+                document.body.classList.toggle('windows-custom-frame', this.windowControlsEnabled);
+                const dragRegion = document.getElementById('titlebarDragRegion');
+                const controls = document.getElementById('windowControls');
+                if (dragRegion) dragRegion.hidden = !this.windowControlsEnabled;
+                if (controls) controls.hidden = !this.windowControlsEnabled;
+                if (!this.windowControlsEnabled) return;
+
+                dragRegion?.addEventListener('dblclick', () => {
+                    this.toggleWindowMaximize();
+                });
+                document.getElementById('windowMinimizeBtn')?.addEventListener('click', () => {
+                    this.minimizeWindow();
+                });
+                document.getElementById('windowMaximizeBtn')?.addEventListener('click', () => {
+                    this.toggleWindowMaximize();
+                });
+                document.getElementById('windowCloseBtn')?.addEventListener('click', () => {
+                    this.closeWindow();
+                });
+                window.addEventListener('resize', () => {
+                    if (this.windowStateSyncTimer) {
+                        clearTimeout(this.windowStateSyncTimer);
+                    }
+                    this.windowStateSyncTimer = setTimeout(() => {
+                        this.syncWindowMaximizedState();
+                    }, 60);
+                });
+                this.syncWindowMaximizedState();
+            }
+
+            async invokeWindowCommand(command) {
+                if (!this.windowControlsEnabled || typeof invoke === 'undefined') return null;
+                try {
+                    return await invoke(command);
+                } catch (error) {
+                    this.debug('window:command:failed', {
+                        command: command,
+                        error: String(error)
+                    });
+                    return null;
+                }
+            }
+
+            applyWindowMaximizedState(maximized) {
+                document.body.classList.toggle('window-maximized', !!maximized);
+                const button = document.getElementById('windowMaximizeBtn');
+                if (!button) return;
+                const title = maximized ? '还原' : '最大化';
+                button.title = title;
+                button.setAttribute('aria-label', title);
+            }
+
+            async syncWindowMaximizedState() {
+                const maximized = await this.invokeWindowCommand('window_is_maximized');
+                if (typeof maximized === 'boolean') {
+                    this.applyWindowMaximizedState(maximized);
+                }
+            }
+
+            async minimizeWindow() {
+                await this.invokeWindowCommand('window_minimize');
+            }
+
+            async toggleWindowMaximize() {
+                const maximized = await this.invokeWindowCommand('window_toggle_maximize');
+                if (typeof maximized === 'boolean') {
+                    this.applyWindowMaximizedState(maximized);
+                } else {
+                    this.syncWindowMaximizedState();
+                }
+            }
+
+            async closeWindow() {
+                await this.invokeWindowCommand('window_close');
             }
 
             showSettings() {

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use arboard::Clipboard;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -312,6 +313,66 @@ pub async fn generate_pairing_code(
 pub fn debug_log(message: String) -> Result<String, String> {
     crate::log_debug(&format!("frontend:{message}"));
     Ok("logged".to_string())
+}
+
+#[command]
+pub fn write_clipboard_text(text: String) -> Result<String, String> {
+    let mut clipboard = Clipboard::new()
+        .map_err(|error| format!("无法访问系统剪贴板: {error}"))?;
+    clipboard
+        .set_text(text)
+        .map_err(|error| format!("写入系统剪贴板失败: {error}"))?;
+    Ok("Clipboard updated".to_string())
+}
+
+#[command]
+pub fn read_clipboard_text() -> Result<String, String> {
+    let mut clipboard = Clipboard::new()
+        .map_err(|error| format!("无法访问系统剪贴板: {error}"))?;
+    clipboard
+        .get_text()
+        .map_err(|error| format!("读取系统剪贴板失败: {error}"))
+}
+
+#[command]
+pub fn window_minimize(window: tauri::WebviewWindow) -> Result<String, String> {
+    window
+        .minimize()
+        .map_err(|error| format!("窗口最小化失败: {error}"))?;
+    Ok("Window minimized".to_string())
+}
+
+#[command]
+pub fn window_toggle_maximize(window: tauri::WebviewWindow) -> Result<bool, String> {
+    let maximized = window
+        .is_maximized()
+        .map_err(|error| format!("读取窗口状态失败: {error}"))?;
+    if maximized {
+        window
+            .unmaximize()
+            .map_err(|error| format!("窗口还原失败: {error}"))?;
+        Ok(false)
+    } else {
+        window
+            .maximize()
+            .map_err(|error| format!("窗口最大化失败: {error}"))?;
+        Ok(true)
+    }
+}
+
+#[command]
+pub fn window_is_maximized(window: tauri::WebviewWindow) -> Result<bool, String> {
+    window
+        .is_maximized()
+        .map_err(|error| format!("读取窗口状态失败: {error}"))
+}
+
+#[command]
+pub fn window_close(window: tauri::WebviewWindow) -> Result<String, String> {
+    window
+        .close()
+        .map_err(|error| format!("关闭窗口失败: {error}"))?;
+    Ok("Window closed".to_string())
 }
 
 #[command]
