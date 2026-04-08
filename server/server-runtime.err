@@ -1,0 +1,8 @@
+2026/04/06 18:04:12 🚀 TTY1 Server starting...
+2026/04/06 18:04:12 📡 WSS Port: 7373
+2026/04/06 18:04:12 🌐 HTTP Port: 8080
+2026/04/06 18:04:12 💾 Database: ./data/tty1.db
+2026/04/06 18:04:12 ✅ Database initialized
+2026/04/06 18:04:12 ✅ Session manager initialized
+2026/04/06 18:04:12 🔒 WSS server listening on :7373
+2026/04/06 18:04:12 🔄 HTTP redirect server listening on :8080

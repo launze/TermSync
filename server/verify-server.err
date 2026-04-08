@@ -1,0 +1,8 @@
+2026/04/06 21:18:10 🚀 TTY1 Server starting...
+2026/04/06 21:18:10 📡 WSS Port: 17373
+2026/04/06 21:18:10 🌐 HTTP Port: 18080
+2026/04/06 21:18:10 💾 Database: E:\Work\Code\tty1\server\data\verify.db
+2026/04/06 21:18:10 ✅ Database initialized
+2026/04/06 21:18:10 ✅ Session manager initialized
+2026/04/06 21:18:10 🔄 HTTP redirect server listening on :18080
+2026/04/06 21:18:10 🔒 WSS server listening on :17373

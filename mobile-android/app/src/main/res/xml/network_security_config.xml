@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Trust our self-signed certificate -->
+    <base-config>
+        <trust-anchors>
+            <!-- Include the self-signed certificate from raw resources -->
+            <certificates src="@raw/server_cert" />
+            <!-- Also trust system CAs for other HTTPS requests -->
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+    
+    <!-- Debug overrides for development -->
+    <debug-overrides>
+        <trust-anchors>
+            <certificates src="user" />
+            <certificates src="system" />
+        </trust-anchors>
+    </debug-overrides>
+</network-security-config>

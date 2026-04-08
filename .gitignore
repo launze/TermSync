@@ -1,0 +1,27 @@
+# Build artifacts
+**/target/
+**/build/
+**/dist/
+*.exe
+*.db
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Environment
+.env
+
+# Node modules (if any frontend uses npm)
+node_modules/
+
+# Certificates (uncomment to exclude from git)
+# server/certs/
+# desktop/assets/server.crt
+# mobile-android/app/src/main/res/raw/server_cert.crt

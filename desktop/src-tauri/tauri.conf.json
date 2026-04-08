@@ -1,0 +1,45 @@
+{
+  "productName": "TermSync",
+  "version": "0.1.0",
+  "identifier": "com.termsync.desktop",
+  "build": {
+    "beforeDevCommand": {
+      "script": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\dev-server.ps1",
+      "cwd": ".",
+      "wait": false
+    },
+    "beforeBuildCommand": "",
+    "devUrl": "http://127.0.0.1:1430",
+    "frontendDist": "../src"
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico",
+      "icons/icon.icns"
+    ]
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "security": {
+      "csp": null
+    },
+    "windows": [
+      {
+        "title": "TermSync Terminal",
+        "width": 800,
+        "height": 600,
+        "maximized": true,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ]
+  },
+  "plugins": {
+    "shell": {}
+  }
+}

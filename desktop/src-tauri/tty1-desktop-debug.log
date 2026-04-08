@@ -1,0 +1,47 @@
+[TTY1] main:start
+[TTY1] setup:start
+[TTY1] setup:window-ready label=main
+[TTY1] page-load window=main url=http://tauri.localhost/
+[TTY1] frontend:script:loaded {"hasInvoke":true,"hasListen":true,"location":"http://tauri.localhost/"}
+[TTY1] frontend:dom:content-loaded
+[TTY1] frontend:init:start {"serverUrl":"wss://nas.smarthome2020.top:7373/ws","hasToken":false,"autoConnect":false}
+[TTY1] frontend:tauri:apis {"hasInvoke":true,"hasListen":true}
+[TTY1] page-load window=main url=http://tauri.localhost/
+[TTY1] frontend:tab:create {"tabId":1,"paneId":1,"reusedPane":true}
+[TTY1] frontend:session:create {"paneId":1,"title":"标签 1","shell":"pwsh.exe"}
+[TTY1] frontend:init:done {"firstPaneId":1}
+[TTY1] command:create_session session=local-1 title=标签 1 shell=Some("pwsh.exe")
+[TTY1] pty:create_session session=local-1 shell=pwsh.exe
+[TTY1] main:start
+[TTY1] setup:start
+[TTY1] setup:window-ready label=main
+[TTY1] page-load window=main url=about:blank
+[TTY1] main:start
+[TTY1] setup:start
+[TTY1] setup:window-ready label=main
+[TTY1] page-load window=main url=about:blank
+[TTY1] main:start
+[TTY1] setup:start
+[TTY1] setup:window-ready label=main
+[TTY1] page-load window=main url=about:blank
+[TTY1] main:start
+[TTY1] setup:start
+[TTY1] setup:window-ready label=main
+[TTY1] page-load window=main url=about:blank
+[TTY1] main:start
+[TTY1] main:start
+[TTY1] main:start
+[TTY1] main:start
+[TTY1] main:start
+[TTY1] main:start
+[TTY1] main:start
+[TTY1] main:start
+[TTY1] main:start
+[TTY1] main:start
+[TTY1] main:start
+[TTY1] main:start
+[TTY1] main:start
+[TTY1] main:start
+[TTY1] main:start
+[TTY1] main:start
+[TTY1] main:start

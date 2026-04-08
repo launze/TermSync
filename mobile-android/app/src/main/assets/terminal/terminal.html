@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TTY1 Mobile Terminal</title>
+  <link rel="stylesheet" href="./xterm.css">
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #000000;
+    }
+
+    body {
+      position: relative;
+    }
+
+    #terminal {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      padding: 8px;
+      box-sizing: border-box;
+    }
+
+    #fallback {
+      position: absolute;
+      inset: 0;
+      margin: 0;
+      padding: 8px;
+      box-sizing: border-box;
+      overflow: auto;
+      background: #000000;
+      color: #d4d4d4;
+      font: 13px/1.35 monospace;
+      white-space: pre-wrap;
+      word-break: break-word;
+      display: none;
+      user-select: text;
+      -webkit-user-select: text;
+      -webkit-touch-callout: default;
+    }
+
+    .xterm {
+      height: 100%;
+      padding: 0;
+    }
+
+    .xterm-viewport::-webkit-scrollbar,
+    #fallback::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    .xterm-viewport::-webkit-scrollbar-thumb,
+    #fallback::-webkit-scrollbar-thumb {
+      background: #333333;
+      border-radius: 6px;
+    }
+  </style>
+</head>
+<body>
+  <div id="terminal"></div>
+  <pre id="fallback"></pre>
+  <script src="./xterm.js"></script>
+  <script src="./addon-fit.js"></script>
+  <script>
+    window.onerror = function(msg, src, line, col) {
+      console.error("GLOBAL_ERR: " + msg + " at " + src + ":" + line + ":" + col);
+      return false;
+    };
+
+    var terminalHost = document.getElementById("terminal");
+    var fallbackEl = document.getElementById("fallback");
+    var term = null;
+    var fitAddon = null;
+    var xtermReady = false;
+    var writeCount = 0;
+    var fallbackBuffer = "";
+    var resizeObserver = null;
+    var selectionMode = false;
+    var fallbackSyncTimer = null;
+    var fallbackSyncDirty = false;
+    var fallbackSyncReason = "";
+    var FALLBACK_SYNC_DEBOUNCE_MS = 280;
+    var FALLBACK_MAX_LINES = 240;
+    var INITIAL_RENDER_MAX_CHARS = 50000;
+    var DEFAULT_FONT_SIZE = 13;
+    var renderMode = "mobile-fit";
+    var fontScale = 1;
+    var targetDesktopCols = 80;
+    var targetDesktopRows = 24;
+
+    function healthSnapshot() {
+      var screen = document.querySelector(".xterm-screen");
+      var canvas = document.querySelector(".xterm-screen canvas");
+      return {
+        xtermReady: xtermReady,
+        termExists: !!term,
+        rows: term ? term.rows : 0,
+        cols: term ? term.cols : 0,
+        writeCount: writeCount,
+        screenExists: !!screen,
+        screenWidth: screen ? screen.offsetWidth : 0,
+        screenHeight: screen ? screen.offsetHeight : 0,
+        canvasExists: !!canvas,
+        canvasWidth: canvas ? canvas.width : 0,
+        canvasHeight: canvas ? canvas.height : 0,
+        windowInnerWidth: window.innerWidth || 0,
+        windowInnerHeight: window.innerHeight || 0,
+        bodyClientWidth: document.body ? document.body.clientWidth : 0,
+        bodyClientHeight: document.body ? document.body.clientHeight : 0,
+        docClientWidth: document.documentElement ? document.documentElement.clientWidth : 0,
+        docClientHeight: document.documentElement ? document.documentElement.clientHeight : 0,
+        hostClientWidth: terminalHost ? terminalHost.clientWidth : 0,
+        hostClientHeight: terminalHost ? terminalHost.clientHeight : 0,
+        hostOffsetWidth: terminalHost ? terminalHost.offsetWidth : 0,
+        hostOffsetHeight: terminalHost ? terminalHost.offsetHeight : 0,
+        fallbackClientWidth: fallbackEl ? fallbackEl.clientWidth : 0,
+        fallbackClientHeight: fallbackEl ? fallbackEl.clientHeight : 0
+      };
+    }
+
+    function isHealthy() {
+      var health = healthSnapshot();
+      return !!(
+        health.xtermReady &&
+        health.termExists &&
+        health.rows > 0 &&
+        health.cols > 0 &&
+        health.screenExists &&
+        health.screenWidth > 0 &&
+        health.screenHeight > 0 &&
+        health.canvasExists &&
+        health.canvasWidth > 0 &&
+        health.canvasHeight > 0
+      );
+    }
+
+    function stripAnsi(text) {
+      if (!text) return "";
+      return text
+        .replace(/\u001B\[[0-9;?]*[ -/]*[@-~]/g, "")
+        .replace(/\u001B[@-_]/g, "")
+        .replace(/\r(?!\n)/g, "\n");
+    }
+
+    function flushFallback(autoScroll) {
+      if (!fallbackEl) return;
+      fallbackEl.textContent = fallbackBuffer;
+      if (autoScroll !== false) {
+        fallbackEl.scrollTop = fallbackEl.scrollHeight;
+      }
+    }
+
+    function normalizeExportedLines(lines) {
+      var normalized = [];
+      var blankRun = 0;
+      for (var i = 0; i < lines.length; i += 1) {
+        var line = (lines[i] || "").replace(/[ \t]+$/g, "");
+        if (!line.trim()) {
+          blankRun += 1;
+          if (blankRun > 1) {
+            continue;
+          }
+          normalized.push("");
+          continue;
+        }
+        blankRun = 0;
+        normalized.push(line);
+      }
+      return normalized;
+    }
+
+    function syncFallbackFromTerminal() {
+      if (!term || !term.buffer || !term.buffer.active) return false;
+      try {
+        var buffer = term.buffer.active;
+        var lines = [];
+        var start = Math.max(0, buffer.length - FALLBACK_MAX_LINES);
+        for (var i = start; i < buffer.length; i += 1) {
+          var line = buffer.getLine(i);
+          if (!line) continue;
+          var text = line.translateToString(true).replace(/\u00A0/g, " ");
+          if (line.isWrapped && lines.length > 0) {
+            lines[lines.length - 1] += text;
+          } else {
+            lines.push(text);
+          }
+        }
+        fallbackBuffer = normalizeExportedLines(lines).join("\n").replace(/\s+$/g, "");
+        return true;
+      } catch (e) {
+        console.error("FALLBACK_SYNC_ERR: " + e.message);
+        return false;
+      }
+    }
+
+    function applyRawFallback(mode, data) {
+      if (!fallbackEl) return;
+      if (mode === "render") {
+        fallbackBuffer = stripAnsi(data);
+      } else if (mode === "append" && data) {
+        fallbackBuffer += stripAnsi(data);
+      }
+      flushFallback(true);
+    }
+
+    function scheduleFallbackSync(reason, immediate) {
+      if (!fallbackEl) return;
+      if (!selectionMode && fallbackEl.style.display === "none") return;
+      fallbackSyncDirty = true;
+      fallbackSyncReason = reason || fallbackSyncReason || "unknown";
+      if (fallbackSyncTimer && !immediate) {
+        return;
+      }
+      if (fallbackSyncTimer && immediate) {
+        clearTimeout(fallbackSyncTimer);
+        fallbackSyncTimer = null;
+      }
+      fallbackSyncTimer = setTimeout(function() {
+        fallbackSyncTimer = null;
+        if (!fallbackSyncDirty) return;
+        fallbackSyncDirty = false;
+        var ok = syncFallbackFromTerminal();
+        if (!ok) {
+          console.warn("FALLBACK_SYNC_RAW[" + fallbackSyncReason + "]");
+        }
+        flushFallback(true);
+      }, immediate ? 0 : FALLBACK_SYNC_DEBOUNCE_MS);
+    }
+
+    function updateFallbackVisibility(forceVisible) {
+      if (!fallbackEl) return;
+      var showFallback = selectionMode || (typeof forceVisible === "boolean" ? forceVisible : !isHealthy());
+      fallbackEl.style.display = showFallback ? "block" : "none";
+      fallbackEl.style.pointerEvents = showFallback ? "auto" : "none";
+      if (terminalHost) {
+        terminalHost.style.visibility = showFallback ? "hidden" : "visible";
+      }
+      if (showFallback) {
+        scheduleFallbackSync("visibility", true);
+      }
+    }
+
+    function fit() {
+      try {
+        if (fitAddon) fitAddon.fit();
+      } catch (e) {
+        console.error("FIT_ERR: " + e.message);
+      }
+    }
+
+    function refreshTerminal() {
+      if (!term || term.rows <= 0) return;
+      try {
+        term.refresh(0, term.rows - 1);
+      } catch (_) {}
+    }
+
+    function ensureLayout(reason) {
+      fit();
+      requestAnimationFrame(function() {
+        fit();
+        refreshTerminal();
+        setTimeout(function() {
+          fit();
+          refreshTerminal();
+          var health = healthSnapshot();
+          if (!isHealthy()) {
+            console.warn("LAYOUT_UNHEALTHY[" + reason + "]: " + JSON.stringify(health));
+            updateFallbackVisibility(true);
+          } else {
+            if (writeCount <= 5 || writeCount % 20 === 0) {
+              console.log("LAYOUT_OK[" + reason + "]: " + JSON.stringify(health));
+            }
+            updateFallbackVisibility(false);
+          }
+        }, 80);
+      });
+    }
+
+    function viewport() {
+      return document.querySelector(".xterm-viewport");
+    }
+
+    function isNearBottom() {
+      var el = viewport();
+      if (!el) return true;
+      return el.scrollTop + el.clientHeight >= el.scrollHeight - 32;
+    }
+
+    function decodeBase64Utf8(base64) {
+      if (!base64) return "";
+      try {
+        var binary = atob(base64);
+        var bytes = new Uint8Array(binary.length);
+        for (var i = 0; i < binary.length; i += 1) {
+          bytes[i] = binary.charCodeAt(i);
+        }
+        return new TextDecoder().decode(bytes);
+      } catch (e) {
+        console.error("B64_DECODE_ERR: " + e.message + " input.len=" + base64.length);
+        return "";
+      }
+    }
+
+    function trimInitialRenderText(text) {
+      if (!text || text.length <= INITIAL_RENDER_MAX_CHARS) {
+        return text || "";
+      }
+      return text.slice(text.length - INITIAL_RENDER_MAX_CHARS);
+    }
+
+    function clampFontScale(value) {
+      var next = Number(value);
+      if (!isFinite(next)) next = 1;
+      return Math.max(0.7, Math.min(1.6, next));
+    }
+
+    function applyMobileFitFont() {
+      if (!term) return;
+      term.options.fontSize = Math.max(8, Math.min(24, DEFAULT_FONT_SIZE * fontScale));
+    }
+
+    function writeTerminal(data, mode, followOutput) {
+      if (!xtermReady || !term) {
+        console.error(mode.toUpperCase() + "_ERR: xterm not ready");
+        applyRawFallback(mode, data);
+        updateFallbackVisibility(true);
+        return "ERR:not_ready";
+      }
+
+      try {
+        if (mode === "render") {
+          term.reset();
+          data = trimInitialRenderText(data);
+        }
+
+        if (!data) {
+          scheduleFallbackSync(mode + ".empty", true);
+          ensureLayout(mode + ".empty");
+          return "OK";
+        }
+
+        term.write(data, function() {
+          writeCount += 1;
+          scheduleFallbackSync(mode + ".write", mode === "render");
+          ensureLayout(mode + ".write");
+          if (followOutput || mode === "render") {
+            requestAnimationFrame(function() { term.scrollToBottom(); });
+          }
+          if (writeCount <= 5 || writeCount % 20 === 0) {
+            console.log(mode.toUpperCase() + "_OK: data.len=" + data.length + " writeCount=" + writeCount + " follow=" + !!followOutput);
+          }
+        });
+
+        return "OK";
+      } catch (e) {
+        console.error(mode.toUpperCase() + "_EXCEPTION: " + e.message);
+        updateFallbackVisibility(true);
+        return "ERR:" + e.message;
+      }
+    }
+
+    try {
+      console.log("XTERM_INIT: Terminal type=" + typeof Terminal);
+      console.log("XTERM_INIT: FitAddon type=" + typeof FitAddon);
+
+      if (typeof Terminal === "undefined") {
+        console.error("XTERM_INIT: Terminal is undefined");
+      } else {
+        term = new Terminal({
+          convertEol: false,
+          cursorBlink: false,
+          fontSize: DEFAULT_FONT_SIZE,
+          fontFamily: "monospace",
+          scrollback: 20000,
+          theme: {
+            background: "#000000",
+            foreground: "#d4d4d4",
+            cursor: "#4ec9b0",
+            selectionBackground: "rgba(14,99,156,0.35)"
+          }
+        });
+
+        if (typeof FitAddon !== "undefined" && FitAddon.FitAddon) {
+          fitAddon = new FitAddon.FitAddon();
+          term.loadAddon(fitAddon);
+          console.log("XTERM_INIT: FitAddon loaded OK");
+        } else {
+          console.error("XTERM_INIT: FitAddon not available");
+        }
+
+        if (!terminalHost) {
+          console.error("XTERM_INIT: #terminal element not found");
+        } else {
+          term.open(terminalHost);
+          xtermReady = true;
+          console.log("XTERM_INIT: Terminal opened OK");
+          ensureLayout("init");
+        }
+      }
+    } catch (e) {
+      console.error("XTERM_INIT_EXCEPTION: " + e.message + "\n" + e.stack);
+      updateFallbackVisibility(true);
+    }
+
+    window.addEventListener("resize", function() {
+      ensureLayout("window.resize");
+    });
+
+    requestAnimationFrame(function() {
+      ensureLayout("first.raf");
+      console.log("XTERM_INIT: first fit done");
+    });
+
+    if (window.ResizeObserver && terminalHost) {
+      resizeObserver = new ResizeObserver(function() {
+        ensureLayout("resize.observer");
+      });
+      resizeObserver.observe(terminalHost);
+    }
+
+    window.termsyncRender = function(data) {
+      return writeTerminal(data, "render", false);
+    };
+
+    window.termsyncAppend = function(data) {
+      if (!data) return "OK:empty";
+      return writeTerminal(data, "append", isNearBottom());
+    };
+
+    window.termsyncRenderBase64 = function(base64) {
+      var data = decodeBase64Utf8(base64);
+      console.log("RENDER_B64: input.len=" + (base64 ? base64.length : 0) + " decoded.len=" + data.length);
+      return window.termsyncRender(data);
+    };
+
+    window.termsyncAppendBase64 = function(base64) {
+      var data = decodeBase64Utf8(base64);
+      if (writeCount <= 5 || writeCount % 20 === 0) {
+        console.log("APPEND_B64: input.len=" + (base64 ? base64.length : 0) + " decoded.len=" + data.length);
+      }
+      return window.termsyncAppend(data);
+    };
+
+    window.termsyncFocus = function() {
+      if (term) term.focus();
+    };
+
+    window.termsyncScrollToBottom = function() {
+      if (term) term.scrollToBottom();
+      if (fallbackEl) {
+        fallbackEl.scrollTop = fallbackEl.scrollHeight;
+      }
+    };
+
+    window.termsyncEnsureLayout = function(reason) {
+      ensureLayout(reason || "manual");
+      return "OK";
+    };
+
+    window.termsyncSetRenderMode = function(mode, scale, desktopCols, desktopRows) {
+      renderMode = mode === "desktop-mirror" ? "desktop-mirror" : "mobile-fit";
+      fontScale = clampFontScale(scale);
+      targetDesktopCols = desktopCols > 0 ? desktopCols : targetDesktopCols;
+      targetDesktopRows = desktopRows > 0 ? desktopRows : targetDesktopRows;
+
+      if (renderMode === "desktop-mirror") {
+        return window.termsyncMatchDesktop(targetDesktopCols, targetDesktopRows);
+      }
+
+      try {
+        applyMobileFitFont();
+        fit();
+        refreshTerminal();
+        ensureLayout("setRenderMode.mobile");
+        return JSON.stringify({
+          ok: true,
+          mode: renderMode,
+          fontScale: fontScale,
+          fontSize: term ? term.options.fontSize : 0,
+          cols: term ? term.cols : 0,
+          rows: term ? term.rows : 0
+        });
+      } catch (e) {
+        console.error("SET_RENDER_MODE_ERR: " + e.message);
+        return JSON.stringify({ ok: false, error: e.message, mode: renderMode });
+      }
+    };
+
+    window.termsyncSetSelectionMode = function(enabled) {
+      selectionMode = !!enabled;
+      if (selectionMode) {
+        scheduleFallbackSync("selection.on", true);
+      } else if (fallbackSyncTimer) {
+        clearTimeout(fallbackSyncTimer);
+        fallbackSyncTimer = null;
+        fallbackSyncDirty = false;
+      }
+      updateFallbackVisibility();
+      return JSON.stringify({
+        selectionMode: selectionMode,
+        fallbackLength: fallbackBuffer.length,
+        fallbackMaxLines: FALLBACK_MAX_LINES,
+        syncDebounceMs: FALLBACK_SYNC_DEBOUNCE_MS,
+        initialRenderMaxChars: INITIAL_RENDER_MAX_CHARS
+      });
+    };
+
+    window.termsyncHealthCheck = function() {
+      var health = healthSnapshot();
+      health.fallbackVisible = !!fallbackEl && fallbackEl.style.display !== "none";
+      health.fallbackLength = fallbackBuffer.length;
+      health.selectionMode = selectionMode;
+      return JSON.stringify(health);
+    };
+
+    window.termsyncMatchDesktop = function(desktopCols, desktopRows) {
+      if (!term || !terminalHost || desktopCols <= 0) {
+        console.error("MATCH_DESKTOP_ERR: term=" + !!term + " host=" + !!terminalHost + " cols=" + desktopCols);
+        return JSON.stringify({ ok: false });
+      }
+
+      try {
+        // Measure available container width (minus padding)
+        var hostStyle = window.getComputedStyle(terminalHost);
+        var paddingLeft = parseInt(hostStyle.paddingLeft) || 0;
+        var paddingRight = parseInt(hostStyle.paddingRight) || 0;
+        var availWidth = terminalHost.clientWidth - paddingLeft - paddingRight;
+        // Reserve a bit for scrollbar
+        availWidth -= 14;
+        if (availWidth <= 0) availWidth = window.innerWidth - 30;
+
+        // Calculate font size to fit desktopCols characters.
+        // Monospace char width ≈ fontSize * 0.6 (typical for monospace fonts)
+        var charWidthRatio = 0.602;
+        var fontSize = Math.floor((availWidth / desktopCols / charWidthRatio) * 10) / 10;
+        fontSize = fontSize * fontScale;
+        // Clamp between 4px and 16px
+        fontSize = Math.max(4, Math.min(16, fontSize));
+
+        console.log("MATCH_DESKTOP: cols=" + desktopCols + " rows=" + desktopRows +
+                     " avail=" + availWidth + "px fontSize=" + fontSize + "px");
+
+        // Apply new font size and resize
+        term.options.fontSize = fontSize;
+        // Disable FitAddon auto-fit and set exact dimensions
+        term.resize(desktopCols, desktopRows || 24);
+
+        requestAnimationFrame(function() {
+          // After resize, check actual dimensions and fine-tune
+          if (fitAddon) {
+            var proposed = fitAddon.proposeDimensions();
+            if (proposed && proposed.cols < desktopCols) {
+              // Still too wide — shrink font more
+              var ratio = proposed.cols / desktopCols;
+              var adjusted = Math.floor(fontSize * ratio * 10) / 10;
+              adjusted = Math.max(3, adjusted);
+              console.log("MATCH_DESKTOP: fine-tune fontSize " + fontSize + " -> " + adjusted);
+              term.options.fontSize = adjusted;
+              term.resize(desktopCols, desktopRows || 24);
+            }
+          }
+          refreshTerminal();
+          ensureLayout("matchDesktop");
+        });
+
+        return JSON.stringify({
+          ok: true,
+          fontSize: fontSize,
+          cols: desktopCols,
+          rows: desktopRows,
+          availWidth: availWidth
+        });
+      } catch (e) {
+        console.error("MATCH_DESKTOP_EXCEPTION: " + e.message);
+        return JSON.stringify({ ok: false, error: e.message });
+      }
+    };
+
+    console.log("XTERM_INIT: script complete, xtermReady=" + xtermReady);
+  </script>
+</body>
+</html>

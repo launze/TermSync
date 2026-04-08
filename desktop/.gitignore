@@ -1,0 +1,15 @@
+# Desktop build artifacts
+target/
+dist/
+
+# Tauri
+src-tauri/target/
+src-tauri/dist/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

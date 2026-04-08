@@ -1,0 +1,10 @@
+2026/04/06 18:26:10 🚀 TTY1 Server starting...
+2026/04/06 18:26:10 📡 WSS Port: 7373
+2026/04/06 18:26:10 🌐 HTTP Port: 8080
+2026/04/06 18:26:10 💾 Database: E:\Work\Code\tty1\server\data\tty1.db
+2026/04/06 18:26:10 ✅ Database initialized
+2026/04/06 18:26:10 ✅ Session manager initialized
+2026/04/06 18:26:10 🔄 HTTP redirect server listening on :8080
+2026/04/06 18:26:10 🔒 WSS server listening on :7373
+2026/04/06 18:26:13 ✅ Device registered: Desktop QA (desktop) - b6d376c8-7ea0-49ec-a773-c49c5780b93b
+2026/04/06 18:26:13 ✅ Device registered: Mobile QA (mobile) - 520f04ae-32b4-41e0-848a-8d4a97daacf2

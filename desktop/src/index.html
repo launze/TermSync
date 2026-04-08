@@ -1,0 +1,3523 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TTY1 Terminal</title>
+    <link rel="stylesheet" href="./vendor/xterm/xterm.css">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #1e1e1e;
+            color: #cccccc;
+            height: 100vh;
+            overflow: hidden;
+            user-select: none;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Tab Bar */
+        .tab-bar {
+            display: flex;
+            justify-content: space-between;
+            background-color: #2d2d2d;
+            border-bottom: 1px solid #3c3c3c;
+            height: 35px;
+            align-items: center;
+            padding: 0 6px 0 4px;
+            gap: 8px;
+        }
+        .tab-strip {
+            display: flex;
+            align-items: center;
+            flex: 1;
+            min-width: 0;
+            overflow-x: auto;
+        }
+        .tab {
+            display: flex;
+            align-items: center;
+            padding: 6px 12px;
+            background: transparent;
+            border: none;
+            color: #969696;
+            cursor: pointer;
+            font-size: 12px;
+            border-right: 1px solid #3c3c3c;
+            min-width: 120px;
+            max-width: 200px;
+            transition: background-color 0.2s;
+        }
+        .tab:hover { background-color: #3c3c3c; }
+        .tab.active { background-color: #1e1e1e; color: #ffffff; }
+        .tab-title {
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            text-align: left;
+        }
+        .tab-close {
+            margin-left: 6px;
+            width: 18px;
+            height: 18px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0;
+            font-size: 14px;
+            border-radius: 3px;
+            transition: opacity 0.2s, background-color 0.2s;
+        }
+        .tab:hover .tab-close { opacity: 1; }
+        .tab-close:hover { background-color: #555; }
+        .tab-add {
+            padding: 6px 10px;
+            background: none;
+            border: none;
+            color: #969696;
+            cursor: pointer;
+            font-size: 16px;
+            margin-left: 4px;
+        }
+        .tab-add:hover { color: #ffffff; }
+        .tab-bar-actions {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-shrink: 0;
+        }
+        .tab-icon-btn {
+            width: 24px;
+            height: 24px;
+            border: none;
+            border-radius: 6px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background: transparent;
+            color: #969696;
+            cursor: pointer;
+            font-size: 13px;
+            padding: 0;
+        }
+        .tab-icon-btn:hover {
+            color: #ffffff;
+            background-color: #3c3c3c;
+        }
+        .connection-status {
+            position: relative;
+        }
+        .connection-status::before {
+            content: '';
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background-color: #6b7280;
+            box-shadow: 0 0 0 1px rgba(255,255,255,0.08);
+        }
+        .status-local::before { background-color: #6b7280; }
+        .status-connected::before { background-color: #4ec9b0; }
+        .status-disconnected::before { background-color: #f44747; }
+        .status-connecting::before { background-color: #cca700; }
+
+        /* Split Menu */
+        .split-menu {
+            position: fixed;
+            background-color: #2d2d2d;
+            border: 1px solid #3c3c3c;
+            box-shadow: 2px 2px 8px rgba(0,0,0,0.5);
+            z-index: 2100;
+            display: none;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .split-menu.visible { display: block; }
+        .split-menu-item {
+            padding: 8px 20px;
+            cursor: pointer;
+            font-size: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .split-menu-item:hover { background-color: #094771; }
+        .split-menu-item .icon { width: 16px; text-align: center; }
+
+        /* Main Container */
+        .main-container {
+            display: flex;
+            flex-direction: column;
+            flex: 1;
+            min-height: 0;
+        }
+        .terminal-area {
+            flex: 1;
+            position: relative;
+            overflow: hidden;
+        }
+        .split-node { display: flex; height: 100%; width: 100%; }
+        .split-node.horizontal { flex-direction: row; }
+        .split-node.vertical { flex-direction: column; }
+
+        .terminal-pane {
+            flex: 1;
+            position: relative;
+            background-color: #1e1e1e;
+            min-width: 100px;
+            min-height: 80px;
+            display: flex;
+            flex-direction: column;
+        }
+        .terminal-pane.hidden { display: none !important; }
+        .pane-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 2px 8px;
+            background-color: #252526;
+            border-bottom: 1px solid #3c3c3c;
+            font-size: 11px;
+            color: #888;
+            min-height: 22px;
+        }
+        .pane-title { display: flex; align-items: center; gap: 6px; }
+        .pane-indicator {
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            background-color: #4ec9b0;
+        }
+        .pane-indicator.disconnected { background-color: #f44747; }
+        .pane-actions { display: flex; gap: 4px; }
+        .pane-action {
+            background: none; border: none; color: #888;
+            cursor: pointer; font-size: 12px; padding: 2px 4px;
+        }
+        .pane-action:hover { color: #fff; }
+        .terminal-content {
+            flex: 1; position: relative; overflow: hidden; padding: 0;
+        }
+        .terminal-canvas {
+            width: 100%; height: 100%;
+            background-color: #1e1e1e;
+            overflow: hidden;
+            user-select: text;
+        }
+        .terminal-content .xterm,
+        .terminal-content .xterm-screen,
+        .terminal-content .xterm-viewport {
+            height: 100%;
+        }
+        .terminal-content .xterm {
+            padding: 8px;
+        }
+        .terminal-content .xterm-viewport::-webkit-scrollbar {
+            width: 10px;
+        }
+        .terminal-content .xterm-viewport::-webkit-scrollbar-thumb {
+            background-color: #3c3c3c;
+            border-radius: 8px;
+        }
+        .terminal-content .xterm-viewport::-webkit-scrollbar-thumb:hover {
+            background-color: #505050;
+        }
+
+        /* Splitter */
+        .splitter {
+            background-color: #3c3c3c;
+            transition: background-color 0.2s;
+            flex-shrink: 0;
+        }
+        .splitter:hover { background-color: #007acc; }
+        .splitter.dragging { background-color: #007acc; }
+        .splitter-horizontal { width: 4px; cursor: col-resize; }
+        .splitter-vertical { height: 4px; cursor: row-resize; }
+
+        /* Status Bar */
+        .status-bar {
+            display: none;
+        }
+        .status-item { display: flex; align-items: center; gap: 4px; }
+        .status-bar .spacer { flex: 1; }
+
+        /* Modal */
+        .modal-overlay {
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+            background-color: rgba(0,0,0,0.6);
+            display: none; justify-content: center; align-items: center;
+            z-index: 3000;
+        }
+        .modal-overlay.visible { display: flex; }
+        .modal {
+            background-color: #2d2d2d; border: 1px solid #3c3c3c;
+            border-radius: 6px; padding: 20px;
+            min-width: 400px; max-width: 500px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+        }
+        .modal h3 { color: #ffffff; margin-bottom: 16px; font-size: 16px; }
+        .form-group { margin-bottom: 12px; }
+        .form-group label {
+            display: block; margin-bottom: 4px;
+            color: #cccccc; font-size: 12px;
+        }
+        .form-group input, .form-group select {
+            width: 100%; padding: 6px 8px;
+            background-color: #3c3c3c; border: 1px solid #555;
+            color: #cccccc; border-radius: 3px; font-size: 13px;
+        }
+        .form-group input:focus, .form-group select:focus {
+            outline: none; border-color: #007acc;
+        }
+        .form-group small {
+            display: block;
+            margin-top: 4px;
+            color: #8a8a8a;
+            font-size: 11px;
+        }
+        .inline-actions {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .readonly-output {
+            background-color: #252526 !important;
+            color: #ffffff;
+            font-family: 'Cascadia Code', 'Consolas', monospace;
+        }
+        .pairing-code {
+            font-size: 20px !important;
+            letter-spacing: 4px;
+            text-align: center;
+            font-weight: bold;
+        }
+        .modal-buttons {
+            display: flex; justify-content: flex-end;
+            gap: 8px; margin-top: 16px;
+        }
+        .btn {
+            padding: 6px 16px; border: none; border-radius: 3px;
+            cursor: pointer; font-size: 12px;
+        }
+        .btn-primary { background-color: #0e639c; color: white; }
+        .btn-primary:hover { background-color: #1177bb; }
+        .btn-secondary { background-color: #3c3c3c; color: #cccccc; }
+        .btn-secondary:hover { background-color: #505050; }
+        .checkbox-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: #cccccc;
+            font-size: 12px;
+            margin-top: 8px;
+        }
+        .checkbox-row input {
+            width: auto;
+        }
+
+        /* AI Panel */
+        .ai-panel {
+            position: fixed;
+            top: 48px;
+            right: 16px;
+            width: 420px;
+            max-width: calc(100vw - 32px);
+            max-height: calc(100vh - 64px);
+            display: none;
+            flex-direction: column;
+            background: #252526;
+            border: 1px solid #3c3c3c;
+            border-radius: 10px;
+            box-shadow: 0 16px 40px rgba(0,0,0,0.45);
+            z-index: 2600;
+            overflow: hidden;
+        }
+        .ai-panel.visible { display: flex; }
+        .ai-panel-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 12px;
+            border-bottom: 1px solid #3c3c3c;
+            background: #2d2d2d;
+        }
+        .ai-panel-title {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+        .ai-panel-title strong {
+            font-size: 13px;
+            color: #fff;
+        }
+        .ai-panel-title span {
+            font-size: 11px;
+            color: #8a8a8a;
+        }
+        .ai-panel-body {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            padding: 12px;
+            overflow: auto;
+        }
+        .ai-panel details {
+            border: 1px solid #3c3c3c;
+            border-radius: 8px;
+            background: #1f1f1f;
+            padding: 10px 12px;
+        }
+        .ai-panel details summary {
+            cursor: pointer;
+            color: #fff;
+            font-size: 12px;
+        }
+        .ai-panel-section {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .ai-panel textarea,
+        .ai-panel select,
+        .ai-panel input {
+            width: 100%;
+            padding: 8px 10px;
+            background: #1e1e1e;
+            border: 1px solid #555;
+            color: #d4d4d4;
+            border-radius: 6px;
+            font-size: 12px;
+        }
+        .ai-panel textarea {
+            min-height: 92px;
+            resize: vertical;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        .ai-panel textarea:focus,
+        .ai-panel select:focus,
+        .ai-panel input:focus {
+            outline: none;
+            border-color: #007acc;
+        }
+        .ai-prompt-actions {
+            display: flex;
+            gap: 8px;
+        }
+        .ai-prompt-actions .btn {
+            flex: 1;
+        }
+        .ai-context-preview {
+            border: 1px solid #3c3c3c;
+            border-radius: 8px;
+            background: #1f1f1f;
+            padding: 10px 12px;
+            font-size: 11px;
+            color: #8a8a8a;
+            white-space: pre-wrap;
+            max-height: 100px;
+            overflow: auto;
+        }
+        .ai-response {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .ai-response-meta {
+            font-size: 11px;
+            color: #8a8a8a;
+        }
+        .ai-response-card {
+            border: 1px solid #3c3c3c;
+            border-radius: 8px;
+            background: #1f1f1f;
+            overflow: hidden;
+        }
+        .ai-response-text {
+            padding: 10px 12px;
+            font-size: 12px;
+            color: #d4d4d4;
+            white-space: pre-wrap;
+            line-height: 1.55;
+        }
+        .ai-code-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            padding: 8px 10px;
+            border-bottom: 1px solid #3c3c3c;
+            background: #2a2a2a;
+            font-size: 11px;
+            color: #8a8a8a;
+        }
+        .ai-code-actions {
+            display: flex;
+            gap: 6px;
+        }
+        .ai-mini-btn {
+            padding: 4px 8px;
+            border: 1px solid #555;
+            background: #3c3c3c;
+            color: #d4d4d4;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 11px;
+        }
+        .ai-mini-btn:hover {
+            background: #505050;
+        }
+        .ai-code-body {
+            margin: 0;
+            padding: 12px;
+            white-space: pre-wrap;
+            overflow: auto;
+            font-size: 12px;
+            line-height: 1.55;
+            color: #f5f5f5;
+            background: #161616;
+            font-family: 'Cascadia Code', 'Consolas', monospace;
+        }
+        .ai-empty {
+            border: 1px dashed #3c3c3c;
+            border-radius: 8px;
+            padding: 14px 12px;
+            font-size: 12px;
+            color: #8a8a8a;
+            white-space: pre-wrap;
+        }
+
+        /* Context Menu */
+        .context-menu {
+            position: fixed;
+            background-color: #2d2d2d; border: 1px solid #3c3c3c;
+            box-shadow: 2px 2px 8px rgba(0,0,0,0.5);
+            z-index: 2000; display: none;
+            border-radius: 4px; overflow: hidden; min-width: 160px;
+        }
+        .context-menu.visible { display: block; }
+        .context-menu-item {
+            padding: 8px 16px; cursor: pointer; font-size: 12px;
+            display: flex; align-items: center; gap: 8px;
+        }
+        .context-menu-item:hover { background-color: #094771; }
+        .context-menu-separator {
+            height: 1px; background-color: #3c3c3c; margin: 4px 0;
+        }
+
+        /* Toast */
+        .toast-container {
+            position: fixed; top: 50px; right: 16px;
+            z-index: 4000; display: flex; flex-direction: column; gap: 8px;
+        }
+        .toast {
+            background-color: #2d2d2d; border: 1px solid #3c3c3c;
+            border-left: 3px solid #007acc;
+            padding: 10px 16px; border-radius: 3px;
+            font-size: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+            animation: slideIn 0.3s ease-out; max-width: 300px;
+        }
+        .toast.success { border-left-color: #4ec9b0; }
+        .toast.error { border-left-color: #f44747; }
+        .toast.warning { border-left-color: #cca700; }
+        @keyframes slideIn {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+    </style>
+</head>
+<body>
+    <!-- Tab Bar -->
+    <div class="tab-bar">
+        <div class="tab-strip" id="tabBar">
+            <button class="tab-add" onclick="window.app.createNewTab()" title="新建标签页">+</button>
+        </div>
+        <div class="tab-bar-actions">
+            <button class="tab-icon-btn connection-status status-local" id="connStatus" onclick="window.app.toggleConnection()" title="本地模式" aria-label="连接状态"></button>
+            <button class="tab-icon-btn" onclick="window.app.toggleAiPanel()" title="AI 助手" aria-label="AI 助手">AI</button>
+            <button class="tab-icon-btn" onclick="window.app.showSettings()" title="设置" aria-label="设置">⚙</button>
+        </div>
+    </div>
+
+    <!-- Main Container -->
+    <div class="main-container">
+        <div class="terminal-area" id="terminalArea"></div>
+    </div>
+
+    <!-- Status Bar -->
+    <div class="status-bar">
+        <span class="status-item" id="statusMode">本地终端</span>
+        <span class="status-item" id="statusTabs">标签: 1</span>
+        <span class="spacer"></span>
+        <span class="status-item" id="statusSize">80x24</span>
+        <span class="status-item" id="statusShell">pwsh</span>
+    </div>
+
+    <!-- Split Menu -->
+    <div class="split-menu" id="splitMenu">
+        <div class="split-menu-item" onclick="window.app.splitPane('right')">
+            <span class="icon">⬜➡</span> 向右分割
+        </div>
+        <div class="split-menu-item" onclick="window.app.splitPane('down')">
+            <span class="icon">⬜⬇</span> 向下分割
+        </div>
+        <div class="split-menu-item" onclick="window.app.splitPane('left')">
+            <span class="icon">⬅⬜</span> 向左分割
+        </div>
+        <div class="split-menu-item" onclick="window.app.splitPane('up')">
+            <span class="icon">⬆⬜</span> 向上分割
+        </div>
+    </div>
+
+    <!-- Terminal Context Menu -->
+    <div class="context-menu" id="contextMenu">
+        <div class="context-menu-item" onclick="window.app.copyActiveTerminal()">复制</div>
+        <div class="context-menu-item" onclick="window.app.pasteActiveTerminal()">粘贴</div>
+        <div class="context-menu-item" onclick="window.app.selectAllActiveTerminal()">全选</div>
+        <div class="context-menu-separator"></div>
+        <div class="context-menu-item" onclick="window.app.createNewTab()">新建标签页</div>
+        <div class="context-menu-separator"></div>
+        <div class="context-menu-item" onclick="window.app.showSplitMenu(event, this)">✂️ 分割屏幕</div>
+        <div class="context-menu-item" onclick="window.app.unsplitPane()">📐 取消分割</div>
+        <div class="context-menu-separator"></div>
+        <div class="context-menu-item" onclick="window.app.closeCurrentPane()">❌ 关闭面板</div>
+    </div>
+
+    <!-- Settings Modal -->
+    <div class="modal-overlay" id="settingsModal">
+        <div class="modal">
+            <h3>⚙ 设置</h3>
+            <details class="form-group" style="padding:10px 12px;background:#252526;border:1px solid #3c3c3c;border-radius:4px;">
+                <summary style="cursor:pointer;color:#fff;font-size:13px;">首次使用</summary>
+                <small>1. 先确认服务器地址。</small>
+                <small>2. 点击“注册本机”生成桌面设备 Token。</small>
+                <small>3. 再点击“生成配对码”，到手机端输入 6 位配对码完成绑定。</small>
+                <small>4. 返回主界面后，用设备 Token 连接服务器。</small>
+            </details>
+            <div class="form-group">
+                <label>默认 Shell</label>
+                <select id="settingShell" onchange="window.app.updateCustomShellVisibility()">
+                    <option value="pwsh">PowerShell 7 (pwsh)</option>
+                    <option value="powershell">Windows PowerShell</option>
+                    <option value="cmd">命令提示符 (cmd)</option>
+                    <option value="bash">Git Bash</option>
+                    <option value="custom">自定义</option>
+                </select>
+            </div>
+            <div class="form-group" id="customShellGroup" style="display:none;">
+                <label>自定义 Shell 路径</label>
+                <input type="text" id="settingCustomShell" placeholder="C:\path\to\shell.exe" />
+            </div>
+            <div class="form-group">
+                <label>字体大小</label>
+                <input type="number" id="settingFontSize" value="14" min="10" max="24" />
+            </div>
+            <div class="form-group">
+                <label>服务器地址 (自动保存)</label>
+                <input type="text" id="settingServerUrl" placeholder="wss://nas.smarthome2020.top:7373/ws" />
+            </div>
+            <div class="form-group">
+                <label>桌面设备名称</label>
+                <input type="text" id="settingDeviceName" placeholder="我的桌面电脑" />
+            </div>
+            <div class="form-group">
+                <label>桌面设备 Token</label>
+                <input type="text" id="settingDeviceToken" placeholder="注册后自动生成" />
+                <small>连接服务器与生成配对码都使用这个 Token，不是手机输入的 6 位配对码。</small>
+            </div>
+            <div class="form-group">
+                <label>设备注册</label>
+                <div class="inline-actions">
+                    <button class="btn btn-secondary" onclick="window.app.registerDesktopDevice()">注册本机</button>
+                </div>
+                <small>首次使用先注册一次，成功后会自动保存 Token。</small>
+            </div>
+            <div class="form-group">
+                <label>手机配对码</label>
+                <input type="text" id="pairingCodeDisplay" class="readonly-output pairing-code" placeholder="点击生成" readonly />
+                <small id="pairingCodeHint">配对码有效期 5 分钟，在手机端输入后即可绑定。</small>
+            </div>
+            <div class="form-group">
+                <div class="inline-actions">
+                    <button class="btn btn-primary" onclick="window.app.generatePairingCode()">生成配对码</button>
+                </div>
+            </div>
+            <div class="form-group">
+                <label>启动时自动连接</label>
+                <select id="settingAutoConnect">
+                    <option value="true" selected>是</option>
+                    <option value="false">否</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>断线自动重连</label>
+                <select id="settingAutoReconnect">
+                    <option value="true" selected>是</option>
+                    <option value="false">否</option>
+                </select>
+            </div>
+            <div class="modal-buttons">
+                <button class="btn btn-secondary" onclick="window.app.closeSettings()">取消</button>
+                <button class="btn btn-primary" onclick="window.app.saveSettings()">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="ai-panel" id="aiPanel">
+        <div class="ai-panel-header">
+            <div class="ai-panel-title">
+                <strong>AI 助手</strong>
+                <span>结合当前终端上下文生成命令</span>
+            </div>
+            <div style="display:flex;gap:8px;">
+                <button class="btn btn-sm" onclick="window.app.toggleAiSettings()" id="aiSettingsBtn" title="设置">⚙️</button>
+                <button class="tab-icon-btn" onclick="window.app.closeAiPanel()" title="关闭 AI 助手" aria-label="关闭 AI 助手">×</button>
+            </div>
+        </div>
+        <div class="ai-panel-body">
+            <div class="ai-panel-section" id="aiSettingsSection" style="display:none;">
+                <div class="form-group" style="margin-bottom:0;">
+                    <label>厂商</label>
+                    <select id="aiPreset" onchange="window.app.applyAiPreset(this.value)">
+                        <option value="litellm">LiteLLM / 统一网关</option>
+                        <option value="openai">OpenAI</option>
+                        <option value="deepseek">DeepSeek</option>
+                        <option value="moonshot">Moonshot / Kimi</option>
+                        <option value="dashscope">阿里云百炼 / Qwen</option>
+                        <option value="zhipu">智谱 / GLM</option>
+                        <option value="volcengine">火山方舟 / 豆包</option>
+                        <option value="siliconflow">SiliconFlow</option>
+                        <option value="custom">自定义兼容端点</option>
+                    </select>
+                </div>
+                <div class="form-group" style="margin-bottom:0;">
+                    <label>模型</label>
+                    <select id="aiModelSelect" onchange="window.app.handleAiModelSelectChange()"></select>
+                    <input type="text" id="aiModelCustom" placeholder="输入自定义模型名或 Endpoint / Bot ID" style="display:none;margin-top:8px;" />
+                    <small id="aiModelHint">优先从下拉选择，只有账号模型不在列表里时再用“自定义输入”。</small>
+                </div>
+                <div class="form-group" style="margin-bottom:0;">
+                    <label>API Key</label>
+                    <input type="password" id="aiApiKey" placeholder="sk-..." />
+                    <small id="aiPresetHint">推荐只改这三项：厂商、模型、API Key。其余配置都收在高级设置。</small>
+                </div>
+
+                <details>
+                    <summary>高级设置</summary>
+                    <div class="ai-panel-section" style="margin-top:10px;">
+                        <div class="form-group" style="margin-bottom:0;">
+                            <label>Base URL</label>
+                            <input type="text" id="aiBaseUrl" placeholder="http://127.0.0.1:4000/v1" />
+                            <small id="aiBaseUrlHint">官方预设的 Base URL 已内置，通常不需要改。</small>
+                        </div>
+                        <div class="checkbox-row">
+                            <input type="checkbox" id="aiUseTerminalContext" checked />
+                            <label for="aiUseTerminalContext" style="margin:0;">附带当前终端最近输出</label>
+                        </div>
+                        <div class="checkbox-row">
+                            <input type="checkbox" id="aiPreferSelection" checked />
+                            <label for="aiPreferSelection" style="margin:0;">优先使用当前选中文本作为上下文</label>
+                        </div>
+                        <div class="form-group" style="margin-bottom:0;">
+                            <label>上下文行数</label>
+                            <input type="number" id="aiContextLines" min="10" max="300" step="10" />
+                        </div>
+                    </div>
+                </details>
+
+                <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px;">
+                    <button class="btn btn-secondary" onclick="window.app.cancelAiSettings()">取消</button>
+                    <button class="btn btn-primary" onclick="window.app.saveAiConfig()">保存设置</button>
+                </div>
+            </div>
+
+            <div class="ai-empty" id="aiConfigNotice" style="display:none;"></div>
+
+            <div class="ai-panel-section">
+                <div class="form-group" style="margin-bottom:0;">
+                    <label>你想让 AI 帮你做什么</label>
+                    <textarea id="aiPrompt" placeholder="例如：帮我分析当前报错，并给出可直接执行的修复命令。"></textarea>
+                </div>
+                <div class="ai-prompt-actions">
+                    <button class="btn btn-primary" id="aiSendBtn" onclick="window.app.requestAiCommand()">生成命令</button>
+                    <button class="btn btn-secondary" onclick="window.app.clearAiResponse()">清空</button>
+                </div>
+            </div>
+
+            <div class="ai-panel-section">
+                <div class="form-group" style="margin-bottom:0;">
+                    <label>将发送的上下文</label>
+                    <div class="ai-context-preview" id="aiContextPreview">请先在当前标签页中选中一个终端，上下文才会生效。</div>
+                </div>
+            </div>
+
+            <div class="ai-response" id="aiResponse">
+                <div class="ai-empty">生成结果会显示在这里。代码块支持复制、插入终端、直接执行。</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Container -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <script src="./vendor/xterm/xterm.js"></script>
+    <script src="./vendor/xterm/addon-fit.js"></script>
+    <script src="./vendor/xterm/addon-web-links.js"></script>
+    <script>
+        window.addEventListener('error', (event) => {
+            const message = '[TTY1] 页面错误: ' + event.message + ' @ ' + event.filename + ':' + event.lineno;
+            console.error(message, event.error);
+            document.body.innerHTML = '<div style="padding:24px;color:#fff;background:#1e1e1e;font-family:Consolas,monospace;">' +
+                '<h2 style="margin:0 0 12px;">TTY1 页面运行失败</h2>' +
+                '<div style="color:#f44747;white-space:pre-wrap;">' + message + '</div>' +
+                '</div>';
+        });
+
+        window.addEventListener('unhandledrejection', (event) => {
+            const reason = event.reason && event.reason.stack ? event.reason.stack : String(event.reason);
+            console.error('[TTY1] promise rejection', reason);
+        });
+
+        const invoke = window.__TAURI__?.core?.invoke;
+        const listen = window.__TAURI__?.event?.listen;
+        const XtermTerminal = window.Terminal;
+        const XtermFitAddon = window.FitAddon?.FitAddon;
+        const XtermWebLinksAddon = window.WebLinksAddon?.WebLinksAddon;
+
+        function pushDebugLog(message, payload) {
+            const text = payload === undefined
+                ? String(message)
+                : String(message) + ' ' + JSON.stringify(payload);
+            console.log('[TTY1]', text);
+            if (typeof invoke !== 'undefined') {
+                invoke('debug_log', { message: text }).catch(() => {});
+            }
+        }
+
+        async function writeClipboardText(text) {
+            if (navigator.clipboard?.writeText) {
+                await navigator.clipboard.writeText(text);
+                return;
+            }
+
+            const input = document.createElement('textarea');
+            input.value = text;
+            input.setAttribute('readonly', 'readonly');
+            input.style.position = 'fixed';
+            input.style.opacity = '0';
+            input.style.pointerEvents = 'none';
+            document.body.appendChild(input);
+            input.select();
+            const copied = document.execCommand('copy');
+            input.remove();
+            if (!copied) throw new Error('浏览器剪贴板接口不可用');
+        }
+
+        async function readClipboardText() {
+            if (navigator.clipboard?.readText) {
+                return await navigator.clipboard.readText();
+            }
+            throw new Error('当前环境不支持直接读取系统剪贴板');
+        }
+
+        function escapeHtml(value) {
+            return String(value || '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function stripAnsi(text) {
+            return String(text || '')
+                .replace(/\u001B\][^\u0007]*(\u0007|\u001B\\)/g, ' ')
+                .replace(/\u001B\[[0-9;?]*[ -/]*[@-~]/g, ' ')
+                .replace(/\u001B[@-_]/g, ' ');
+        }
+
+        function collapseWhitespace(text) {
+            return String(text || '').replace(/\s+/g, ' ').trim();
+        }
+
+        function clipText(text, maxLength) {
+            const normalized = collapseWhitespace(text);
+            if (normalized.length <= maxLength) return normalized;
+            return normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd() + '…';
+        }
+
+        function trimReplayBuffer(text, maxLength) {
+            const value = String(text || '');
+            if (value.length <= maxLength) return value;
+            return value.slice(value.length - maxLength);
+        }
+
+        function extractMeaningfulLine(text) {
+            const lines = stripAnsi(text)
+                .replace(/\r/g, '\n')
+                .split('\n')
+                .map((line) => collapseWhitespace(line))
+                .filter(Boolean);
+            return lines.length > 0 ? lines[lines.length - 1] : '';
+        }
+
+        function looksLikeShellPrompt(line) {
+            if (!line) return false;
+            return /^PS [^>]+>\s*$/.test(line)
+                || /^(?:[A-Za-z]:)?[^<>{}\n\r]*[#$>]\s*$/.test(line)
+                || /^[$#>]\s*$/.test(line);
+        }
+
+        function normalizeApiBaseUrl(value) {
+            return String(value || '').trim().replace(/\/+$/, '');
+        }
+
+        function joinApiUrl(baseUrl, path) {
+            const normalizedBaseUrl = normalizeApiBaseUrl(baseUrl);
+            if (!normalizedBaseUrl) return '';
+            if (/\/(?:chat\/completions|bots\/chat\/completions|messages|responses)$/i.test(normalizedBaseUrl)) {
+                return normalizedBaseUrl;
+            }
+            if (!path) return normalizedBaseUrl;
+            return normalizedBaseUrl + (path.startsWith('/') ? path : '/' + path);
+        }
+
+        function extractAssistantMessageText(value) {
+            if (typeof value === 'string') return value;
+            if (Array.isArray(value)) {
+                return value.map((item) => {
+                    if (typeof item === 'string') return item;
+                    if (item && typeof item.text === 'string') return item.text;
+                    if (item && typeof item.content === 'string') return item.content;
+                    return '';
+                }).join('\n').trim();
+            }
+            if (value && typeof value.text === 'string') return value.text;
+            if (value && typeof value.content === 'string') return value.content;
+            return '';
+        }
+
+        function parseAiResponseText(text) {
+            const source = String(text || '');
+            const codeBlocks = [];
+            const plainParts = [];
+            const pattern = /```([a-zA-Z0-9_.+-]*)\n?([\s\S]*?)```/g;
+            let lastIndex = 0;
+            let match = null;
+
+            while ((match = pattern.exec(source)) !== null) {
+                const before = source.slice(lastIndex, match.index);
+                if (before.trim()) plainParts.push(before.trim());
+                codeBlocks.push({
+                    language: match[1] || '',
+                    code: (match[2] || '').trim()
+                });
+                lastIndex = pattern.lastIndex;
+            }
+
+            const tail = source.slice(lastIndex);
+            if (tail.trim()) plainParts.push(tail.trim());
+
+            return {
+                plainText: plainParts.join('\n\n').replace(/\n{3,}/g, '\n\n').trim(),
+                codeBlocks: codeBlocks.filter((item) => item.code)
+            };
+        }
+
+        pushDebugLog('script:loaded', {
+            hasInvoke: typeof invoke !== 'undefined',
+            hasListen: typeof listen !== 'undefined',
+            location: window.location.href
+        });
+
+        const AI_PRESETS = {
+            litellm: {
+                label: 'LiteLLM / 统一网关',
+                baseUrl: 'http://127.0.0.1:4000',
+                model: 'openai/gpt-5-mini',
+                models: [
+                    { value: 'openai/gpt-5-mini', label: 'OpenAI / gpt-5-mini' },
+                    { value: 'openai/gpt-5.1', label: 'OpenAI / gpt-5.1' },
+                    { value: 'openai/gpt-4.1-mini', label: 'OpenAI / gpt-4.1-mini' },
+                    { value: 'deepseek/deepseek-chat', label: 'DeepSeek / deepseek-chat' },
+                    { value: 'deepseek/deepseek-reasoner', label: 'DeepSeek / deepseek-reasoner' },
+                    { value: 'moonshot/kimi-k2-0905-preview', label: 'Moonshot / kimi-k2-0905-preview' },
+                    { value: 'qwen/qwen-coder-plus-latest', label: 'Qwen / qwen-coder-plus-latest' },
+                    { value: 'qwen/qwen-plus-latest', label: 'Qwen / qwen-plus-latest' },
+                    { value: 'zhipu/glm-4.7', label: 'Zhipu / glm-4.7' },
+                    { value: 'volcengine/doubao-seed-2-0-pro-260215', label: 'Doubao / doubao-seed-2-0-pro-260215' },
+                    { value: 'siliconflow/Qwen/Qwen3-Coder-480B-A35B-Instruct', label: 'SiliconFlow / Qwen3-Coder' }
+                ],
+                chatPath: '/chat/completions',
+                editableBaseUrl: true,
+                hint: 'LiteLLM 官方默认代理端口是 4000。这里走统一 OpenAI-compatible 网关，最省维护。'
+            },
+            openai: {
+                label: 'OpenAI',
+                baseUrl: 'https://api.openai.com/v1',
+                model: 'gpt-5-mini',
+                models: [
+                    { value: 'gpt-5-mini', label: 'gpt-5-mini' },
+                    { value: 'gpt-5.1', label: 'gpt-5.1' },
+                    { value: 'gpt-5-nano', label: 'gpt-5-nano' },
+                    { value: 'gpt-5', label: 'gpt-5' },
+                    { value: 'gpt-4.1', label: 'gpt-4.1' },
+                    { value: 'gpt-4.1-mini', label: 'gpt-4.1-mini' },
+                    { value: 'gpt-4.1-nano', label: 'gpt-4.1-nano' }
+                ],
+                chatPath: '/chat/completions',
+                editableBaseUrl: false,
+                hint: 'OpenAI 官方 Models 页面当前包含 gpt-5.1、gpt-5-mini、gpt-5、gpt-4.1 等常用型号。'
+            },
+            deepseek: {
+                label: 'DeepSeek',
+                baseUrl: 'https://api.deepseek.com',
+                model: 'deepseek-chat',
+                models: [
+                    { value: 'deepseek-chat', label: 'deepseek-chat' },
+                    { value: 'deepseek-reasoner', label: 'deepseek-reasoner' }
+                ],
+                chatPath: '/chat/completions',
+                editableBaseUrl: false,
+                hint: 'DeepSeek 官方文档当前 base_url 是 https://api.deepseek.com；这两个模型都对应 DeepSeek-V3.2。'
+            },
+            moonshot: {
+                label: 'Moonshot / Kimi',
+                baseUrl: 'https://api.moonshot.cn/v1',
+                model: 'kimi-k2-0905-preview',
+                models: [
+                    { value: 'kimi-k2-0905-preview', label: 'kimi-k2-0905-preview' },
+                    { value: 'kimi-k2-0711-preview', label: 'kimi-k2-0711-preview' },
+                    { value: 'kimi-k2-turbo-preview', label: 'kimi-k2-turbo-preview' },
+                    { value: 'kimi-k2-thinking', label: 'kimi-k2-thinking' },
+                    { value: 'kimi-k2-thinking-turbo', label: 'kimi-k2-thinking-turbo' },
+                    { value: 'moonshot-v1-128k', label: 'moonshot-v1-128k' }
+                ],
+                chatPath: '/chat/completions',
+                editableBaseUrl: false,
+                hint: 'Moonshot 官方文档当前常用模型以 K2 系列为主，默认填入最新预览型号 kimi-k2-0905-preview。'
+            },
+            dashscope: {
+                label: '阿里云百炼 / Qwen',
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                model: 'qwen-plus-latest',
+                models: [
+                    { value: 'qwen-coder-plus-latest', label: 'qwen-coder-plus-latest' },
+                    { value: 'qwen-coder-turbo-latest', label: 'qwen-coder-turbo-latest' },
+                    { value: 'qwen3-coder-plus', label: 'qwen3-coder-plus' },
+                    { value: 'qwen3-coder-flash', label: 'qwen3-coder-flash' },
+                    { value: 'qwen-plus-latest', label: 'qwen-plus-latest' },
+                    { value: 'qwen-max-latest', label: 'qwen-max-latest' },
+                    { value: 'qwen-turbo-latest', label: 'qwen-turbo-latest' }
+                ],
+                chatPath: '/chat/completions',
+                editableBaseUrl: false,
+                hint: '百炼兼容模式可以直接用 Chat Completions；默认填最新版别名，减少快照下线影响。'
+            },
+            zhipu: {
+                label: '智谱 / GLM',
+                baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+                model: 'glm-4.7',
+                models: [
+                    { value: 'glm-5', label: 'glm-5' },
+                    { value: 'glm-5-turbo', label: 'glm-5-turbo' },
+                    { value: 'glm-4.7', label: 'glm-4.7' },
+                    { value: 'glm-4.7-flash', label: 'glm-4.7-flash' },
+                    { value: 'glm-4.6', label: 'glm-4.6' },
+                    { value: 'glm-4.5-air', label: 'glm-4.5-air' },
+                    { value: 'glm-4.5-airx', label: 'glm-4.5-airx' }
+                ],
+                chatPath: '/chat/completions',
+                editableBaseUrl: true,
+                hint: '智谱标准接口默认是 /api/paas/v4；如果你用 Coding Plan，可在高级设置把 Base URL 切到 /api/coding/paas/v4。'
+            },
+            volcengine: {
+                label: '火山引擎 / 豆包',
+                baseUrl: 'https://operator.las.cn-beijing.volces.com/api/v1',
+                model: 'doubao-seed-2-0-pro-260215',
+                models: [
+                    { value: 'doubao-seed-2-0-pro-260215', label: 'doubao-seed-2-0-pro-260215' },
+                    { value: 'doubao-seed-1-8-251228', label: 'doubao-seed-1-8-251228' },
+                    { value: 'doubao-seed-1-6-251015', label: 'doubao-seed-1-6-251015' },
+                    { value: 'doubao-seed-1-6-thinking-250615', label: 'doubao-seed-1-6-thinking-250615' },
+                    { value: 'doubao-seed-1-6-flash-250828', label: 'doubao-seed-1-6-flash-250828' },
+                    { value: 'doubao-1-5-pro-32k-250115', label: 'doubao-1-5-pro-32k-250115' }
+                ],
+                chatPath: '/chat/completions',
+                botPath: '/bots/chat/completions',
+                editableBaseUrl: true,
+                hint: '火山最新公开文档覆盖到了 2.0、1.8、1.6 系列；如果你的账号走 Endpoint / Bot API，可在高级设置改 Base URL 或直接填自定义 ID。'
+            },
+            siliconflow: {
+                label: 'SiliconFlow',
+                baseUrl: 'https://api.siliconflow.com/v1',
+                model: 'Qwen/Qwen3-Coder-480B-A35B-Instruct',
+                models: [
+                    { value: 'Qwen/Qwen3-Coder-480B-A35B-Instruct', label: 'Qwen/Qwen3-Coder-480B-A35B-Instruct' },
+                    { value: 'deepseek-ai/DeepSeek-V3.2', label: 'deepseek-ai/DeepSeek-V3.2' },
+                    { value: 'deepseek-ai/DeepSeek-R1', label: 'deepseek-ai/DeepSeek-R1' },
+                    { value: 'moonshotai/Kimi-K2-Instruct', label: 'moonshotai/Kimi-K2-Instruct' },
+                    { value: 'zai-org/GLM-4.5V', label: 'zai-org/GLM-4.5V' }
+                ],
+                chatPath: '/chat/completions',
+                editableBaseUrl: false,
+                hint: 'SiliconFlow 官方模型库当前常见选项包含 Qwen3-Coder、DeepSeek-V3.2、DeepSeek-R1、Kimi-K2 和 GLM-4.5V。'
+            },
+            custom: {
+                label: '自定义兼容端点',
+                baseUrl: '',
+                model: '',
+                models: [],
+                chatPath: '/chat/completions',
+                editableBaseUrl: true,
+                hint: '自定义 OpenAI-compatible、LiteLLM，或其它兼容网关。'
+            }
+        };
+
+        const DEFAULT_SERVER_URL = 'wss://nas.smarthome2020.top:7373/ws';
+        const TERMINAL_FONT_SIZE_DEFAULT = 14;
+        const TERMINAL_FONT_SIZE_MIN = 10;
+        const TERMINAL_FONT_SIZE_MAX = 24;
+        const TERMINAL_FONT_SIZE_STEP = 1;
+
+        function normalizeServerUrl(url) {
+            return String(url || '').trim();
+        }
+
+        function isCustomServerUrl(url) {
+            const normalized = normalizeServerUrl(url);
+            return normalized !== '' && normalized !== DEFAULT_SERVER_URL;
+        }
+
+        function normalizeTerminalFontSize(value) {
+            const parsed = Number.parseInt(value, 10);
+            if (!Number.isFinite(parsed)) return TERMINAL_FONT_SIZE_DEFAULT;
+            return Math.max(TERMINAL_FONT_SIZE_MIN, Math.min(TERMINAL_FONT_SIZE_MAX, parsed));
+        }
+
+        function getTerminalFontShortcutAction(event) {
+            if (!event || !(event.ctrlKey || event.metaKey) || event.altKey) return null;
+
+            const key = String(event.key || '').toLowerCase();
+            const code = String(event.code || '');
+
+            if (key === '+' || key === '=' || key === 'add' || code === 'Equal' || code === 'NumpadAdd') {
+                return 'increase';
+            }
+
+            if (key === '-' || key === '_' || key === 'subtract' || code === 'Minus' || code === 'NumpadSubtract') {
+                return 'decrease';
+            }
+
+            return null;
+        }
+
+        class SettingsManager {
+            constructor() {
+                this.defaults = {
+                    shell: 'pwsh', customShell: '', fontSize: TERMINAL_FONT_SIZE_DEFAULT,
+                    serverUrl: DEFAULT_SERVER_URL, serverToken: '',
+                    deviceName: '我的桌面电脑',
+                    autoConnect: true, autoReconnect: true,
+                    reconnectInterval: 3000, maxReconnectAttempts: 10,
+                    aiPreset: 'litellm',
+                    aiBaseUrl: AI_PRESETS.litellm.baseUrl,
+                    aiModel: AI_PRESETS.litellm.model,
+                    aiApiKey: '',
+                    aiProviderConfigs: {},
+                    aiUseTerminalContext: true,
+                    aiPreferSelection: true,
+                    aiContextLines: 80
+                };
+                this.settings = { ...this.defaults };
+                this.load();
+            }
+            load() {
+                try {
+                    const saved = localStorage.getItem('TermSync-settings');
+                    if (saved) this.settings = { ...this.defaults, ...JSON.parse(saved) };
+                    this.settings.fontSize = normalizeTerminalFontSize(this.settings.fontSize);
+                } catch (e) { console.warn('Load settings failed:', e); }
+            }
+            save() {
+                try { localStorage.setItem('TermSync-settings', JSON.stringify(this.settings)); }
+                catch (e) { console.warn('Save settings failed:', e); }
+            }
+            get(k) { return this.settings[k]; }
+            set(k, v) {
+                this.settings[k] = k === 'fontSize' ? normalizeTerminalFontSize(v) : v;
+                this.save();
+            }
+            getAll() { return { ...this.settings }; }
+        }
+
+        class SplitTree {
+            constructor(containerId) {
+                this.container = document.getElementById(containerId);
+                this.root = null;
+                this.panes = new Map();
+                this.paneElements = new Map();
+                this.nextPaneId = 1;
+            }
+            init() {
+                this.root = this.createLeaf();
+                this.render();
+                return this.root.paneId;
+            }
+            setRoot(root) {
+                this.root = root;
+            }
+            getNode(paneId) {
+                return this.panes.get(paneId) || null;
+            }
+            createLeaf() {
+                const paneId = this.nextPaneId++;
+                const node = { type: 'leaf', paneId, size: 1 };
+                this.panes.set(paneId, node);
+                return node;
+            }
+            cloneNode(node) {
+                if (!node) return null;
+                if (node.type === 'leaf') {
+                    return {
+                        type: 'leaf',
+                        paneId: node.paneId,
+                        size: typeof node.size === 'number' ? node.size : 1
+                    };
+                }
+                return {
+                    type: node.type === 'vertical' ? 'vertical' : 'horizontal',
+                    size: typeof node.size === 'number' ? node.size : 1,
+                    children: (node.children || []).map((child) => this.cloneNode(child)).filter(Boolean)
+                };
+            }
+            rebuildRegistry(roots) {
+                this.panes.clear();
+                this.nextPaneId = 1;
+                for (const root of roots) {
+                    this._registerNode(root);
+                }
+            }
+            _registerNode(node) {
+                if (!node) return;
+                if (node.type === 'leaf') {
+                    this.panes.set(node.paneId, node);
+                    this.nextPaneId = Math.max(this.nextPaneId, node.paneId + 1);
+                    return;
+                }
+                for (const child of node.children || []) {
+                    this._registerNode(child);
+                }
+            }
+            collectPaneIds(node) {
+                if (!node) return [];
+                if (node.type === 'leaf') return [node.paneId];
+                return node.children.flatMap(child => this.collectPaneIds(child));
+            }
+            splitPane(targetPaneId, direction) {
+                const target = this.panes.get(targetPaneId);
+                if (!target) return null;
+                const newLeaf = this.createLeaf();
+                const parent = {
+                    type: (direction === 'right' || direction === 'left') ? 'horizontal' : 'vertical',
+                    children: [], size: target.size
+                };
+                if (direction === 'left' || direction === 'up') {
+                    parent.children.push(newLeaf, target);
+                } else {
+                    parent.children.push(target, newLeaf);
+                }
+                target.size = 0.5;
+                newLeaf.size = 0.5;
+                this.replaceNode(target, parent);
+                this.render();
+                return newLeaf.paneId;
+            }
+            replaceNode(oldNode, newNode) {
+                if (this.root === oldNode) { this.root = newNode; return; }
+                this._replaceInTree(this.root, oldNode, newNode);
+            }
+            _replaceInTree(node, oldNode, newNode) {
+                if (node.type === 'leaf') return;
+                const idx = node.children.indexOf(oldNode);
+                if (idx !== -1) { node.children[idx] = newNode; return; }
+                for (const c of node.children) {
+                    if (c.type !== 'leaf') this._replaceInTree(c, oldNode, newNode);
+                }
+            }
+            closePane(paneId) {
+                if (this.panes.size <= 1) return false;
+                this._removePane(this.root, paneId);
+                this.panes.delete(paneId);
+                this.render();
+                return true;
+            }
+            _removePane(node, paneId) {
+                if (node.type === 'leaf') return node.paneId === paneId;
+                for (let i = 0; i < node.children.length; i++) {
+                    const child = node.children[i];
+                    if (child.type === 'leaf' && child.paneId === paneId) {
+                        node.children.splice(i, 1);
+                        if (node.children.length === 1) this.replaceNode(node, node.children[0]);
+                        return true;
+                    }
+                    if (child.type !== 'leaf' && this._removePane(child, paneId)) {
+                        if (node.children.length <= 1 && node.children.length > 0) {
+                            this.replaceNode(node, node.children[0]);
+                        }
+                        return true;
+                    }
+                }
+                return false;
+            }
+            getActivePaneIds() { return Array.from(this.panes.keys()); }
+            render() {
+                this.container.innerHTML = '';
+                const rootEl = this._renderNode(this.root);
+                this.container.appendChild(rootEl);
+            }
+            _renderNode(node) {
+                if (node.type === 'leaf') return this._createPaneElement(node.paneId);
+                const container = document.createElement('div');
+                container.className = 'split-node ' + node.type;
+                const totalSize = node.children.reduce((sum, c) => sum + c.size, 0);
+                node.children.forEach((child, index) => {
+                    const childEl = this._renderNode(child);
+                    childEl.style.flex = child.size / totalSize;
+                    container.appendChild(childEl);
+                    if (index < node.children.length - 1) {
+                        const splitter = document.createElement('div');
+                        splitter.className = 'splitter splitter-' + (node.type === 'horizontal' ? 'horizontal' : 'vertical');
+                        splitter.addEventListener('mousedown', (e) => this._startDrag(e, node, index));
+                        container.appendChild(splitter);
+                    }
+                });
+                return container;
+            }
+            _createPaneElement(paneId) {
+                const existingPane = this.paneElements.get(paneId);
+                if (existingPane) {
+                    return existingPane;
+                }
+
+                const pane = document.createElement('div');
+                pane.className = 'terminal-pane';
+                pane.dataset.paneId = paneId;
+                pane.innerHTML = '<div class="pane-header">' +
+                    '<div class="pane-title">' +
+                        '<span class="pane-indicator" id="indicator-' + paneId + '"></span>' +
+                        '<span id="title-' + paneId + '">Terminal ' + paneId + '</span>' +
+                    '</div>' +
+                    '<div class="pane-actions">' +
+                        '<button class="pane-action" onclick="window.app.showSplitMenuForPane(event, ' + paneId + ')" title="分割">✂</button>' +
+                        '<button class="pane-action" onclick="event.stopPropagation(); window.app.closePane(' + paneId + ')" title="关闭">×</button>' +
+                    '</div>' +
+                '</div>' +
+                '<div class="terminal-content">' +
+                    '<div class="terminal-canvas" id="output-' + paneId + '" tabindex="0"></div>' +
+                '</div>';
+                pane.addEventListener('click', () => {
+                    window.app.setActivePane(paneId);
+                    window.app.terminals.get(paneId)?.focus();
+                });
+                pane.addEventListener('contextmenu', (e) => {
+                    e.preventDefault();
+                    window.app.showContextMenu(e, paneId);
+                });
+                this.paneElements.set(paneId, pane);
+                return pane;
+            }
+            forgetPane(paneId) {
+                this.paneElements.delete(paneId);
+            }
+            _startDrag(e, parentNode, childIndex) {
+                e.preventDefault();
+                const splitter = e.target;
+                splitter.classList.add('dragging');
+                const isH = parentNode.type === 'horizontal';
+                const startPos = isH ? e.clientX : e.clientY;
+                const left = parentNode.children[childIndex];
+                const right = parentNode.children[childIndex + 1];
+                const sL = left.size, sR = right.size;
+                const totalPx = isH ? this.container.getBoundingClientRect().width : this.container.getBoundingClientRect().height;
+                const onMove = (e) => {
+                    const cur = isH ? e.clientX : e.clientY;
+                    const delta = (cur - startPos) / totalPx;
+                    left.size = Math.max(0.1, Math.min(0.9, sL + delta));
+                    right.size = sL + sR - left.size;
+                    this.render();
+                };
+                const onUp = () => {
+                    splitter.classList.remove('dragging');
+                    document.removeEventListener('mousemove', onMove);
+                    document.removeEventListener('mouseup', onUp);
+                    window.app?.scheduleWorkspaceSave();
+                };
+                document.addEventListener('mousemove', onMove);
+                document.addEventListener('mouseup', onUp);
+            }
+        }
+
+        class LocalTerminal {
+            constructor(paneId, shell, options = {}) {
+                this.paneId = paneId;
+                this.shell = shell;
+                this.cwd = options.cwd || null;
+                this.backendReady = false;
+                this.term = null;
+                this.fitAddon = null;
+                this.webLinksAddon = null;
+                this.resizeObserver = null;
+                this.resizeQueued = false;
+                this.lastCols = 0;
+                this.lastRows = 0;
+                this.pendingWrites = [
+                    '\x1b[38;2;78;201;176mTTY1 本地终端已就绪\x1b[0m\r\n',
+                    '\x1b[38;2;138;138;138m已切换到真实 PTY 终端，支持选择、复制、粘贴和 ANSI 输出。\x1b[0m\r\n'
+                ];
+            }
+            setBackendReady(ready) {
+                this.backendReady = !!ready;
+                if (ready) this.queueResize();
+            }
+            setWorkingDirectory(cwd) {
+                this.cwd = cwd || null;
+            }
+            mount() {
+                const el = document.getElementById('output-' + this.paneId);
+                if (!el) return;
+                if (!this.term) {
+                    this.createTerminal(el);
+                }
+                this.flushPendingWrites();
+                this.queueResize();
+            }
+            appendOutput(text, isError) {
+                const chunk = isError
+                    ? '\x1b[38;2;244;71;71m' + text + '\x1b[0m\r\n'
+                    : text + '\r\n';
+                this.writeRaw(chunk);
+            }
+            appendChunk(text, isError) {
+                if (text === undefined || text === null || text === '') return;
+                this.writeRaw(isError ? '\x1b[38;2;244;71;71m' + text + '\x1b[0m' : text);
+            }
+            createTerminal(el) {
+                if (!XtermTerminal || !XtermFitAddon) {
+                    this.appendOutput('xterm.js 未加载，无法创建完整终端体验。', true);
+                    return;
+                }
+
+                this.term = new XtermTerminal({
+                    allowTransparency: false,
+                    cursorBlink: true,
+                    fontSize: normalizeTerminalFontSize(window.app?.settings?.get('fontSize')),
+                    fontFamily: "'Cascadia Code', 'Consolas', 'Courier New', monospace",
+                    scrollback: 5000,
+                    theme: {
+                        background: '#1e1e1e',
+                        foreground: '#cccccc',
+                        cursor: '#4ec9b0',
+                        selectionBackground: 'rgba(0, 122, 204, 0.35)',
+                        black: '#1e1e1e',
+                        red: '#f44747',
+                        green: '#4ec9b0',
+                        yellow: '#cca700',
+                        blue: '#0e639c',
+                        magenta: '#c586c0',
+                        cyan: '#4fc1ff',
+                        white: '#d4d4d4',
+                        brightBlack: '#808080',
+                        brightRed: '#ff6b68',
+                        brightGreen: '#6ad7be',
+                        brightYellow: '#dcdcaa',
+                        brightBlue: '#569cd6',
+                        brightMagenta: '#d670d6',
+                        brightCyan: '#9cdcfe',
+                        brightWhite: '#ffffff'
+                    }
+                });
+
+                this.fitAddon = new XtermFitAddon();
+                this.term.loadAddon(this.fitAddon);
+                if (XtermWebLinksAddon) {
+                    this.webLinksAddon = new XtermWebLinksAddon((event, url) => window.open(url, '_blank'));
+                    this.term.loadAddon(this.webLinksAddon);
+                }
+                this.term.open(el);
+
+                this.term.onData((data) => {
+                    if (!this.backendReady || typeof invoke === 'undefined') return;
+                    invoke('send_input', { sessionId: 'local-' + this.paneId, input: data })
+                        .catch((e) => {
+                            this.backendReady = false;
+                            this.appendOutput('发送到本地终端失败: ' + e, true);
+                        });
+                });
+
+                this.term.attachCustomKeyEventHandler((event) => this.handleKeyEvent(event));
+
+                el.addEventListener('paste', (event) => {
+                    const text = event.clipboardData?.getData('text');
+                    if (!text || !this.term) return;
+                    event.preventDefault();
+                    this.term.paste(text);
+                });
+
+                this.resizeObserver = new ResizeObserver(() => this.queueResize());
+                this.resizeObserver.observe(el);
+            }
+            applyFontSize(fontSize) {
+                if (!this.term) return;
+                this.term.options.fontSize = normalizeTerminalFontSize(fontSize);
+                this.queueResize();
+            }
+            handleKeyEvent(event) {
+                if (event.type !== 'keydown' || !this.term) return true;
+
+                const ctrlOrMeta = event.ctrlKey || event.metaKey;
+                if (ctrlOrMeta && !event.altKey) {
+                    if (window.app?.handleTerminalFontSizeShortcut(event)) {
+                        return false;
+                    }
+                    const key = event.key.toLowerCase();
+                    if (key === 'c' && this.term.hasSelection()) {
+                        event.preventDefault();
+                        this.copySelection();
+                        return false;
+                    }
+                    if (key === 'v') {
+                        event.preventDefault();
+                        this.pasteFromClipboard();
+                        return false;
+                    }
+                    if (key === 'a') {
+                        event.preventDefault();
+                        this.term.selectAll();
+                        return false;
+                    }
+                }
+
+                if (event.shiftKey && event.key === 'Insert') {
+                    event.preventDefault();
+                    this.pasteFromClipboard();
+                    return false;
+                }
+
+                return true;
+            }
+            writeRaw(text) {
+                if (this.term) this.term.write(text);
+                else this.pendingWrites.push(text);
+            }
+            flushPendingWrites() {
+                if (!this.term || this.pendingWrites.length === 0) return;
+                for (const chunk of this.pendingWrites) {
+                    this.term.write(chunk);
+                }
+                this.pendingWrites = [];
+            }
+            focus() {
+                this.term?.focus();
+            }
+            async copySelection() {
+                if (!this.term || !this.term.hasSelection()) return;
+                const text = this.term.getSelection();
+                if (!text) return;
+                try {
+                    await writeClipboardText(text);
+                    window.app?.showToast('已复制终端选中内容', 'success');
+                } catch (err) {
+                    this.appendOutput('复制失败: ' + err, true);
+                }
+            }
+            async pasteFromClipboard() {
+                if (!this.term) return;
+                try {
+                    const text = await readClipboardText();
+                    if (!text) return;
+                    this.term.paste(text);
+                } catch (err) {
+                    this.appendOutput('粘贴失败: ' + err, true);
+                }
+            }
+            getSelectionText() {
+                if (!this.term || !this.term.hasSelection()) return '';
+                return this.term.getSelection() || '';
+            }
+            getRecentOutput(maxLines, maxChars) {
+                let text = '';
+                if (this.term?.buffer?.active) {
+                    const buffer = this.term.buffer.active;
+                    const start = Math.max(0, buffer.length - Math.max(10, maxLines || 80));
+                    const lines = [];
+                    for (let i = start; i < buffer.length; i++) {
+                        const line = buffer.getLine(i);
+                        if (!line) continue;
+                        lines.push(line.translateToString(true));
+                    }
+                    text = lines.join('\n');
+                } else if (this.pendingWrites.length) {
+                    text = this.pendingWrites.join('');
+                }
+                text = stripAnsi(text).trim();
+                if (maxChars && text.length > maxChars) {
+                    text = text.slice(text.length - maxChars);
+                }
+                return text;
+            }
+            async sendText(text) {
+                if (!text || !this.backendReady || typeof invoke === 'undefined') return false;
+                try {
+                    await invoke('send_input', {
+                        sessionId: 'local-' + this.paneId,
+                        input: text
+                    });
+                    this.focus();
+                    return true;
+                } catch (err) {
+                    this.appendOutput('发送到本地终端失败: ' + err, true);
+                    return false;
+                }
+            }
+            selectAll() {
+                this.term?.selectAll();
+            }
+            queueResize() {
+                if (!this.term || !this.fitAddon || this.resizeQueued) return;
+                this.resizeQueued = true;
+                requestAnimationFrame(async () => {
+                    this.resizeQueued = false;
+                    try {
+                        this.fitAddon.fit();
+                    } catch (_) {
+                        return;
+                    }
+
+                    const dims = this.fitAddon.proposeDimensions();
+                    if (!dims) return;
+                    this.lastCols = dims.cols;
+                    this.lastRows = dims.rows;
+
+                    if (window.app?.activePaneId === this.paneId) {
+                        document.getElementById('statusSize').textContent = dims.cols + 'x' + dims.rows;
+                    }
+
+                    if (!this.backendReady || typeof invoke === 'undefined') return;
+                    try {
+                        await invoke('resize_terminal_cmd', {
+                            sessionId: 'local-' + this.paneId,
+                            cols: dims.cols,
+                            rows: dims.rows
+                        });
+                    } catch (err) {
+                        console.warn('Resize terminal failed:', err);
+                    }
+                });
+            }
+            getSizeLabel() {
+                if (!this.lastCols || !this.lastRows) return '80x24';
+                return this.lastCols + 'x' + this.lastRows;
+            }
+            updatePrompt() {}
+            dispose() {
+                if (this.resizeObserver) {
+                    this.resizeObserver.disconnect();
+                    this.resizeObserver = null;
+                }
+                if (this.term) {
+                    this.term.dispose();
+                    this.term = null;
+                }
+            }
+        }
+
+        class TTY1App {
+            constructor() {
+                this.settings = new SettingsManager();
+                this.splitTree = new SplitTree('terminalArea');
+                this.terminals = new Map();
+                this.tabs = new Map();
+                this.activeTabId = null;
+                this.activePaneId = null;
+                this.nextTabId = 0;
+                this.serverConnected = false;
+                this.reconnectTimer = null;
+                this.reconnectAttempts = 0;
+                this.contextMenuTarget = null;
+                this.splitMenuTarget = null;
+                this.manualDisconnect = false;
+                this.connectionPending = false;
+                this.workspaceKey = 'TermSync-workspace';
+                this.workspaceSaveTimer = null;
+                this.sessionSyncTimer = null;
+                this.sessionActivity = new Map();
+                this.sessionMetaSendTimers = new Map();
+                this.replayBuffers = new Map();
+                this.aiPanelOpen = false;
+                this.aiRequestPending = false;
+                this.aiResponseBlocks = [];
+                this.aiInputsBound = false;
+            }
+
+            debug(message, payload) {
+                pushDebugLog(message, payload);
+            }
+
+            async init() {
+                this.debug('init:start', {
+                    serverUrl: this.settings.get('serverUrl'),
+                    hasToken: !!this.settings.get('serverToken'),
+                    autoConnect: this.settings.get('autoConnect')
+                });
+                this.debug('tauri:apis', {
+                    hasInvoke: typeof invoke !== 'undefined',
+                    hasListen: typeof listen !== 'undefined'
+                });
+                this.refreshConnectionInputs();
+                this.syncAiConfigInputs();
+                await this.setupTauriListeners();
+                if (!this.restoreWorkspace()) {
+                    const firstPaneId = this.splitTree.init();
+                    this.createNewTab(firstPaneId);
+                }
+                this.setupGlobalListeners();
+                this.setupHistoryKeys();
+                this.startSessionSync();
+                this.openOnboardingIfNeeded();
+                if (this.shouldConnectOnStartup()) {
+                    if (!this.settings.get('autoConnect')) {
+                        this.settings.set('autoConnect', true);
+                    }
+                    await this.connect();
+                }
+                this.showToast(this.hasDesktopToken()
+                    ? 'TTY1 终端已启动 - 默认使用 ' + this.settings.get('shell')
+                    : '首次使用请先到设置里注册本机，再生成手机配对码', 'success');
+                this.debug('init:done', {
+                    tabs: this.tabs.size,
+                    activeTabId: this.activeTabId,
+                    activePaneId: this.activePaneId
+                });
+            }
+
+            hasDesktopToken() {
+                return !!(this.settings.get('serverToken') || '').trim();
+            }
+
+            openOnboardingIfNeeded() {
+                if (this.hasDesktopToken()) return;
+                this.showSettings();
+                this.showToast('请先注册本机，生成桌面设备 Token 后再连接服务器', 'warning');
+            }
+
+            shouldConnectOnStartup() {
+                return this.hasDesktopToken() && !!normalizeServerUrl(this.settings.get('serverUrl'));
+            }
+
+            handleTerminalFontSizeShortcut(event) {
+                const action = getTerminalFontShortcutAction(event);
+                if (!action) return false;
+
+                event.preventDefault();
+                this.adjustTerminalFontSize(action === 'increase' ? TERMINAL_FONT_SIZE_STEP : -TERMINAL_FONT_SIZE_STEP);
+                return true;
+            }
+
+            setTerminalFontSize(fontSize, options = {}) {
+                const normalized = normalizeTerminalFontSize(fontSize);
+                const previous = normalizeTerminalFontSize(this.settings.get('fontSize'));
+
+                this.settings.set('fontSize', normalized);
+
+                const input = document.getElementById('settingFontSize');
+                if (input) input.value = normalized;
+
+                for (const [, terminal] of this.terminals) {
+                    terminal.applyFontSize(normalized);
+                }
+
+                if (options.showToast && normalized !== previous) {
+                    this.showToast('终端字体已调整为 ' + normalized + 'px', 'success');
+                }
+
+                return normalized !== previous;
+            }
+
+            adjustTerminalFontSize(delta) {
+                const current = normalizeTerminalFontSize(this.settings.get('fontSize'));
+                const next = normalizeTerminalFontSize(current + delta);
+                return this.setTerminalFontSize(next, { showToast: true });
+            }
+
+            getAiPreset(presetId) {
+                return AI_PRESETS[presetId] || AI_PRESETS.custom;
+            }
+
+            getAiProviderConfigMap() {
+                const value = this.settings.get('aiProviderConfigs');
+                return value && typeof value === 'object' ? { ...value } : {};
+            }
+
+            getCurrentAiModelValue() {
+                const select = document.getElementById('aiModelSelect');
+                const customInput = document.getElementById('aiModelCustom');
+                if (!select) return this.settings.get('aiModel') || '';
+                if (select.value && select.value !== '__custom__') return select.value;
+                return (customInput?.value || '').trim();
+            }
+
+            populateAiModelOptions(presetId, currentModel) {
+                const preset = this.getAiPreset(presetId);
+                const select = document.getElementById('aiModelSelect');
+                const customInput = document.getElementById('aiModelCustom');
+                if (!select || !customInput) return;
+
+                const options = Array.isArray(preset.models) ? preset.models.slice() : [];
+                const hasExactMatch = options.some((item) => item.value === currentModel);
+                select.innerHTML = options.map((item) =>
+                    '<option value="' + escapeHtml(item.value) + '">' + escapeHtml(item.label || item.value) + '</option>'
+                ).join('') + '<option value="__custom__">自定义输入</option>';
+
+                if (currentModel && hasExactMatch) {
+                    select.value = currentModel;
+                    customInput.style.display = 'none';
+                    customInput.value = '';
+                } else {
+                    select.value = '__custom__';
+                    customInput.style.display = 'block';
+                    customInput.value = currentModel || '';
+                }
+            }
+
+            bindAiInputs() {
+                if (this.aiInputsBound) return;
+                this.aiInputsBound = true;
+
+                const aiPanel = document.getElementById('aiPanel');
+                aiPanel?.addEventListener('click', (event) => event.stopPropagation());
+
+                ['aiBaseUrl', 'aiApiKey', 'aiContextLines', 'aiModelCustom'].forEach((id) => {
+                    const element = document.getElementById(id);
+                    if (!element) return;
+                    const handler = () => {
+                        if (id === 'aiContextLines') this.updateAiContextPreview();
+                        this.updateAiConfigNotice();
+                    };
+                    element.addEventListener('input', handler);
+                    element.addEventListener('change', handler);
+                });
+
+                ['aiUseTerminalContext', 'aiPreferSelection'].forEach((id) => {
+                    const element = document.getElementById(id);
+                    if (!element) return;
+                    element.addEventListener('change', () => {
+                        this.updateAiContextPreview();
+                        this.updateAiConfigNotice();
+                    });
+                });
+            }
+
+            getAiConfigState() {
+                const presetId = document.getElementById('aiPreset')?.value || this.settings.get('aiPreset') || 'litellm';
+                const preset = this.getAiPreset(presetId);
+                const providerConfigs = this.getAiProviderConfigMap();
+                const providerConfig = providerConfigs[presetId] && typeof providerConfigs[presetId] === 'object'
+                    ? providerConfigs[presetId]
+                    : {};
+
+                const savedBaseUrl = this.settings.get('aiBaseUrl') || providerConfig.baseUrl || preset.baseUrl || '';
+                const savedModel = this.settings.get('aiModel') || providerConfig.model || preset.model || '';
+                const savedApiKey = this.settings.get('aiApiKey') || providerConfig.apiKey || '';
+
+                return {
+                    presetId,
+                    baseUrl: normalizeApiBaseUrl(document.getElementById('aiBaseUrl')?.value || savedBaseUrl),
+                    model: document.getElementById('aiModelSelect')
+                        ? this.getCurrentAiModelValue()
+                        : savedModel,
+                    apiKey: (document.getElementById('aiApiKey')?.value || savedApiKey || '').trim(),
+                    useTerminalContext: document.getElementById('aiUseTerminalContext')
+                        ? !!document.getElementById('aiUseTerminalContext').checked
+                        : !!this.settings.get('aiUseTerminalContext'),
+                    preferSelection: document.getElementById('aiPreferSelection')
+                        ? !!document.getElementById('aiPreferSelection').checked
+                        : !!this.settings.get('aiPreferSelection'),
+                    contextLines: Math.min(300, Math.max(
+                        10,
+                        parseInt(document.getElementById('aiContextLines')?.value || this.settings.get('aiContextLines') || '80', 10) || 80
+                    ))
+                };
+            }
+
+            applyAiConfigInputs(config) {
+                const preset = this.getAiPreset(config.presetId);
+
+                document.getElementById('aiPreset').value = config.presetId;
+                document.getElementById('aiBaseUrl').value = config.baseUrl || '';
+                document.getElementById('aiApiKey').value = config.apiKey || '';
+                document.getElementById('aiUseTerminalContext').checked = !!config.useTerminalContext;
+                document.getElementById('aiPreferSelection').checked = !!config.preferSelection;
+                document.getElementById('aiContextLines').value = config.contextLines;
+
+                this.populateAiModelOptions(config.presetId, config.model || '');
+
+                const baseUrlInput = document.getElementById('aiBaseUrl');
+                baseUrlInput.readOnly = !preset.editableBaseUrl;
+                baseUrlInput.style.opacity = preset.editableBaseUrl ? '1' : '0.82';
+                document.getElementById('aiPresetHint').textContent = preset.hint;
+                document.getElementById('aiBaseUrlHint').textContent = config.presetId === 'zhipu'
+                    ? '智谱标准接口是 https://open.bigmodel.cn/api/paas/v4；如果用 Coding Plan，可切到 /api/coding/paas/v4。'
+                    : preset.editableBaseUrl
+                        ? '这个预设允许直接修改 Base URL，适合私有网关、方舟地区域名或自建代理。'
+                        : '官方预设的 Base URL 已内置，通常只需要填 API Key 和模型。';
+                document.getElementById('aiModelHint').textContent = config.presetId === 'volcengine'
+                    ? '默认下拉给常见官方模型；如果你使用 Endpoint ID、Bot ID 或 Coding Plan，选“自定义输入”。'
+                    : config.presetId === 'custom'
+                        ? '自定义端点通常直接选“自定义输入”，填写真实模型名。'
+                        : '优先从下拉选择，只有账号模型不在列表里时再用“自定义输入”。';
+            }
+
+            syncAiConfigInputs() {
+                const presetId = this.settings.get('aiPreset') || 'litellm';
+                const preset = this.getAiPreset(presetId);
+                const providerConfigs = this.getAiProviderConfigMap();
+                const providerConfig = providerConfigs[presetId] && typeof providerConfigs[presetId] === 'object'
+                    ? providerConfigs[presetId]
+                    : {};
+
+                this.applyAiConfigInputs({
+                    presetId,
+                    baseUrl: this.settings.get('aiBaseUrl') || providerConfig.baseUrl || preset.baseUrl || '',
+                    model: this.settings.get('aiModel') || providerConfig.model || preset.model || '',
+                    apiKey: this.settings.get('aiApiKey') || providerConfig.apiKey || '',
+                    useTerminalContext: !!this.settings.get('aiUseTerminalContext'),
+                    preferSelection: !!this.settings.get('aiPreferSelection'),
+                    contextLines: this.settings.get('aiContextLines')
+                });
+
+                this.bindAiInputs();
+                this.updateAiConfigNotice();
+                this.updateAiContextPreview();
+            }
+
+            handleAiModelSelectChange() {
+                const select = document.getElementById('aiModelSelect');
+                const customInput = document.getElementById('aiModelCustom');
+                if (!select || !customInput) return;
+                const isCustom = select.value === '__custom__';
+                customInput.style.display = isCustom ? 'block' : 'none';
+                if (isCustom) {
+                    setTimeout(() => customInput.focus(), 0);
+                }
+                this.updateAiConfigNotice();
+            }
+
+            applyAiPreset(presetId) {
+                const preset = this.getAiPreset(presetId);
+                const providerConfigs = this.getAiProviderConfigMap();
+                const providerConfig = providerConfigs[presetId] && typeof providerConfigs[presetId] === 'object'
+                    ? providerConfigs[presetId]
+                    : {};
+
+                const current = this.getAiConfigState();
+                this.applyAiConfigInputs({
+                    presetId,
+                    baseUrl: providerConfig.baseUrl || preset.baseUrl || '',
+                    model: providerConfig.model || preset.model || '',
+                    apiKey: providerConfig.apiKey || '',
+                    useTerminalContext: current.useTerminalContext,
+                    preferSelection: current.preferSelection,
+                    contextLines: current.contextLines
+                });
+                this.updateAiConfigNotice();
+                this.updateAiContextPreview();
+            }
+
+            saveAiConfig() {
+                const config = this.getAiConfigState();
+
+                this.settings.set('aiPreset', config.presetId);
+                this.settings.set('aiBaseUrl', config.baseUrl);
+                this.settings.set('aiModel', config.model);
+                this.settings.set('aiApiKey', config.apiKey);
+                this.settings.set('aiUseTerminalContext', config.useTerminalContext);
+                this.settings.set('aiPreferSelection', config.preferSelection);
+                this.settings.set('aiContextLines', config.contextLines);
+
+                const providerConfigs = this.getAiProviderConfigMap();
+                providerConfigs[config.presetId] = {
+                    baseUrl: config.baseUrl,
+                    model: config.model,
+                    apiKey: config.apiKey
+                };
+                this.settings.set('aiProviderConfigs', providerConfigs);
+
+                this.showToast('AI 设置已保存', 'success');
+                this.cancelAiSettings();
+            }
+
+            toggleAiPanel() {
+                if (this.aiPanelOpen) {
+                    this.closeAiPanel();
+                    return;
+                }
+                this.aiPanelOpen = true;
+                document.getElementById('aiPanel').classList.add('visible');
+                this.syncAiConfigInputs();
+                setTimeout(() => {
+                    document.getElementById('aiPrompt')?.focus();
+                    this.updateAiContextPreview();
+                }, 0);
+            }
+
+            openAiSettings() {
+                const settingsSection = document.getElementById('aiSettingsSection');
+                if (settingsSection) {
+                    settingsSection.style.display = 'block';
+                    document.getElementById('aiSettingsBtn').textContent = '✕';
+                }
+            }
+
+            toggleAiSettings() {
+                const settingsSection = document.getElementById('aiSettingsSection');
+                if (settingsSection) {
+                    const isVisible = settingsSection.style.display !== 'none';
+                    if (isVisible) {
+                        this.cancelAiSettings();
+                    } else {
+                        this.openAiSettings();
+                    }
+                }
+            }
+
+            cancelAiSettings() {
+                this.syncAiConfigInputs();
+                const settingsSection = document.getElementById('aiSettingsSection');
+                if (settingsSection) {
+                    settingsSection.style.display = 'none';
+                    document.getElementById('aiSettingsBtn').textContent = '⚙️';
+                }
+            }
+
+            closeAiPanel() {
+                this.aiPanelOpen = false;
+                document.getElementById('aiPanel').classList.remove('visible');
+                this.cancelAiSettings();
+            }
+
+            getActiveTerminal() {
+                const tab = this.tabs.get(this.activeTabId);
+                if (!tab || !this.activePaneId || !tab.panes.has(this.activePaneId)) {
+                    return null;
+                }
+                return this.terminals.get(this.activePaneId) || null;
+            }
+
+            getAiConfigWarnings(config = this.getAiConfigState()) {
+                const requestUrl = this.resolveAiRequestUrl(config.presetId, config.baseUrl, config.model);
+                const warnings = [];
+
+                if (!requestUrl) warnings.push('请先配置 AI 设置：Base URL 不能为空');
+                if (!config.model) warnings.push('请先配置 AI 设置：请选择模型');
+                if (!config.apiKey && config.presetId !== 'litellm' && config.presetId !== 'custom') {
+                    warnings.push('请先配置 AI 设置：该预设需要 API Key');
+                }
+
+                return { requestUrl, warnings };
+            }
+
+            updateAiConfigNotice(config = this.getAiConfigState()) {
+                const notice = document.getElementById('aiConfigNotice');
+                if (!notice) return;
+
+                const { warnings } = this.getAiConfigWarnings(config);
+                if (warnings.length === 0) {
+                    notice.style.display = 'none';
+                    notice.textContent = '';
+                    return;
+                }
+
+                notice.style.display = 'block';
+                notice.textContent = warnings.join('\n');
+            }
+
+            buildAiContext() {
+                const terminal = this.getActiveTerminal();
+                const config = this.getAiConfigState();
+                const lines = config.contextLines;
+                const preferSelection = !!config.preferSelection;
+                const useTerminalContext = !!config.useTerminalContext;
+                const tab = this.tabs.get(this.activeTabId);
+
+                const sections = [];
+                const previewParts = [];
+
+                if (this.settings.get('shell')) sections.push('当前 Shell: ' + this.settings.get('shell'));
+                if (tab?.title) sections.push('当前标签页: ' + tab.title);
+                if (terminal?.cwd) {
+                    sections.push('当前工作目录: ' + terminal.cwd);
+                    previewParts.push('目录: ' + terminal.cwd);
+                }
+
+                const selectionText = terminal && preferSelection
+                    ? stripAnsi(terminal.getSelectionText()).trim()
+                    : '';
+                if (selectionText) {
+                    const clippedSelection = selectionText.slice(0, 6000);
+                    sections.push('当前选中文本:\n' + clippedSelection);
+                    previewParts.push('选中内容:\n' + clipText(clippedSelection, 260));
+                }
+
+                if (terminal && useTerminalContext) {
+                    const output = terminal.getRecentOutput(lines, 12000);
+                    if (output) {
+                        sections.push('最近终端输出 (' + lines + ' 行内):\n' + output);
+                        previewParts.push('最近输出:\n' + clipText(output, 420));
+                    }
+                }
+
+                if (!terminal) {
+                    previewParts.push('请先在当前标签页中选中一个终端，上下文才会生效。未选中时，AI 只会根据你的问题回答。');
+                } else if (!selectionText && !useTerminalContext) {
+                    previewParts.push('你已关闭终端上下文，只会发送当前问题。');
+                } else if (!selectionText && useTerminalContext && previewParts.length <= (terminal?.cwd ? 1 : 0)) {
+                    previewParts.push('当前终端还没有可读取的有效输出。');
+                }
+
+                return {
+                    text: sections.join('\n\n').trim(),
+                    preview: previewParts.join('\n\n').trim() || '当前没有可用上下文。'
+                };
+            }
+
+            updateAiContextPreview() {
+                const preview = document.getElementById('aiContextPreview');
+                if (!preview) return;
+                preview.textContent = this.buildAiContext().preview;
+                this.updateAiConfigNotice();
+            }
+
+            clearAiResponse() {
+                this.aiResponseBlocks = [];
+                document.getElementById('aiResponse').innerHTML =
+                    '<div class="ai-empty">生成结果会显示在这里。代码块支持复制、插入终端、直接执行。</div>';
+            }
+
+            renderAiResponse(result) {
+                const container = document.getElementById('aiResponse');
+                const parsed = parseAiResponseText(result.content || '');
+                this.aiResponseBlocks = parsed.codeBlocks.map((item) => item.code);
+
+                const html = [
+                    '<div class="ai-response-meta">来源: ' + escapeHtml(result.providerLabel || '') +
+                    ' | 模型: ' + escapeHtml(result.model || '') + '</div>'
+                ];
+
+                if (parsed.plainText) {
+                    html.push(
+                        '<div class="ai-response-card"><div class="ai-response-text">' +
+                        escapeHtml(parsed.plainText) +
+                        '</div></div>'
+                    );
+                }
+
+                parsed.codeBlocks.forEach((block, index) => {
+                    const language = block.language || 'shell';
+                    html.push(
+                        '<div class="ai-response-card">' +
+                            '<div class="ai-code-header">' +
+                                '<span>命令 ' + (index + 1) + ' · ' + escapeHtml(language) + '</span>' +
+                                '<div class="ai-code-actions">' +
+                                    '<button class="ai-mini-btn" onclick="window.app.copyAiCommand(' + index + ')">复制</button>' +
+                                    '<button class="ai-mini-btn" onclick="window.app.insertAiCommand(' + index + ', false)">插入</button>' +
+                                    '<button class="ai-mini-btn" onclick="window.app.insertAiCommand(' + index + ', true)">执行</button>' +
+                                '</div>' +
+                            '</div>' +
+                            '<pre class="ai-code-body">' + escapeHtml(block.code) + '</pre>' +
+                        '</div>'
+                    );
+                });
+
+                if (!parsed.plainText && parsed.codeBlocks.length === 0) {
+                    html.push('<div class="ai-empty">模型返回了空内容，请换个提问方式再试一次。</div>');
+                }
+
+                container.innerHTML = html.join('');
+            }
+
+            async copyAiCommand(index) {
+                const command = this.aiResponseBlocks[index];
+                if (!command) return;
+                try {
+                    await writeClipboardText(command);
+                    this.showToast('AI 命令已复制', 'success');
+                } catch (err) {
+                    this.showToast('复制 AI 命令失败: ' + err, 'error');
+                }
+            }
+
+            async insertAiCommand(index, execute) {
+                const command = this.aiResponseBlocks[index];
+                if (!command) return;
+
+                const terminal = this.getActiveTerminal();
+                if (!terminal) {
+                    this.showToast('当前没有活动终端，无法插入命令', 'warning');
+                    return;
+                }
+
+                const suffix = execute && !/[\r\n]$/.test(command) ? '\r' : '';
+                const ok = await terminal.sendText(command + suffix);
+                if (ok) {
+                    this.showToast(execute ? '命令已发送到终端并执行' : '命令已插入终端', 'success');
+                }
+            }
+
+            resolveAiRequestUrl(presetId, baseUrl, model) {
+                const preset = this.getAiPreset(presetId);
+                const normalizedBaseUrl = normalizeApiBaseUrl(baseUrl);
+                let path = preset.chatPath || '/chat/completions';
+
+                if (presetId === 'volcengine' && /^bot-/i.test(model) && /\/api\/v3$/i.test(normalizedBaseUrl)) {
+                    path = preset.botPath || '/bots/chat/completions';
+                }
+
+                return joinApiUrl(normalizedBaseUrl, path);
+            }
+
+            async requestAiCommand() {
+                if (this.aiRequestPending) return;
+
+                const prompt = (document.getElementById('aiPrompt')?.value || '').trim();
+                if (!prompt) {
+                    this.showToast('先输入你想让 AI 帮你做什么', 'warning');
+                    document.getElementById('aiPrompt')?.focus();
+                    return;
+                }
+
+                const aiConfig = this.getAiConfigState();
+                const presetId = aiConfig.presetId;
+                const preset = this.getAiPreset(presetId);
+                const model = aiConfig.model;
+                const apiKey = aiConfig.apiKey;
+                const { requestUrl, warnings } = this.getAiConfigWarnings(aiConfig);
+                this.updateAiConfigNotice(aiConfig);
+
+                if (warnings.length > 0) {
+                    this.showToast(warnings[0], 'warning');
+                    this.openAiSettings();
+                    return;
+                }
+
+                const terminal = this.getActiveTerminal();
+                const context = this.buildAiContext();
+                const shellName = this.settings.get('shell') || 'pwsh';
+                const button = document.getElementById('aiSendBtn');
+
+                const systemPrompt = [
+                    '你是一个终端命令助手。',
+                    '目标是根据用户问题和终端上下文，给出最短、最稳妥、可直接执行的方案。',
+                    '先用 1 到 3 句中文说明你的判断，再给出一个或多个代码块。',
+                    '代码块里只放命令，不要混入解释。',
+                    '命令要优先适配当前 shell；如果存在风险，先明确提示风险。'
+                ].join('\n');
+
+                const userPrompt = [
+                    '用户需求:',
+                    prompt,
+                    '',
+                    '执行环境:',
+                    'Shell: ' + shellName,
+                    '工作目录: ' + (terminal?.cwd || '未知'),
+                    '',
+                    context.text ? '终端上下文:\n' + context.text : '终端上下文: 无'
+                ].join('\n');
+
+                this.aiRequestPending = true;
+                button.disabled = true;
+                button.textContent = '生成中...';
+                document.getElementById('aiResponse').innerHTML =
+                    '<div class="ai-empty">正在请求 ' + escapeHtml(preset.label) + ' / ' + escapeHtml(model) + ' ...</div>';
+
+                try {
+                    const headers = {
+                        'Content-Type': 'application/json'
+                    };
+                    if (apiKey) headers.Authorization = 'Bearer ' + apiKey;
+
+                    if (typeof invoke === 'undefined') {
+                        throw new Error('Tauri API 未注入，无法发送 AI 请求');
+                    }
+
+                    console.log('AI请求URL(后端代理):', requestUrl);
+                    console.log('AI请求模型:', model);
+
+                    const response = await invoke('proxy_ai_request', {
+                        url: requestUrl,
+                        headers: headers,
+                        body: {
+                            model: model,
+                            stream: false,
+                            messages: [
+                                { role: 'system', content: systemPrompt },
+                                { role: 'user', content: userPrompt }
+                            ]
+                        }
+                    });
+
+                    console.log('AI响应状态:', response?.status);
+                    const payload = response?.body || {};
+                    if (!response?.ok) {
+                        const message = payload?.error?.message || payload?.message || ('HTTP ' + (response?.status || '0'));
+                        throw new Error(message);
+                    }
+
+                    const choice = Array.isArray(payload.choices) ? payload.choices[0] : null;
+                    const content = extractAssistantMessageText(choice?.message?.content)
+                        || extractAssistantMessageText(choice?.delta?.content)
+                        || extractAssistantMessageText(payload.output_text)
+                        || '';
+
+                    if (!content) {
+                        throw new Error('模型返回内容为空');
+                    }
+
+                    this.renderAiResponse({
+                        providerLabel: preset.label,
+                        model: model,
+                        content: content
+                    });
+                    this.showToast('AI 命令已生成', 'success');
+                } catch (err) {
+                    let message = '';
+                    if (err && err.message) {
+                        message = err.message;
+                        console.error('AI请求错误:', err);
+                    } else {
+                        message = String(err);
+                    }
+                    
+                    // 提供更具体的错误提示
+                    let detailedMessage = '';
+                    if (message.includes('CORS')) {
+                        detailedMessage = '浏览器跨域已改为后端代理；如果还看到这个错误，请重启桌面端后再试。';
+                    } else if (message.includes('Failed to build AI request client')) {
+                        detailedMessage = 'AI 请求客户端初始化失败，请重试或检查桌面端日志。';
+                    } else if (message.includes('AI request failed')) {
+                        detailedMessage = '网络请求失败，请检查 Base URL、网络连通性、证书或代理设置。';
+                    } else if (message.includes('failed to fetch')) {
+                        detailedMessage = '请求失败，请重启桌面端后再试。如果仍失败，请检查网络和 API 地址。';
+                    } else if (message.includes('401')) {
+                        detailedMessage = '认证失败，请检查API Key是否正确';
+                    } else if (message.includes('403')) {
+                        detailedMessage = '权限不足，请检查API Key权限';
+                    } else if (message.includes('404')) {
+                        detailedMessage = '请求地址不存在，请检查Base URL是否正确';
+                    } else if (message.includes('timeout')) {
+                        detailedMessage = '请求超时，请检查网络连接或稍后重试';
+                    } else {
+                        detailedMessage = message;
+                    }
+                    
+                    document.getElementById('aiResponse').innerHTML =
+                        '<div class="ai-empty">生成失败: ' + escapeHtml(detailedMessage) + '</div>';
+                    this.showToast('生成失败: ' + detailedMessage, 'error');
+                } finally {
+                    this.aiRequestPending = false;
+                    button.disabled = false;
+                    button.textContent = '生成命令';
+                }
+            }
+
+            startSessionSync() {
+                if (this.sessionSyncTimer) clearInterval(this.sessionSyncTimer);
+                this.sessionSyncTimer = setInterval(() => {
+                    this.syncLocalSessionMetadata();
+                }, 5000);
+                window.addEventListener('beforeunload', () => this.saveWorkspace());
+            }
+
+            scheduleWorkspaceSave() {
+                if (this.workspaceSaveTimer) clearTimeout(this.workspaceSaveTimer);
+                this.workspaceSaveTimer = setTimeout(() => {
+                    this.workspaceSaveTimer = null;
+                    this.saveWorkspace();
+                }, 150);
+            }
+
+            saveWorkspace() {
+                try {
+                    const state = {
+                        version: 2,
+                        nextTabId: this.nextTabId,
+                        activeTabId: this.activeTabId,
+                        activePaneId: this.activePaneId,
+                        replayBuffers: Object.fromEntries(
+                            Array.from(this.replayBuffers.entries()).filter(([, value]) => !!value)
+                        ),
+                        tabs: Array.from(this.tabs.values()).map((tab) => ({
+                            id: tab.id,
+                            title: tab.title,
+                            root: this.splitTree.cloneNode(tab.root),
+                            panes: Array.from(tab.panes).map((paneId) => ({
+                                paneId,
+                                cwd: this.terminals.get(paneId)?.cwd || null
+                            }))
+                        }))
+                    };
+                    localStorage.setItem(this.workspaceKey, JSON.stringify(state));
+                } catch (err) {
+                    console.warn('Save workspace failed:', err);
+                }
+            }
+
+            loadWorkspace() {
+                try {
+                    const raw = localStorage.getItem(this.workspaceKey);
+                    if (!raw) return null;
+                    const parsed = JSON.parse(raw);
+                    if (!parsed || !Array.isArray(parsed.tabs) || parsed.tabs.length === 0) return null;
+                    return parsed;
+                } catch (err) {
+                    console.warn('Load workspace failed:', err);
+                    return null;
+                }
+            }
+
+            restoreWorkspace() {
+                const saved = this.loadWorkspace();
+                if (!saved) return false;
+
+                this.tabs.clear();
+                this.terminals.clear();
+                this.replayBuffers = new Map(
+                    Object.entries(saved.replayBuffers || {})
+                        .filter(([, value]) => typeof value === 'string' && value.length > 0)
+                );
+
+                let restoredCount = 0;
+                for (const tabState of saved.tabs) {
+                    const root = this.splitTree.cloneNode(tabState.root);
+                    if (!root) continue;
+                    const paneIds = this.splitTree.collectPaneIds(root);
+                    if (paneIds.length === 0) continue;
+
+                    const paneMeta = new Map(
+                        (tabState.panes || []).map((pane) => [Number(pane.paneId), pane])
+                    );
+                    const tab = {
+                        id: Number(tabState.id),
+                        title: tabState.title || ('标签 ' + tabState.id),
+                        root,
+                        panes: new Set(paneIds)
+                    };
+                    this.tabs.set(tab.id, tab);
+                    this.nextTabId = Math.max(this.nextTabId, tab.id);
+
+                    for (const paneId of paneIds) {
+                        const meta = paneMeta.get(paneId) || {};
+                        this.terminals.set(paneId, new LocalTerminal(paneId, this.settings.get('shell'), {
+                            cwd: meta.cwd || null
+                        }));
+                    }
+                    restoredCount++;
+                }
+
+                if (restoredCount === 0) return false;
+
+                this.rebuildSplitTreeRegistry();
+                this.activeTabId = this.tabs.has(saved.activeTabId)
+                    ? saved.activeTabId
+                    : Array.from(this.tabs.keys())[0];
+
+                this.renderTabs();
+                this.renderActiveTab();
+
+                const activeTab = this.tabs.get(this.activeTabId);
+                const savedPaneId = Number(saved.activePaneId);
+                const focusPaneId = activeTab && activeTab.panes.has(savedPaneId)
+                    ? savedPaneId
+                    : activeTab
+                        ? Array.from(activeTab.panes)[0]
+                        : null;
+                if (focusPaneId !== null && focusPaneId !== undefined) {
+                    this.focusPane(focusPaneId);
+                }
+
+                for (const tab of this.tabs.values()) {
+                    for (const paneId of tab.panes) {
+                        this.ensureBackendSession(paneId, tab.title, this.terminals.get(paneId)?.cwd || null);
+                    }
+                }
+
+                this.scheduleWorkspaceSave();
+                return true;
+            }
+
+            rebuildSplitTreeRegistry() {
+                this.splitTree.rebuildRegistry(Array.from(this.tabs.values()).map((tab) => tab.root));
+                const activeTab = this.tabs.get(this.activeTabId) || this.tabs.values().next().value;
+                if (activeTab?.root) {
+                    this.splitTree.setRoot(activeTab.root);
+                }
+            }
+
+            async syncLocalSessionMetadata() {
+                if (typeof invoke === 'undefined' || this.terminals.size === 0) return;
+                try {
+                    const sessions = await invoke('list_local_sessions');
+                    let changed = false;
+                    for (const session of sessions || []) {
+                        const paneId = this.paneIdFromSession(session.session_id);
+                        if (paneId === null) continue;
+                        const terminal = this.terminals.get(paneId);
+                        if (!terminal) continue;
+                        const cwd = (session.cwd || '').trim();
+                        if (cwd && terminal.cwd !== cwd) {
+                            terminal.setWorkingDirectory(cwd);
+                            changed = true;
+                        }
+                    }
+                    if (changed) this.scheduleWorkspaceSave();
+                } catch (err) {
+                    console.warn('Sync local session metadata failed:', err);
+                }
+            }
+
+            sessionIdForPane(paneId) {
+                return 'local-' + paneId;
+            }
+
+            paneIdFromSession(sessionId) {
+                if (!sessionId || !sessionId.startsWith('local-')) return null;
+                const paneId = parseInt(sessionId.slice(6), 10);
+                return Number.isFinite(paneId) ? paneId : null;
+            }
+
+            ensureSessionActivity(paneId, title) {
+                const sessionId = this.sessionIdForPane(paneId);
+                let state = this.sessionActivity.get(sessionId);
+                if (!state) {
+                    state = {
+                        sessionId: sessionId,
+                        paneId: paneId,
+                        title: title || ('标签 ' + paneId),
+                        activity: '终端已就绪',
+                        preview: '',
+                        taskState: 'idle',
+                        lastSentKey: '',
+                        lastUpdatedAt: Date.now()
+                    };
+                    this.sessionActivity.set(sessionId, state);
+                } else {
+                    state.paneId = paneId;
+                    if (title) state.title = title;
+                }
+                return state;
+            }
+
+            forgetSessionActivity(paneId) {
+                const sessionId = this.sessionIdForPane(paneId);
+                const timer = this.sessionMetaSendTimers.get(sessionId);
+                if (timer) {
+                    clearTimeout(timer);
+                    this.sessionMetaSendTimers.delete(sessionId);
+                }
+                this.sessionActivity.delete(sessionId);
+                this.replayBuffers.delete(sessionId);
+            }
+
+            appendReplayBuffer(sessionId, text) {
+                if (!sessionId || !text) return;
+                const current = this.replayBuffers.get(sessionId) || '';
+                this.replayBuffers.set(sessionId, trimReplayBuffer(current + text, 200000));
+                this.scheduleWorkspaceSave();
+            }
+
+            getReplayBuffer(sessionId) {
+                return this.replayBuffers.get(sessionId) || '';
+            }
+
+            summarizeActivity(line) {
+                const normalized = collapseWhitespace(line);
+                const lower = normalized.toLowerCase();
+                if (!normalized) return '等待新的输出';
+                if (/(waiting for input|press enter|enter to continue|select an option|y\/n|password|token|pairing code|验证码|配对码|继续\?|是否继续)/i.test(normalized)) {
+                    return '等待输入';
+                }
+                if (/(error|failed|exception|panic|traceback|permission denied|认证失败)/i.test(normalized)) {
+                    return clipText(normalized, 72);
+                }
+                if (/(build successful|finished|completed|done|all tests passed|successfully|任务已完成|完成了)/i.test(normalized)) {
+                    return '任务已完成';
+                }
+                if (/apply_patch|patching|applying patch/.test(lower)) return '正在应用补丁';
+                if (/cargo (build|check|test|run)|\bcompiling\b/.test(lower)) return '正在处理 Rust 项目';
+                if (/gradlew|assemble(debug|release)|gradle|build apk/.test(lower)) return '正在构建 Android 应用';
+                if (/\bgo build\b|\bgo test\b/.test(lower)) return '正在处理 Go 项目';
+                if (/\bnpm\b|\bpnpm\b|\byarn\b|\bbun\b|vite|webpack|esbuild/.test(lower)) return '正在处理前端项目';
+                if (/\bpytest\b|\bjest\b|\bvitest\b|\bplaywright\b|\btest\b/.test(lower)) return '正在运行测试';
+                if (/ripgrep|\brg\b|searching|inspect|reading|scanning|analyzing|analysis/.test(lower)) return '正在分析代码';
+                if (/writing|editing|updating|rewriting|refactor|fixing|implement/.test(lower)) return '正在修改代码';
+                if (/codex|claude|gpt/.test(lower)) return clipText(normalized, 72);
+                return clipText(normalized, 72);
+            }
+
+            applySessionOutput(sessionId, text, options) {
+                const paneId = this.paneIdFromSession(sessionId);
+                if (paneId === null) return;
+                const terminal = this.terminals.get(paneId);
+                const tab = Array.from(this.tabs.values()).find((item) => item.panes.has(paneId));
+                const state = this.ensureSessionActivity(paneId, tab?.title);
+                const meaningfulLine = extractMeaningfulLine(text);
+                const sourceText = collapseWhitespace(stripAnsi(text));
+                const lower = sourceText.toLowerCase();
+
+                state.lastUpdatedAt = Date.now();
+
+                if (options && options.exited) {
+                    const exitCode = Number.isFinite(options.exitCode) ? options.exitCode : null;
+                    state.taskState = exitCode === null || exitCode === 0 ? 'completed' : 'error';
+                    state.activity = exitCode === null || exitCode === 0 ? '终端任务已结束' : '终端异常退出';
+                    state.preview = exitCode === null ? '终端进程已退出' : ('终端进程已退出，退出码 ' + exitCode);
+                    this.scheduleSessionMetaSend(sessionId, true);
+                    this.debug('session:meta:update', {
+                        sessionId: sessionId,
+                        taskState: state.taskState,
+                        activity: state.activity,
+                        preview: state.preview
+                    });
+                    return;
+                }
+
+                if (meaningfulLine) {
+                    state.preview = clipText(meaningfulLine, 96);
+                    if (looksLikeShellPrompt(meaningfulLine)) {
+                        state.taskState = state.taskState === 'running' || state.taskState === 'waiting_input'
+                            ? 'completed'
+                            : 'idle';
+                        state.activity = state.taskState === 'completed' ? '任务已完成' : '等待下一条命令';
+                    } else if (/(error|failed|exception|panic|traceback|permission denied|authentication failed)/i.test(sourceText)) {
+                        state.taskState = 'error';
+                        state.activity = this.summarizeActivity(meaningfulLine);
+                    } else if (/(waiting for input|press enter|enter to continue|select an option|y\/n|password|token|验证码|配对码|继续\?|是否继续)/i.test(sourceText)) {
+                        state.taskState = 'waiting_input';
+                        state.activity = '等待输入';
+                    } else if (/(build successful|finished|completed|done|all tests passed|successfully|任务已完成|完成了)/i.test(sourceText)) {
+                        state.taskState = 'completed';
+                        state.activity = this.summarizeActivity(meaningfulLine);
+                    } else {
+                        state.taskState = 'running';
+                        state.activity = this.summarizeActivity(meaningfulLine);
+                    }
+                } else if (terminal && terminal.backendReady && !state.activity) {
+                    state.taskState = 'idle';
+                    state.activity = '等待新的输出';
+                }
+
+                this.scheduleSessionMetaSend(sessionId);
+                this.debug('session:meta:update', {
+                    sessionId: sessionId,
+                    taskState: state.taskState,
+                    activity: state.activity,
+                    preview: state.preview
+                });
+            }
+
+            scheduleSessionMetaSend(sessionId, immediate) {
+                if (!this.serverConnected || typeof invoke === 'undefined') return;
+                const existing = this.sessionMetaSendTimers.get(sessionId);
+                if (existing) clearTimeout(existing);
+                if (immediate) {
+                    this.sessionMetaSendTimers.delete(sessionId);
+                    this.flushSessionMetaSend(sessionId, true);
+                    return;
+                }
+                const timer = setTimeout(() => {
+                    this.sessionMetaSendTimers.delete(sessionId);
+                    this.flushSessionMetaSend(sessionId, false);
+                }, 350);
+                this.sessionMetaSendTimers.set(sessionId, timer);
+            }
+
+            async flushSessionMetaSend(sessionId, force) {
+                if (!this.serverConnected || typeof invoke === 'undefined') return;
+                const state = this.sessionActivity.get(sessionId);
+                if (!state) return;
+                const payload = {
+                    activity: state.activity || '',
+                    preview: state.preview || '',
+                    taskState: state.taskState || 'idle'
+                };
+                const nextKey = JSON.stringify(payload);
+                if (!force && nextKey === state.lastSentKey) return;
+                try {
+                    await invoke('update_session_meta', {
+                        sessionId: sessionId,
+                        activity: payload.activity,
+                        preview: payload.preview,
+                        taskState: payload.taskState
+                    });
+                    state.lastSentKey = nextKey;
+                    this.debug('session:meta:sent', {
+                        sessionId: sessionId,
+                        taskState: payload.taskState,
+                        activity: payload.activity
+                    });
+                } catch (err) {
+                    console.warn('Update session meta failed:', err);
+                    this.debug('session:meta:send-failed', {
+                        sessionId: sessionId,
+                        error: String(err)
+                    });
+                }
+            }
+
+            async syncAllSessionActivity() {
+                for (const sessionId of this.sessionActivity.keys()) {
+                    await this.flushSessionMetaSend(sessionId, true);
+                }
+            }
+
+            async setupTauriListeners() {
+                if (typeof listen === 'undefined') {
+                    this.debug('tauri:listeners-skipped');
+                    return;
+                }
+
+                await listen('pty-output', async (event) => {
+                    const payload = event.payload || {};
+                    const paneId = this.paneIdFromSession(payload.session_id);
+                    if (paneId === null) return;
+                    const terminal = this.terminals.get(paneId);
+                    if (terminal) terminal.appendChunk(payload.data || '');
+                    if (payload.session_id && payload.data) {
+                        this.appendReplayBuffer(payload.session_id, payload.data);
+                    }
+                    if (payload.session_id && payload.data) {
+                        this.applySessionOutput(payload.session_id, payload.data, null);
+                    }
+                    if (payload.session_id && payload.data && typeof invoke !== 'undefined') {
+                        try {
+                            await invoke('relay_terminal_output', {
+                                sessionId: payload.session_id,
+                                data: payload.data
+                            });
+                        } catch (err) {
+                            this.debug('terminal:relay-output:failed', {
+                                sessionId: payload.session_id,
+                                error: String(err)
+                            });
+                        }
+                    }
+                });
+
+                await listen('pty-exit', (event) => {
+                    const payload = event.payload || {};
+                    const paneId = this.paneIdFromSession(payload.session_id);
+                    if (paneId === null) return;
+                    const indicator = document.getElementById('indicator-' + paneId);
+                    if (indicator) indicator.classList.add('disconnected');
+                    const terminal = this.terminals.get(paneId);
+                    if (terminal) {
+                        terminal.setBackendReady(false);
+                        terminal.appendOutput('本地终端进程已退出。', true);
+                    }
+                    if (payload.session_id) {
+                        this.applySessionOutput(payload.session_id, '', {
+                            exited: true,
+                            exitCode: payload.exit_code
+                        });
+                    }
+                });
+
+                await listen('server-status', async (event) => {
+                    await this.handleServerStatus(event.payload || {});
+                });
+
+                await listen('server-message', (event) => {
+                    this.handleServerMessage(event.payload || {});
+                });
+            }
+
+            async handleServerStatus(payload) {
+                this.debug('server:status', payload);
+                const state = payload.state || 'disconnected';
+                if (state === 'connecting') {
+                    this.connectionPending = true;
+                    this.updateConnectionStatus('connecting');
+                    return;
+                }
+
+                if (state === 'connected') {
+                    this.connectionPending = false;
+                    this.serverConnected = true;
+                    this.manualDisconnect = false;
+                    this.reconnectAttempts = 0;
+                    if (this.reconnectTimer) {
+                        clearTimeout(this.reconnectTimer);
+                        this.reconnectTimer = null;
+                    }
+                    this.updateConnectionStatus('connected');
+                    this.updateStatusBar();
+                    try { await invoke('sync_active_sessions'); } catch (e) { console.warn('Sync sessions failed:', e); }
+                    await this.syncAllSessionActivity();
+                    if (payload.message) this.showToast(payload.message, 'success');
+                    else this.showToast('已连接到服务器', 'success');
+                    return;
+                }
+
+                const wasConnected = this.serverConnected;
+                this.connectionPending = false;
+                this.serverConnected = false;
+                this.updateConnectionStatus(this.manualDisconnect ? 'local' : 'disconnected');
+                this.updateStatusBar();
+
+                if (payload.message && !this.manualDisconnect) {
+                    this.showToast(payload.message, 'error');
+                }
+
+                if (!this.manualDisconnect && (wasConnected || state === 'disconnected') && this.settings.get('autoReconnect')) {
+                    this.scheduleReconnect();
+                }
+
+                this.manualDisconnect = false;
+            }
+
+            handleServerMessage(payload) {
+                this.debug('server:message', {
+                    type: payload.type,
+                    sessionId: payload.session_id || null,
+                    payload: payload.payload || null
+                });
+                if (payload.type === 'session.create_request') {
+                    const requestedTitle = payload.payload && payload.payload.title
+                        ? String(payload.payload.title)
+                        : undefined;
+                    this.createNewTab(undefined, requestedTitle ? { title: requestedTitle } : {});
+                    this.showToast('手机端请求已新建终端', 'success');
+                    return;
+                }
+                if (payload.type === 'session.close_request') {
+                    const sessionId = payload.session_id || null;
+                    const paneId = this.paneIdFromSession(sessionId);
+                    if (paneId !== null) {
+                        this.closePane(paneId);
+                        this.showToast('手机端请求已关闭终端', 'success');
+                    }
+                    return;
+                }
+                if (payload.type === 'terminal.replay_request') {
+                    const sessionId = payload.session_id || null;
+                    const targetDeviceId = payload.payload && payload.payload.target_device_id
+                        ? String(payload.payload.target_device_id)
+                        : '';
+                    console.log('收到终端回放请求:', { sessionId, targetDeviceId });
+                    if (sessionId && targetDeviceId && typeof invoke !== 'undefined') {
+                        const data = this.getReplayBuffer(sessionId);
+                        console.log('获取到的回放数据长度:', data.length);
+                        invoke('relay_terminal_replay', {
+                            sessionId: sessionId,
+                            targetDeviceId: targetDeviceId,
+                            data: data
+                        }).then(() => {
+                            this.debug('terminal:replay:sent', {
+                                sessionId: sessionId,
+                                targetDeviceId: targetDeviceId,
+                                bytes: data.length
+                            });
+                            console.log('回放数据发送成功');
+                        }).catch((err) => {
+                            console.warn('Relay terminal replay failed:', err);
+                            this.debug('terminal:replay:send-failed', {
+                                sessionId: sessionId,
+                                error: String(err)
+                            });
+                        });
+                    } else {
+                        console.warn('回放请求参数不完整:', { sessionId, targetDeviceId, invoke: typeof invoke });
+                    }
+                }
+                if (payload.type === 'error' && payload.payload && payload.payload.message) {
+                    this.showToast(payload.payload.message, 'error');
+                }
+            }
+
+            refreshConnectionInputs() {
+                if (!this.serverConnected && !this.connectionPending) {
+                    this.updateConnectionStatus(this.hasDesktopToken() ? 'disconnected' : 'local');
+                    return;
+                }
+                this.updateChrome();
+            }
+
+            resolveShellCommand() {
+                const shell = this.settings.get('shell');
+                switch (shell) {
+                    case 'pwsh': return 'pwsh.exe';
+                    case 'powershell': return 'powershell.exe';
+                    case 'cmd': return 'cmd.exe';
+                    case 'bash': return 'bash';
+                    case 'custom': {
+                        const custom = (this.settings.get('customShell') || '').trim();
+                        return custom || 'pwsh.exe';
+                    }
+                    default:
+                        return 'pwsh.exe';
+                }
+            }
+
+            formatExpiry(unixSeconds) {
+                if (!unixSeconds) return '配对码有效期 5 分钟。';
+                const date = new Date(unixSeconds * 1000);
+                return '配对码将于 ' + date.toLocaleTimeString('zh-CN', { hour12: false }) + ' 失效。';
+            }
+
+            async registerDesktopDevice() {
+                const serverUrl = document.getElementById('settingServerUrl').value.trim() || this.settings.get('serverUrl');
+                const deviceName = document.getElementById('settingDeviceName').value.trim() || '我的桌面电脑';
+                if (!serverUrl) { this.showToast('请先填写服务器地址', 'warning'); return; }
+                try {
+                    const result = await invoke('register_device', {
+                        serverUrl: serverUrl,
+                        name: deviceName,
+                        deviceType: 'desktop'
+                    });
+                    this.settings.set('serverUrl', serverUrl);
+                    this.settings.set('deviceName', result.device.name);
+                    this.settings.set('serverToken', result.device.token);
+                    document.getElementById('settingDeviceName').value = result.device.name;
+                    document.getElementById('settingDeviceToken').value = result.device.token;
+                    this.refreshConnectionInputs();
+                    this.showToast('桌面设备已注册: ' + result.device.name, 'success');
+                } catch (err) {
+                    console.error('Register device failed:', err);
+                    this.showToast('注册桌面设备失败: ' + err, 'error');
+                }
+            }
+
+            async generatePairingCode() {
+                const serverUrl = document.getElementById('settingServerUrl').value.trim() || this.settings.get('serverUrl');
+                const tokenInput = document.getElementById('settingDeviceToken');
+                const token = tokenInput.value.trim() || this.settings.get('serverToken');
+                if (!serverUrl) { this.showToast('请先填写服务器地址', 'warning'); return; }
+                if (!token) {
+                    this.showToast('请先点击“注册本机”获取桌面设备 Token', 'warning');
+                    this.showSettings();
+                    return;
+                }
+                try {
+                    const result = await invoke('generate_pairing_code', {
+                        serverUrl: serverUrl,
+                        token: token
+                    });
+                    tokenInput.value = token;
+                    document.getElementById('pairingCodeDisplay').value = result.code;
+                    document.getElementById('pairingCodeHint').textContent = this.formatExpiry(result.expires_at);
+                    this.showToast('配对码已生成: ' + result.code, 'success');
+                } catch (err) {
+                    console.error('Generate pairing code failed:', err);
+                    this.showToast('生成配对码失败: ' + err, 'error');
+                }
+            }
+
+            async ensureBackendSession(paneId, title, cwd) {
+                const terminal = this.terminals.get(paneId);
+                if (typeof invoke === 'undefined') {
+                    if (terminal) terminal.appendOutput('Tauri API 未注入，无法启动真实本地终端。', true);
+                    return;
+                }
+                try {
+                    const shell = this.resolveShellCommand();
+                    this.debug('session:create', { paneId, title, shell, cwd });
+                    this.ensureSessionActivity(paneId, title || ('Terminal ' + paneId));
+                    await invoke('create_session', {
+                        sessionId: this.sessionIdForPane(paneId),
+                        cols: 80,
+                        rows: 24,
+                        title: title || ('Terminal ' + paneId),
+                        shell: shell,
+                        cwd: cwd || null
+                    });
+                    if (terminal) {
+                        terminal.shell = this.settings.get('shell');
+                        terminal.setWorkingDirectory(cwd || terminal.cwd || null);
+                        terminal.setBackendReady(true);
+                        terminal.queueResize();
+                    }
+                    const sessionId = this.sessionIdForPane(paneId);
+                    const state = this.ensureSessionActivity(paneId, title || ('Terminal ' + paneId));
+                    if (!state.preview) {
+                        state.preview = shell;
+                    }
+                    if (!state.activity || state.activity === '终端已就绪') {
+                        state.activity = shell + ' 已就绪';
+                    }
+                    this.scheduleSessionMetaSend(sessionId, true);
+                    this.syncLocalSessionMetadata();
+                } catch (err) {
+                    console.warn('Create backend session failed:', err);
+                    if (terminal) {
+                        terminal.setBackendReady(false);
+                        terminal.appendOutput('启动真实本地终端失败: ' + err, true);
+                    }
+                    this.showToast('创建本地终端失败: ' + err, 'error');
+                }
+            }
+
+            async destroyBackendSession(paneId) {
+                if (typeof invoke === 'undefined') return;
+                try {
+                    await invoke('close_session', { sessionId: this.sessionIdForPane(paneId) });
+                } catch (err) {
+                    console.warn('Close backend session failed:', err);
+                }
+            }
+
+            setupGlobalListeners() {
+                document.addEventListener('click', (event) => {
+                    if (event.target.closest('.context-menu, .split-menu, .pane-action')) {
+                        return;
+                    }
+                    document.getElementById('splitMenu').classList.remove('visible');
+                    document.getElementById('contextMenu').classList.remove('visible');
+                });
+                document.addEventListener('mouseup', () => {
+                    if (this.aiPanelOpen) {
+                        setTimeout(() => this.updateAiContextPreview(), 0);
+                    }
+                });
+                document.addEventListener('keyup', () => {
+                    if (this.aiPanelOpen) this.updateAiContextPreview();
+                });
+                document.addEventListener('keydown', (e) => {
+                    if (e.defaultPrevented) return;
+                    if (this.handleTerminalFontSizeShortcut(e)) return;
+                    if (e.ctrlKey && e.shiftKey && e.key === 'T') { e.preventDefault(); this.createNewTab(); }
+                    if (e.ctrlKey && e.key === 'w') { e.preventDefault(); if (this.activePaneId) this.closePane(this.activePaneId); }
+                    if (e.ctrlKey && e.shiftKey && e.key === '\\') { e.preventDefault(); if (this.activePaneId) this.splitPane('right'); }
+                    if (e.key === 'Escape' && this.aiPanelOpen) { this.closeAiPanel(); }
+                });
+            }
+
+            setupHistoryKeys() {}
+
+            createNewTab(initPaneId, options = {}) {
+                const tabId = options.id || (++this.nextTabId);
+                this.nextTabId = Math.max(this.nextTabId, tabId);
+                const rootNode = initPaneId ? this.splitTree.getNode(initPaneId) : this.splitTree.createLeaf();
+                const paneId = rootNode.paneId;
+                const cwd = options.cwd !== undefined
+                    ? options.cwd
+                    : (this.terminals.get(this.activePaneId)?.cwd || null);
+                this.debug('tab:create', { tabId, paneId, reusedPane: !!initPaneId, cwd });
+                const tab = { id: tabId, title: options.title || ('标签 ' + tabId), root: rootNode, panes: new Set([paneId]) };
+                this.tabs.set(tabId, tab);
+                this.activeTabId = tabId;
+                const terminal = new LocalTerminal(paneId, this.settings.get('shell'), { cwd });
+                this.terminals.set(paneId, terminal);
+                this.renderTabs();
+                this.renderActiveTab();
+                this.focusPane(paneId);
+                this.ensureBackendSession(paneId, tab.title, cwd);
+                this.updateStatusBar();
+                this.scheduleWorkspaceSave();
+                return tabId;
+            }
+
+            renderActiveTab() {
+                const tab = this.tabs.get(this.activeTabId);
+                if (!tab || !tab.root) return;
+                this.splitTree.setRoot(tab.root);
+                this.splitTree.render();
+                this.mountTabTerminals(tab);
+            }
+
+            mountTabTerminals(tab) {
+                for (const paneId of tab.panes) {
+                    const terminal = this.terminals.get(paneId);
+                    if (terminal) terminal.mount();
+                }
+            }
+
+            switchTab(tabId) {
+                this.activeTabId = tabId;
+                this.renderTabs();
+                const tab = this.tabs.get(tabId);
+                if (tab) {
+                    this.renderActiveTab();
+                    const first = Array.from(tab.panes)[0];
+                    if (first) this.focusPane(first);
+                }
+                this.updateStatusBar();
+                if (this.aiPanelOpen) this.updateAiContextPreview();
+                this.scheduleWorkspaceSave();
+            }
+
+            closeTab(tabId) {
+                if (this.tabs.size <= 1) { this.showToast('至少保留一个标签页', 'warning'); return; }
+                const tab = this.tabs.get(tabId);
+                if (!tab) return;
+                for (const pid of tab.panes) {
+                    this.destroyBackendSession(pid);
+                    this.terminals.get(pid)?.dispose();
+                    this.splitTree.panes.delete(pid);
+                    this.splitTree.forgetPane(pid);
+                    this.terminals.delete(pid);
+                    this.forgetSessionActivity(pid);
+                }
+                this.tabs.delete(tabId);
+                this.rebuildSplitTreeRegistry();
+                const next = Array.from(this.tabs.values())[0];
+                if (this.activeTabId === tabId && next) {
+                    this.activeTabId = next.id;
+                    this.renderActiveTab();
+                    this.focusPane(Array.from(next.panes)[0]);
+                }
+                this.renderTabs();
+                this.updateStatusBar();
+                this.scheduleWorkspaceSave();
+            }
+
+            renderTabs() {
+                const tabBar = document.getElementById('tabBar');
+                const addBtn = tabBar.querySelector('.tab-add');
+                tabBar.querySelectorAll('.tab').forEach(el => el.remove());
+                for (const tab of this.tabs.values()) {
+                    const el = document.createElement('button');
+                    el.className = 'tab' + (tab.id === this.activeTabId ? ' active' : '');
+                    el.innerHTML = '<span class="tab-title">' + tab.title + '</span>' +
+                        '<span class="tab-close" onclick="event.stopPropagation(); window.app.closeTab(' + tab.id + ')">×</span>';
+                    el.addEventListener('click', () => this.switchTab(tab.id));
+                    tabBar.insertBefore(el, addBtn);
+                }
+            }
+
+            findTabByPaneId(paneId) {
+                return Array.from(this.tabs.values()).find((tab) => tab.panes.has(paneId)) || null;
+            }
+
+            setActivePane(paneId) {
+                this.activePaneId = paneId;
+                document.querySelectorAll('.terminal-pane').forEach(pane => {
+                    pane.style.outline = pane.dataset.paneId == paneId ? '2px solid #007acc' : 'none';
+                });
+            }
+
+            focusPane(paneId) {
+                this.setActivePane(paneId);
+                this.terminals.get(paneId)?.focus();
+                this.updateStatusBar();
+                if (this.aiPanelOpen) this.updateAiContextPreview();
+                this.scheduleWorkspaceSave();
+            }
+
+            closePane(paneId) {
+                const tab = this.findTabByPaneId(paneId);
+                if (!tab) return;
+                if (tab.panes.size <= 1) { this.closeTab(tab.id); return; }
+                const closingActiveTab = this.activeTabId === tab.id;
+                this.splitTree.setRoot(tab.root);
+                this.destroyBackendSession(paneId);
+                this.splitTree.closePane(paneId);
+                this.terminals.get(paneId)?.dispose();
+                this.terminals.delete(paneId);
+                this.splitTree.forgetPane(paneId);
+                this.forgetSessionActivity(paneId);
+                if (tab) {
+                    tab.panes.delete(paneId);
+                    tab.root = this.splitTree.root;
+                    this.mountTabTerminals(tab);
+                }
+                const remaining = tab ? Array.from(tab.panes) : [];
+                if (closingActiveTab) {
+                    if (remaining.length > 0) this.focusPane(remaining[0]);
+                } else {
+                    this.renderTabs();
+                    this.renderActiveTab();
+                    this.updateStatusBar();
+                    if (this.aiPanelOpen) this.updateAiContextPreview();
+                    this.scheduleWorkspaceSave();
+                }
+            }
+
+            closeCurrentPane() {
+                if (this.contextMenuTarget) this.closePane(this.contextMenuTarget);
+                document.getElementById('contextMenu').classList.remove('visible');
+            }
+
+            placeFloatingMenu(menu, preferredLeft, preferredTop, options = {}) {
+                if (!menu) return;
+                const margin = options.margin ?? 8;
+                const viewportWidth = window.innerWidth;
+                const viewportHeight = window.innerHeight;
+
+                menu.style.left = '0px';
+                menu.style.top = '0px';
+                menu.classList.add('visible');
+
+                const menuRect = menu.getBoundingClientRect();
+                let left = preferredLeft;
+                let top = preferredTop;
+
+                if (options.alignRight) {
+                    left = preferredLeft - menuRect.width;
+                }
+                if (options.alignBottom) {
+                    top = preferredTop - menuRect.height;
+                }
+
+                left = Math.min(left, viewportWidth - menuRect.width - margin);
+                top = Math.min(top, viewportHeight - menuRect.height - margin);
+                left = Math.max(margin, left);
+                top = Math.max(margin, top);
+
+                menu.style.left = left + 'px';
+                menu.style.top = top + 'px';
+            }
+
+            showSplitMenu(event, anchorEl) {
+                event && event.stopPropagation();
+                const menu = document.getElementById('splitMenu');
+                const targetPaneId = this.contextMenuTarget || this.activePaneId;
+                if (anchorEl && anchorEl.getBoundingClientRect) {
+                    const rect = anchorEl.getBoundingClientRect();
+                    this.placeFloatingMenu(menu, rect.right, rect.top);
+                } else if (event) {
+                    this.placeFloatingMenu(menu, event.clientX, event.clientY);
+                } else {
+                    this.placeFloatingMenu(menu, window.innerWidth / 2, window.innerHeight / 2);
+                }
+                document.getElementById('contextMenu').classList.remove('visible');
+                this.splitMenuTarget = targetPaneId;
+            }
+
+            showSplitMenuForPane(event, paneId) {
+                event && event.stopPropagation();
+                this.splitMenuTarget = paneId;
+                const menu = document.getElementById('splitMenu');
+                const anchorRect = event && event.currentTarget && event.currentTarget.getBoundingClientRect
+                    ? event.currentTarget.getBoundingClientRect()
+                    : null;
+                const paneRect = document.querySelector('[data-pane-id="' + paneId + '"]').getBoundingClientRect();
+                this.placeFloatingMenu(
+                    menu,
+                    anchorRect ? anchorRect.left : paneRect.left,
+                    anchorRect ? anchorRect.bottom : paneRect.bottom
+                );
+                document.getElementById('contextMenu').classList.remove('visible');
+            }
+
+            splitPane(direction) {
+                if (!this.splitMenuTarget) return;
+                const tab = this.tabs.get(this.activeTabId);
+                if (!tab) return;
+                const sourcePaneId = this.splitMenuTarget;
+                const sourceTerminal = this.terminals.get(sourcePaneId);
+                this.debug('pane:split:request', {
+                    activeTabId: this.activeTabId,
+                    sourcePaneId: sourcePaneId,
+                    direction: direction
+                });
+                this.splitTree.setRoot(tab.root);
+                const newPaneId = this.splitTree.splitPane(sourcePaneId, direction);
+                if (newPaneId !== null) {
+                    tab.root = this.splitTree.root;
+                    tab.panes = new Set(this.splitTree.collectPaneIds(tab.root));
+                    const terminal = new LocalTerminal(newPaneId, this.settings.get('shell'), {
+                        cwd: sourceTerminal?.cwd || null
+                    });
+                    this.terminals.set(newPaneId, terminal);
+                    this.mountTabTerminals(tab);
+                    this.ensureBackendSession(newPaneId, tab.title + ' / ' + newPaneId, sourceTerminal?.cwd || null);
+                    this.focusPane(newPaneId);
+                    this.updateStatusBar();
+                    this.debug('pane:split:done', {
+                        newPaneId: newPaneId,
+                        panes: Array.from(tab.panes)
+                    });
+                    this.showToast('已' + (direction === 'right' || direction === 'left' ? '左右' : '上下') + '分割', 'success');
+                    this.scheduleWorkspaceSave();
+                }
+                document.getElementById('splitMenu').classList.remove('visible');
+                this.splitMenuTarget = null;
+                this.contextMenuTarget = null;
+            }
+
+            unsplitPane() {
+                const tab = this.tabs.get(this.activeTabId);
+                if (!tab) return;
+                const keepPaneId = tab.panes.has(this.activePaneId) ? this.activePaneId : Array.from(tab.panes)[0];
+                const keepNode = this.splitTree.getNode(keepPaneId);
+                if (!keepNode) return;
+                for (const paneId of Array.from(tab.panes)) {
+                    if (paneId === keepPaneId) continue;
+                    this.destroyBackendSession(paneId);
+                    this.terminals.get(paneId)?.dispose();
+                    this.terminals.delete(paneId);
+                    this.splitTree.panes.delete(paneId);
+                    this.splitTree.forgetPane(paneId);
+                    this.forgetSessionActivity(paneId);
+                }
+                tab.root = keepNode;
+                tab.panes = new Set([keepPaneId]);
+                this.splitTree.setRoot(keepNode);
+                this.splitTree.render();
+                this.mountTabTerminals(tab);
+                this.focusPane(keepPaneId);
+                this.updateStatusBar();
+                this.showToast('已取消分割', 'success');
+                this.scheduleWorkspaceSave();
+            }
+
+            showContextMenu(event, paneId) {
+                this.contextMenuTarget = paneId;
+                const menu = document.getElementById('contextMenu');
+                menu.style.left = event.clientX + 'px';
+                menu.style.top = event.clientY + 'px';
+                menu.classList.add('visible');
+            }
+
+            async executeCommand(paneId, command) {
+                const terminal = this.terminals.get(paneId);
+                if (!terminal) return;
+                terminal.appendOutput('当前已启用真实终端，请直接在终端区域输入命令。', true);
+            }
+
+            async toggleConnection() {
+                this.debug('connection:toggle', {
+                    connected: this.serverConnected,
+                    pending: this.connectionPending
+                });
+                if (this.serverConnected || this.connectionPending) await this.disconnect();
+                else await this.connect();
+            }
+
+            async connect() {
+                const url = (this.settings.get('serverUrl') || '').trim();
+                const token = (this.settings.get('serverToken') || '').trim();
+                if (this.connectionPending) {
+                    this.debug('connection:skip-pending', { url: url });
+                    this.showToast('连接请求已经发出，请等待服务器响应', 'warning');
+                    return;
+                }
+                this.debug('connection:request', { url, tokenLength: token.length });
+                if (!url) { this.showToast('请输入服务器地址', 'warning'); return; }
+                if (!token) {
+                    this.showToast('请先到设置里注册本机，获取桌面设备 Token 后再连接', 'warning');
+                    this.showSettings();
+                    return;
+                }
+                if (typeof invoke === 'undefined') {
+                    this.showToast('Tauri API 未注入，当前页面不是桌面应用上下文', 'error');
+                    this.debug('connection:invoke-missing');
+                    return;
+                }
+                this.settings.set('serverUrl', url);
+                this.settings.set('serverToken', token);
+                this.manualDisconnect = false;
+                this.connectionPending = true;
+                if (this.reconnectTimer) {
+                    clearTimeout(this.reconnectTimer);
+                    this.reconnectTimer = null;
+                }
+                this.updateConnectionStatus('connecting');
+                try {
+                    await invoke('connect_server', { url: url, token: token });
+                    this.debug('connection:invoke-sent');
+                    this.showToast('连接请求已发送，等待认证', 'success');
+                } catch (err) {
+                    console.error('Connection failed:', err);
+                    this.connectionPending = false;
+                    this.serverConnected = false;
+                    this.updateConnectionStatus('disconnected');
+                    this.debug('connection:invoke-failed', {
+                        url: url,
+                        error: String(err)
+                    });
+                    this.showToast('连接失败: ' + err, 'error');
+                    if (this.settings.get('autoReconnect')) this.scheduleReconnect();
+                }
+            }
+
+            async disconnect() {
+                this.debug('connection:disconnect:request', {
+                    connected: this.serverConnected,
+                    pending: this.connectionPending
+                });
+                this.manualDisconnect = true;
+                this.connectionPending = false;
+                try { await invoke('disconnect_server', {}); } catch (e) { console.warn('Disconnect error:', e); }
+                this.serverConnected = false;
+                if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+                this.reconnectAttempts = 0;
+                this.updateConnectionStatus('local');
+                this.showToast('已断开服务器连接，使用本地终端', 'success');
+                this.updateStatusBar();
+            }
+
+            scheduleReconnect() {
+                if (this.reconnectAttempts >= this.settings.get('maxReconnectAttempts')) {
+                    this.debug('connection:reconnect:limit', {
+                        attempts: this.reconnectAttempts
+                    });
+                    this.showToast('达到最大重连次数，请手动连接', 'error');
+                    return;
+                }
+                if (this.reconnectTimer) {
+                    clearTimeout(this.reconnectTimer);
+                    this.reconnectTimer = null;
+                }
+                this.reconnectAttempts++;
+                const delay = this.settings.get('reconnectInterval');
+                this.debug('connection:reconnect:scheduled', {
+                    attempt: this.reconnectAttempts,
+                    delay: delay
+                });
+                this.showToast('将在 ' + (delay/1000) + 's 后尝试重连 (' + this.reconnectAttempts + '/' + this.settings.get('maxReconnectAttempts') + ')', 'warning');
+                this.reconnectTimer = setTimeout(() => {
+                    this.reconnectTimer = null;
+                    this.debug('connection:reconnect:firing', {
+                        attempt: this.reconnectAttempts
+                    });
+                    this.connect();
+                }, delay);
+            }
+
+            updateConnectionStatus(status) {
+                const el = document.getElementById('connStatus');
+                el.className = 'tab-icon-btn connection-status';
+                switch (status) {
+                    case 'connected':
+                        el.classList.add('status-connected');
+                        el.title = '已连接，点击断开';
+                        break;
+                    case 'disconnected':
+                        el.classList.add('status-disconnected');
+                        el.title = '未连接，点击连接';
+                        break;
+                    case 'connecting':
+                        el.classList.add('status-connecting');
+                        el.title = '连接中...';
+                        break;
+                    default:
+                        el.classList.add('status-local');
+                        el.title = this.hasDesktopToken() ? '本地模式，点击连接' : '本地模式';
+                }
+                el.setAttribute('aria-label', el.title);
+                this.updateChrome();
+            }
+
+            updateChrome() {
+                const tabBar = document.getElementById('tabBar');
+                if (tabBar) {
+                    tabBar.classList.toggle('single-tab', this.tabs.size <= 1);
+                }
+            }
+
+            showSettings() {
+                const modal = document.getElementById('settingsModal');
+                document.getElementById('settingShell').value = this.settings.get('shell');
+                document.getElementById('settingCustomShell').value = this.settings.get('customShell');
+                document.getElementById('settingFontSize').value = this.settings.get('fontSize');
+                const serverUrl = normalizeServerUrl(this.settings.get('serverUrl'));
+                document.getElementById('settingServerUrl').value = isCustomServerUrl(serverUrl) ? serverUrl : '';
+                document.getElementById('settingDeviceName').value = this.settings.get('deviceName');
+                document.getElementById('settingDeviceToken').value = this.settings.get('serverToken');
+                document.getElementById('settingAutoConnect').value = this.settings.get('autoConnect').toString();
+                document.getElementById('settingAutoReconnect').value = this.settings.get('autoReconnect').toString();
+                document.getElementById('pairingCodeDisplay').value = '';
+                document.getElementById('pairingCodeHint').textContent = '配对码有效期 5 分钟，在手机端输入后即可绑定。';
+                this.updateCustomShellVisibility();
+                modal.classList.add('visible');
+            }
+
+            closeSettings() { document.getElementById('settingsModal').classList.remove('visible'); }
+
+            saveSettings() {
+                this.settings.set('shell', document.getElementById('settingShell').value);
+                this.settings.set('customShell', document.getElementById('settingCustomShell').value);
+                this.setTerminalFontSize(document.getElementById('settingFontSize').value);
+                const customServerUrl = normalizeServerUrl(document.getElementById('settingServerUrl').value);
+                this.settings.set('serverUrl', customServerUrl || DEFAULT_SERVER_URL);
+                this.settings.set('deviceName', document.getElementById('settingDeviceName').value.trim() || '我的桌面电脑');
+                this.settings.set('serverToken', document.getElementById('settingDeviceToken').value.trim());
+                this.settings.set('autoConnect', document.getElementById('settingAutoConnect').value === 'true');
+                this.settings.set('autoReconnect', document.getElementById('settingAutoReconnect').value === 'true');
+                this.refreshConnectionInputs();
+                for (const [, terminal] of this.terminals) {
+                    terminal.shell = this.settings.get('shell');
+                }
+                this.closeSettings();
+                this.showToast('设置已保存', 'success');
+            }
+
+            updateCustomShellVisibility() {
+                const shell = document.getElementById('settingShell').value;
+                document.getElementById('customShellGroup').style.display = shell === 'custom' ? 'block' : 'none';
+            }
+
+            updateStatusBar() {
+                document.getElementById('statusMode').textContent = this.serverConnected ? '服务器模式' : '本地终端';
+                document.getElementById('statusTabs').textContent = '标签: ' + this.tabs.size;
+                document.getElementById('statusShell').textContent = this.settings.get('shell');
+                const activeTerminal = this.terminals.get(this.activePaneId);
+                document.getElementById('statusSize').textContent = activeTerminal ? activeTerminal.getSizeLabel() : '80x24';
+                this.updateChrome();
+            }
+
+            async copyActiveTerminal() {
+                const terminal = this.terminals.get(this.contextMenuTarget || this.activePaneId);
+                document.getElementById('contextMenu').classList.remove('visible');
+                if (!terminal) return;
+                await terminal.copySelection();
+            }
+
+            async pasteActiveTerminal() {
+                const terminal = this.terminals.get(this.contextMenuTarget || this.activePaneId);
+                document.getElementById('contextMenu').classList.remove('visible');
+                if (!terminal) return;
+                await terminal.pasteFromClipboard();
+            }
+
+            selectAllActiveTerminal() {
+                const terminal = this.terminals.get(this.contextMenuTarget || this.activePaneId);
+                document.getElementById('contextMenu').classList.remove('visible');
+                terminal?.selectAll();
+            }
+
+            showToast(message, type) {
+                type = type || 'info';
+                const container = document.getElementById('toastContainer');
+                const toast = document.createElement('div');
+                toast.className = 'toast ' + type;
+                toast.textContent = message;
+                container.appendChild(toast);
+                setTimeout(() => {
+                    toast.style.opacity = '0';
+                    toast.style.transform = 'translateX(100%)';
+                    toast.style.transition = 'all 0.3s';
+                    setTimeout(() => toast.remove(), 300);
+                }, 3000);
+            }
+        }
+
+        window.app = null;
+        document.addEventListener('DOMContentLoaded', () => {
+            pushDebugLog('dom:content-loaded');
+            window.app = new TTY1App();
+            window.app.init().catch((err) => {
+                pushDebugLog('init:failed', err && err.stack ? err.stack : String(err));
+                console.error('TTY1 app init failed:', err);
+                const detail = err && err.stack ? err.stack : String(err);
+                document.body.innerHTML = '<div style="padding:24px;color:#fff;background:#1e1e1e;font-family:Consolas,monospace;min-height:100vh;">' +
+                    '<h2 style="margin:0 0 12px;">TTY1 启动失败</h2>' +
+                    '<div style="color:#f44747;white-space:pre-wrap;">' + detail + '</div>' +
+                    '</div>';
+            });
+        });
+    </script>
+</body>
+</html>

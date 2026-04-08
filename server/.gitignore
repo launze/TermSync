@@ -1,0 +1,16 @@
+# Server build artifacts
+tty1-server
+tty1-server.exe
+tty1-server-linux
+tty1-server-darwin
+
+# Database
+data/*.db
+
+# Coverage
+coverage.out
+coverage.html
+
+# IDE
+.idea/
+.vscode/
