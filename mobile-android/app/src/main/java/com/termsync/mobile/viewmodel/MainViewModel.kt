@@ -72,7 +72,19 @@ data class TerminalSession(
     val lastActivityAt: Long = 0L
 )
 
+data class TerminalDeltaBatch(
+    val sessionId: String,
+    val data: String,
+    val version: Long
+)
+
 class MainViewModel(application: Application) : AndroidViewModel(application) {
+
+    private data class PendingTerminalDelta(
+        val sessionId: String,
+        val data: String,
+        val version: Long
+    )
 
     private val prefs = application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private val apiClient = ApiClient()
@@ -82,10 +94,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _sessions = MutableStateFlow<List<TerminalSession>>(emptyList())
     private val _selectedSessionId = MutableStateFlow<String?>(null)
     private val _terminalOutput = MutableStateFlow<String>("")
+    private val _terminalOutputVersion = MutableStateFlow(0L)
     // Raw delta channel: every terminal.output chunk goes here
-    private val _rawDeltaChannel = Channel<String>(Channel.UNLIMITED)
+    private val _rawDeltaChannel = Channel<PendingTerminalDelta>(Channel.UNLIMITED)
     // Batched delta flow: merged every DELTA_BATCH_MS, consumed by WebView LaunchedEffect
-    private val _terminalDelta = MutableSharedFlow<String>(extraBufferCapacity = 64)
+    private val _terminalDelta = MutableSharedFlow<TerminalDeltaBatch>(extraBufferCapacity = 64)
     private val _debugLog = MutableStateFlow<List<String>>(emptyList())
     private var _debugOutputMsgCount = 0
     private var _debugOutputTotalBytes = 0L
@@ -100,6 +113,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _pairedDesktopName = MutableStateFlow(prefs.getString(KEY_PAIRED_DESKTOP_NAME, "") ?: "")
     private val _isPaired = MutableStateFlow(_pairedDesktopId.value.isNotBlank())
     private val sessionOutputCache = loadSessionOutputCache().toMutableMap()
+    private val sessionOutputVersion = mutableMapOf<String, Long>()
     private val lastRequestedResizeBySession = mutableMapOf<String, Pair<Int, Int>>()
     private val lastResizeRequestAtBySession = mutableMapOf<String, Long>()
     private var reconnectJob: Job? = null
@@ -127,7 +141,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val sessions: StateFlow<List<TerminalSession>> = _sessions.asStateFlow()
     val selectedSessionId: StateFlow<String?> = _selectedSessionId.asStateFlow()
     val terminalOutput: StateFlow<String> = _terminalOutput.asStateFlow()
-    val terminalDelta: SharedFlow<String> = _terminalDelta
+    val terminalOutputVersion: StateFlow<Long> = _terminalOutputVersion.asStateFlow()
+    val terminalDelta: SharedFlow<TerminalDeltaBatch> = _terminalDelta
     val debugLog: StateFlow<List<String>> = _debugLog.asStateFlow()
     val statusMessage: StateFlow<String> = _statusMessage.asStateFlow()
     val replayLoading: StateFlow<Boolean> = _replayLoading.asStateFlow()
@@ -145,20 +160,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         // Delta batching coroutine: merges rapid terminal output into ~20fps batches
         viewModelScope.launch {
-            val batch = StringBuilder()
             while (isActive) {
+                val first = _rawDeltaChannel.receive()
+                val batchBySession = linkedMapOf<String, StringBuilder>()
+                val versionBySession = mutableMapOf<String, Long>()
+
+                fun append(delta: PendingTerminalDelta) {
+                    val builder = batchBySession.getOrPut(delta.sessionId) { StringBuilder() }
+                    builder.append(delta.data)
+                    versionBySession[delta.sessionId] = maxOf(versionBySession[delta.sessionId] ?: 0L, delta.version)
+                }
+
                 // Block until at least one delta arrives
-                batch.append(_rawDeltaChannel.receive())
+                append(first)
                 // Accumulate more deltas for DELTA_BATCH_MS
                 delay(DELTA_BATCH_MS)
                 // Drain everything that accumulated
                 while (true) {
                     val more = _rawDeltaChannel.tryReceive().getOrNull() ?: break
-                    batch.append(more)
+                    append(more)
                 }
-                val data = batch.toString()
-                batch.clear()
-                _terminalDelta.emit(data)
+                batchBySession.forEach { (sessionId, builder) ->
+                    val data = builder.toString()
+                    if (data.isNotEmpty()) {
+                        _terminalDelta.emit(
+                            TerminalDeltaBatch(
+                                sessionId = sessionId,
+                                data = data,
+                                version = versionBySession[sessionId] ?: 0L
+                            )
+                        )
+                    }
+                }
             }
         }
         autoConnectIfPossible()
@@ -250,13 +283,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (msg.sessionId != null && data.isNotEmpty()) {
                         val existing = sessionOutputCache[msg.sessionId].orEmpty()
                         sessionOutputCache[msg.sessionId] = trimReplay(existing + data)
+                        val version = nextSessionOutputVersion(msg.sessionId)
                         scheduleSessionOutputCacheSave()
+                        if (matches) {
+                            // Send raw delta to batching channel — NOT directly to UI
+                            _rawDeltaChannel.trySend(
+                                PendingTerminalDelta(
+                                    sessionId = msg.sessionId,
+                                    data = data,
+                                    version = version
+                                )
+                            )
+                        }
                     }
                     if (matches) {
-                        if (data.isNotEmpty()) {
-                            // Send raw delta to batching channel — NOT directly to UI
-                            _rawDeltaChannel.trySend(data)
-                        }
                         _replayLoading.value = false
                         _terminalStreamStatus.value = "实时同步中"
                     }
@@ -290,6 +330,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         scheduleSessionOutputCacheSave()
                         if (_selectedSessionId.value == sessionId) {
                             _terminalOutput.value = sessionOutputCache[sessionId].orEmpty()
+                            _terminalOutputVersion.value = currentSessionOutputVersion(sessionId)
                             _replayLoading.value = false
                             _terminalStreamStatus.value = if (data.isNotBlank()) "已加载桌面端回放" else "桌面端暂无可回放内容"
                         }
@@ -306,6 +347,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (_selectedSessionId.value == sid) {
                         _selectedSessionId.value = null
                         _terminalOutput.value = ""
+                        _terminalOutputVersion.value = 0L
                         _replayLoading.value = false
                         _terminalStreamStatus.value = "终端已关闭"
                     }
@@ -430,6 +472,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _sessions.value = emptyList()
         _selectedSessionId.value = null
         _terminalOutput.value = ""
+        _terminalOutputVersion.value = 0L
         _replayLoading.value = false
         _terminalStreamStatus.value = "已断开连接"
         _statusMessage.value = "已断开连接"
@@ -442,6 +485,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             dbg("SELECT_SESSION -> null (deselect)")
             _selectedSessionId.value = null
             _terminalOutput.value = ""
+            _terminalOutputVersion.value = 0L
             _replayLoading.value = false
             _terminalStreamStatus.value = "等待进入终端"
             replayTimeoutJob?.cancel()
@@ -452,6 +496,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         dbg("SELECT_SESSION sid=${sessionId.take(8)} cache.len=$cachedLen")
         _selectedSessionId.value = sessionId
         _terminalOutput.value = sessionOutputCache[sessionId].orEmpty()
+        _terminalOutputVersion.value = currentSessionOutputVersion(sessionId)
         dbg("SELECT_SESSION output.len=${_terminalOutput.value.length}")
         _replayLoading.value = _terminalOutput.value.isBlank()
         _terminalStreamStatus.value = if (_terminalOutput.value.isBlank()) "正在请求桌面端回放…" else "已加载本地缓存，正在同步实时输出"
@@ -757,6 +802,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun clearSessionOutputCache() {
         sessionOutputCache.clear()
+        sessionOutputVersion.clear()
         prefs.edit().remove(KEY_SESSION_OUTPUT_CACHE).apply()
     }
 
@@ -792,8 +838,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun trimReplay(text: String): String {
-        val maxLength = 200_000
-        return if (text.length <= maxLength) text else text.takeLast(maxLength)
+        val maxLines = 1_000
+        val maxLength = 400_000
+        var start = 0
+        var lineCount = 0
+        for (index in text.length - 1 downTo 0) {
+            if (text[index] == '\n') {
+                lineCount += 1
+                if (lineCount >= maxLines) {
+                    start = index + 1
+                    break
+                }
+            }
+        }
+        val byLines = if (start > 0) text.substring(start) else text
+        return if (byLines.length <= maxLength) byLines else byLines.takeLast(maxLength)
     }
 
     private fun mergeReplayWithLive(replay: String, live: String): String {
@@ -809,5 +868,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         return replay + live
+    }
+
+    private fun nextSessionOutputVersion(sessionId: String): Long {
+        val next = (sessionOutputVersion[sessionId] ?: 0L) + 1L
+        sessionOutputVersion[sessionId] = next
+        return next
+    }
+
+    private fun currentSessionOutputVersion(sessionId: String): Long {
+        return sessionOutputVersion[sessionId] ?: 0L
     }
 }

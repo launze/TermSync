@@ -58,6 +58,29 @@
             text-overflow: ellipsis;
             white-space: nowrap;
             text-align: left;
+            cursor: text;
+        }
+        .tab-title.editing,
+        .pane-title-text.editing {
+            overflow: visible;
+        }
+        .inline-title-input {
+            width: 100%;
+            min-width: 0;
+            border: 1px solid #007acc;
+            border-radius: 4px;
+            background-color: #1f1f1f;
+            color: #ffffff;
+            font: inherit;
+            line-height: inherit;
+            padding: 2px 6px;
+            outline: none;
+        }
+        .tab-title-input {
+            min-width: 96px;
+        }
+        .pane-title-input {
+            min-width: 120px;
         }
         .tab-close {
             margin-left: 6px;
@@ -183,7 +206,20 @@
             color: #888;
             min-height: 22px;
         }
-        .pane-title { display: flex; align-items: center; gap: 6px; }
+        .pane-title {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            min-width: 0;
+            flex: 1;
+        }
+        .pane-title-text {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            cursor: text;
+        }
         .pane-indicator {
             width: 8px; height: 8px;
             border-radius: 50%;
@@ -1113,6 +1149,19 @@
             return null;
         }
 
+        function defaultTabTitle(tabId) {
+            return '标签 ' + tabId;
+        }
+
+        function defaultPaneTitle(paneId) {
+            return 'Terminal ' + paneId;
+        }
+
+        function normalizeEditableTitle(value, fallback) {
+            const trimmed = String(value || '').trim();
+            return trimmed || fallback;
+        }
+
         class SettingsManager {
             constructor() {
                 this.defaults = {
@@ -1307,7 +1356,7 @@
                 pane.innerHTML = '<div class="pane-header">' +
                     '<div class="pane-title">' +
                         '<span class="pane-indicator" id="indicator-' + paneId + '"></span>' +
-                        '<span id="title-' + paneId + '">Terminal ' + paneId + '</span>' +
+                        '<span class="pane-title-text" id="title-' + paneId + '">' + defaultPaneTitle(paneId) + '</span>' +
                     '</div>' +
                     '<div class="pane-actions">' +
                         '<button class="pane-action" onclick="window.app.showSplitMenuForPane(event, ' + paneId + ')" title="分割">✂</button>' +
@@ -1324,6 +1373,10 @@
                 pane.addEventListener('contextmenu', (e) => {
                     e.preventDefault();
                     window.app.showContextMenu(e, paneId);
+                });
+                pane.querySelector('.pane-title-text')?.addEventListener('dblclick', (e) => {
+                    e.stopPropagation();
+                    window.app.startPaneTitleEdit(paneId);
                 });
                 this.paneElements.set(paneId, pane);
                 return pane;
@@ -1655,6 +1708,7 @@
                 this.sessionActivity = new Map();
                 this.sessionMetaSendTimers = new Map();
                 this.replayBuffers = new Map();
+                this.titleEditState = null;
                 this.aiPanelOpen = false;
                 this.aiRequestPending = false;
                 this.aiResponseBlocks = [];
@@ -2350,7 +2404,7 @@
             saveWorkspace() {
                 try {
                     const state = {
-                        version: 2,
+                        version: 3,
                         nextTabId: this.nextTabId,
                         activeTabId: this.activeTabId,
                         activePaneId: this.activePaneId,
@@ -2363,7 +2417,8 @@
                             root: this.splitTree.cloneNode(tab.root),
                             panes: Array.from(tab.panes).map((paneId) => ({
                                 paneId,
-                                cwd: this.terminals.get(paneId)?.cwd || null
+                                cwd: this.terminals.get(paneId)?.cwd || null,
+                                title: this.getPaneTitle(paneId, tab)
                             }))
                         }))
                     };
@@ -2409,9 +2464,18 @@
                     );
                     const tab = {
                         id: Number(tabState.id),
-                        title: tabState.title || ('标签 ' + tabState.id),
+                        title: normalizeEditableTitle(tabState.title, defaultTabTitle(tabState.id)),
                         root,
-                        panes: new Set(paneIds)
+                        panes: new Set(paneIds),
+                        paneTitles: new Map(
+                            paneIds.map((paneId) => [
+                                paneId,
+                                normalizeEditableTitle(
+                                    paneMeta.get(paneId)?.title,
+                                    defaultPaneTitle(paneId)
+                                )
+                            ])
+                        )
                     };
                     this.tabs.set(tab.id, tab);
                     this.nextTabId = Math.max(this.nextTabId, tab.id);
@@ -2448,7 +2512,11 @@
 
                 for (const tab of this.tabs.values()) {
                     for (const paneId of tab.panes) {
-                        this.ensureBackendSession(paneId, tab.title, this.terminals.get(paneId)?.cwd || null);
+                        this.ensureBackendSession(
+                            paneId,
+                            this.getSessionTitleForPane(paneId, tab),
+                            this.terminals.get(paneId)?.cwd || null
+                        );
                     }
                 }
 
@@ -2461,6 +2529,221 @@
                 const activeTab = this.tabs.get(this.activeTabId) || this.tabs.values().next().value;
                 if (activeTab?.root) {
                     this.splitTree.setRoot(activeTab.root);
+                }
+            }
+
+            getPaneTitle(paneId, tab = this.findTabByPaneId(paneId)) {
+                if (!tab) return defaultPaneTitle(paneId);
+                if (!(tab.paneTitles instanceof Map)) {
+                    tab.paneTitles = new Map();
+                }
+                const stored = tab.paneTitles.get(paneId);
+                if (stored) return stored;
+                const fallback = defaultPaneTitle(paneId);
+                tab.paneTitles.set(paneId, fallback);
+                return fallback;
+            }
+
+            setPaneTitleValue(tab, paneId, title) {
+                if (!tab) return defaultPaneTitle(paneId);
+                if (!(tab.paneTitles instanceof Map)) {
+                    tab.paneTitles = new Map();
+                }
+                const normalized = normalizeEditableTitle(title, defaultPaneTitle(paneId));
+                tab.paneTitles.set(paneId, normalized);
+                return normalized;
+            }
+
+            getSessionTitleForPane(paneId, tab = this.findTabByPaneId(paneId)) {
+                if (!tab) return defaultPaneTitle(paneId);
+                const paneTitle = this.getPaneTitle(paneId, tab);
+                const hasCustomPaneTitle = paneTitle !== defaultPaneTitle(paneId);
+                if (tab.panes.size <= 1) {
+                    return hasCustomPaneTitle ? paneTitle : tab.title;
+                }
+                return tab.title + ' / ' + paneTitle;
+            }
+
+            updatePaneTitleElement(paneId, tab = this.findTabByPaneId(paneId)) {
+                const titleEl = document.getElementById('title-' + paneId);
+                if (!titleEl || (this.titleEditState && this.titleEditState.kind === 'pane' && this.titleEditState.id === paneId)) {
+                    return;
+                }
+                titleEl.textContent = this.getPaneTitle(paneId, tab);
+                titleEl.title = this.getPaneTitle(paneId, tab);
+            }
+
+            syncPaneTitleElements(tab = this.tabs.get(this.activeTabId)) {
+                if (!tab) return;
+                for (const paneId of tab.panes) {
+                    this.updatePaneTitleElement(paneId, tab);
+                }
+            }
+
+            beginTitleEdit(options) {
+                if (!options || !options.element || !options.apply) return;
+                if (this.titleEditState && this.titleEditState.kind === options.kind && this.titleEditState.id === options.id) {
+                    this.titleEditState.input?.focus();
+                    this.titleEditState.input?.select();
+                    return;
+                }
+                this.finishTitleEdit(true);
+
+                const titleEl = options.element;
+                const currentValue = String(options.value || '');
+                titleEl.classList.add('editing');
+                titleEl.textContent = '';
+
+                const input = document.createElement('input');
+                input.type = 'text';
+                input.className = 'inline-title-input ' + options.inputClass;
+                input.value = currentValue;
+                input.spellcheck = false;
+                input.setAttribute('aria-label', options.ariaLabel || '编辑标题');
+                titleEl.appendChild(input);
+
+                this.titleEditState = {
+                    kind: options.kind,
+                    id: options.id,
+                    element: titleEl,
+                    input: input,
+                    apply: options.apply,
+                    restore: options.restore || (() => {})
+                };
+
+                const stop = (event) => event.stopPropagation();
+                input.addEventListener('click', stop);
+                input.addEventListener('dblclick', stop);
+                input.addEventListener('keydown', (event) => {
+                    event.stopPropagation();
+                    if (event.key === 'Enter') {
+                        event.preventDefault();
+                        this.finishTitleEdit(true);
+                    } else if (event.key === 'Escape') {
+                        event.preventDefault();
+                        this.finishTitleEdit(false);
+                    }
+                });
+                input.addEventListener('blur', () => this.finishTitleEdit(true));
+
+                requestAnimationFrame(() => {
+                    input.focus();
+                    input.select();
+                });
+            }
+
+            finishTitleEdit(commit) {
+                const state = this.titleEditState;
+                if (!state) return;
+                this.titleEditState = null;
+
+                const nextValue = state.input ? state.input.value : '';
+                if (state.element?.isConnected) {
+                    state.element.classList.remove('editing');
+                }
+
+                if (commit) {
+                    state.apply(nextValue);
+                    return;
+                }
+
+                state.restore();
+            }
+
+            startTabTitleEdit(tabId) {
+                if (this.titleEditState && (this.titleEditState.kind !== 'tab' || this.titleEditState.id !== tabId)) {
+                    this.finishTitleEdit(true);
+                }
+                const tab = this.tabs.get(tabId);
+                const titleEl = document.querySelector('.tab[data-tab-id="' + tabId + '"] .tab-title');
+                if (!tab || !titleEl) return;
+                this.beginTitleEdit({
+                    kind: 'tab',
+                    id: tabId,
+                    element: titleEl,
+                    value: tab.title,
+                    inputClass: 'tab-title-input',
+                    ariaLabel: '编辑标签名称',
+                    apply: (value) => this.updateTabTitle(tabId, value),
+                    restore: () => this.renderTabs()
+                });
+            }
+
+            startPaneTitleEdit(paneId) {
+                if (this.titleEditState && (this.titleEditState.kind !== 'pane' || this.titleEditState.id !== paneId)) {
+                    this.finishTitleEdit(true);
+                }
+                const tab = this.findTabByPaneId(paneId);
+                const titleEl = document.getElementById('title-' + paneId);
+                if (!tab || !titleEl) return;
+                this.setActivePane(paneId);
+                this.beginTitleEdit({
+                    kind: 'pane',
+                    id: paneId,
+                    element: titleEl,
+                    value: this.getPaneTitle(paneId, tab),
+                    inputClass: 'pane-title-input',
+                    ariaLabel: '编辑终端名称',
+                    apply: (value) => this.updatePaneTitle(paneId, value),
+                    restore: () => this.updatePaneTitleElement(paneId, tab)
+                });
+            }
+
+            updateTabTitle(tabId, title) {
+                const tab = this.tabs.get(tabId);
+                if (!tab) return;
+                const normalized = normalizeEditableTitle(title, defaultTabTitle(tabId));
+                if (tab.title === normalized) {
+                    this.renderTabs();
+                    return;
+                }
+                tab.title = normalized;
+                this.renderTabs();
+                if (this.aiPanelOpen) this.updateAiContextPreview();
+                this.scheduleWorkspaceSave();
+                this.syncSessionTitlesForTab(tab);
+            }
+
+            updatePaneTitle(paneId, title) {
+                const tab = this.findTabByPaneId(paneId);
+                if (!tab) return;
+                this.setPaneTitleValue(tab, paneId, title);
+                this.updatePaneTitleElement(paneId, tab);
+                if (this.aiPanelOpen) this.updateAiContextPreview();
+                this.scheduleWorkspaceSave();
+                this.syncSessionTitleForPane(paneId, tab);
+            }
+
+            syncSessionTitlesForTab(tab) {
+                if (!tab) return;
+                for (const paneId of tab.panes) {
+                    this.syncSessionTitleForPane(paneId, tab);
+                }
+            }
+
+            async syncSessionTitleForPane(paneId, tab = this.findTabByPaneId(paneId)) {
+                if (!tab || typeof invoke === 'undefined') return;
+                const sessionId = this.sessionIdForPane(paneId);
+                const title = this.getSessionTitleForPane(paneId, tab);
+                const state = this.ensureSessionActivity(paneId, title);
+                state.title = title;
+                const payload = {
+                    title: state.title || title,
+                    activity: state.activity || '',
+                    preview: state.preview || '',
+                    taskState: state.taskState || 'idle'
+                };
+                try {
+                    await invoke('update_session_meta', {
+                        sessionId: sessionId,
+                        title: payload.title,
+                        activity: payload.activity,
+                        preview: payload.preview,
+                        taskState: payload.taskState
+                    });
+                    state.lastSentKey = JSON.stringify(payload);
+                } catch (err) {
+                    console.warn('Update session title failed:', err);
                 }
             }
 
@@ -2503,7 +2786,7 @@
                     state = {
                         sessionId: sessionId,
                         paneId: paneId,
-                        title: title || ('标签 ' + paneId),
+                        title: title || defaultPaneTitle(paneId),
                         activity: '终端已就绪',
                         preview: '',
                         taskState: 'idle',
@@ -2570,7 +2853,10 @@
                 if (paneId === null) return;
                 const terminal = this.terminals.get(paneId);
                 const tab = Array.from(this.tabs.values()).find((item) => item.panes.has(paneId));
-                const state = this.ensureSessionActivity(paneId, tab?.title);
+                const state = this.ensureSessionActivity(
+                    paneId,
+                    tab ? this.getSessionTitleForPane(paneId, tab) : defaultPaneTitle(paneId)
+                );
                 const meaningfulLine = extractMeaningfulLine(text);
                 const sourceText = collapseWhitespace(stripAnsi(text));
                 const lower = sourceText.toLowerCase();
@@ -2647,6 +2933,7 @@
                 const state = this.sessionActivity.get(sessionId);
                 if (!state) return;
                 const payload = {
+                    title: state.title || '',
                     activity: state.activity || '',
                     preview: state.preview || '',
                     taskState: state.taskState || 'idle'
@@ -2656,6 +2943,7 @@
                 try {
                     await invoke('update_session_meta', {
                         sessionId: sessionId,
+                        title: payload.title,
                         activity: payload.activity,
                         preview: payload.preview,
                         taskState: payload.taskState
@@ -2931,13 +3219,14 @@
                 }
                 try {
                     const shell = this.resolveShellCommand();
-                    this.debug('session:create', { paneId, title, shell, cwd });
-                    this.ensureSessionActivity(paneId, title || ('Terminal ' + paneId));
+                    const sessionTitle = title || this.getSessionTitleForPane(paneId) || defaultPaneTitle(paneId);
+                    this.debug('session:create', { paneId, title: sessionTitle, shell, cwd });
+                    this.ensureSessionActivity(paneId, sessionTitle);
                     await invoke('create_session', {
                         sessionId: this.sessionIdForPane(paneId),
                         cols: 80,
                         rows: 24,
-                        title: title || ('Terminal ' + paneId),
+                        title: sessionTitle,
                         shell: shell,
                         cwd: cwd || null
                     });
@@ -2948,7 +3237,7 @@
                         terminal.queueResize();
                     }
                     const sessionId = this.sessionIdForPane(paneId);
-                    const state = this.ensureSessionActivity(paneId, title || ('Terminal ' + paneId));
+                    const state = this.ensureSessionActivity(paneId, sessionTitle);
                     if (!state.preview) {
                         state.preview = shell;
                     }
@@ -3013,7 +3302,13 @@
                     ? options.cwd
                     : (this.terminals.get(this.activePaneId)?.cwd || null);
                 this.debug('tab:create', { tabId, paneId, reusedPane: !!initPaneId, cwd });
-                const tab = { id: tabId, title: options.title || ('标签 ' + tabId), root: rootNode, panes: new Set([paneId]) };
+                const tab = {
+                    id: tabId,
+                    title: normalizeEditableTitle(options.title, defaultTabTitle(tabId)),
+                    root: rootNode,
+                    panes: new Set([paneId]),
+                    paneTitles: new Map([[paneId, normalizeEditableTitle(options.paneTitle, defaultPaneTitle(paneId))]])
+                };
                 this.tabs.set(tabId, tab);
                 this.activeTabId = tabId;
                 const terminal = new LocalTerminal(paneId, this.settings.get('shell'), { cwd });
@@ -3021,7 +3316,7 @@
                 this.renderTabs();
                 this.renderActiveTab();
                 this.focusPane(paneId);
-                this.ensureBackendSession(paneId, tab.title, cwd);
+                this.ensureBackendSession(paneId, this.getSessionTitleForPane(paneId, tab), cwd);
                 this.updateStatusBar();
                 this.scheduleWorkspaceSave();
                 return tabId;
@@ -3033,6 +3328,7 @@
                 this.splitTree.setRoot(tab.root);
                 this.splitTree.render();
                 this.mountTabTerminals(tab);
+                this.syncPaneTitleElements(tab);
             }
 
             mountTabTerminals(tab) {
@@ -3060,6 +3356,9 @@
                 if (this.tabs.size <= 1) { this.showToast('至少保留一个标签页', 'warning'); return; }
                 const tab = this.tabs.get(tabId);
                 if (!tab) return;
+                if (this.titleEditState && ((this.titleEditState.kind === 'tab' && this.titleEditState.id === tabId) || (this.titleEditState.kind === 'pane' && tab.panes.has(this.titleEditState.id)))) {
+                    this.finishTitleEdit(false);
+                }
                 for (const pid of tab.panes) {
                     this.destroyBackendSession(pid);
                     this.terminals.get(pid)?.dispose();
@@ -3087,9 +3386,26 @@
                 tabBar.querySelectorAll('.tab').forEach(el => el.remove());
                 for (const tab of this.tabs.values()) {
                     const el = document.createElement('button');
+                    const titleEl = document.createElement('span');
+                    const closeEl = document.createElement('span');
                     el.className = 'tab' + (tab.id === this.activeTabId ? ' active' : '');
-                    el.innerHTML = '<span class="tab-title">' + tab.title + '</span>' +
-                        '<span class="tab-close" onclick="event.stopPropagation(); window.app.closeTab(' + tab.id + ')">×</span>';
+                    el.type = 'button';
+                    el.dataset.tabId = tab.id;
+                    titleEl.className = 'tab-title';
+                    titleEl.textContent = tab.title;
+                    titleEl.title = tab.title;
+                    titleEl.addEventListener('dblclick', (event) => {
+                        event.stopPropagation();
+                        this.startTabTitleEdit(tab.id);
+                    });
+                    closeEl.className = 'tab-close';
+                    closeEl.textContent = '×';
+                    closeEl.addEventListener('click', (event) => {
+                        event.stopPropagation();
+                        this.closeTab(tab.id);
+                    });
+                    el.appendChild(titleEl);
+                    el.appendChild(closeEl);
                     el.addEventListener('click', () => this.switchTab(tab.id));
                     tabBar.insertBefore(el, addBtn);
                 }
@@ -3118,6 +3434,9 @@
                 const tab = this.findTabByPaneId(paneId);
                 if (!tab) return;
                 if (tab.panes.size <= 1) { this.closeTab(tab.id); return; }
+                if (this.titleEditState && this.titleEditState.kind === 'pane' && this.titleEditState.id === paneId) {
+                    this.finishTitleEdit(false);
+                }
                 const closingActiveTab = this.activeTabId === tab.id;
                 this.splitTree.setRoot(tab.root);
                 this.destroyBackendSession(paneId);
@@ -3128,8 +3447,10 @@
                 this.forgetSessionActivity(paneId);
                 if (tab) {
                     tab.panes.delete(paneId);
+                    tab.paneTitles?.delete(paneId);
                     tab.root = this.splitTree.root;
                     this.mountTabTerminals(tab);
+                    this.syncSessionTitlesForTab(tab);
                 }
                 const remaining = tab ? Array.from(tab.panes) : [];
                 if (closingActiveTab) {
@@ -3226,12 +3547,19 @@
                 if (newPaneId !== null) {
                     tab.root = this.splitTree.root;
                     tab.panes = new Set(this.splitTree.collectPaneIds(tab.root));
+                    this.setPaneTitleValue(tab, newPaneId, defaultPaneTitle(newPaneId));
                     const terminal = new LocalTerminal(newPaneId, this.settings.get('shell'), {
                         cwd: sourceTerminal?.cwd || null
                     });
                     this.terminals.set(newPaneId, terminal);
                     this.mountTabTerminals(tab);
-                    this.ensureBackendSession(newPaneId, tab.title + ' / ' + newPaneId, sourceTerminal?.cwd || null);
+                    this.syncPaneTitleElements(tab);
+                    this.ensureBackendSession(
+                        newPaneId,
+                        this.getSessionTitleForPane(newPaneId, tab),
+                        sourceTerminal?.cwd || null
+                    );
+                    this.syncSessionTitleForPane(sourcePaneId, tab);
                     this.focusPane(newPaneId);
                     this.updateStatusBar();
                     this.debug('pane:split:done', {
@@ -3263,9 +3591,12 @@
                 }
                 tab.root = keepNode;
                 tab.panes = new Set([keepPaneId]);
+                tab.paneTitles = new Map([[keepPaneId, this.getPaneTitle(keepPaneId, tab)]]);
                 this.splitTree.setRoot(keepNode);
                 this.splitTree.render();
                 this.mountTabTerminals(tab);
+                this.syncPaneTitleElements(tab);
+                this.syncSessionTitleForPane(keepPaneId, tab);
                 this.focusPane(keepPaneId);
                 this.updateStatusBar();
                 this.showToast('已取消分割', 'success');

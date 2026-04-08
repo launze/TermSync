@@ -219,24 +219,43 @@ pub async fn relay_terminal_replay(
 #[command]
 pub async fn update_session_meta(
     session_id: String,
+    title: Option<String>,
     activity: Option<String>,
     preview: Option<String>,
     task_state: Option<String>,
     state: State<'_, WssClientState>,
+    pty_manager: State<'_, PtyManager>,
 ) -> Result<String, String> {
     let session_id = require_session_id(session_id)?;
+    let title = title.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
     crate::log_debug(&format!(
-        "command:update_session_meta session={} task_state={:?} activity={:?}",
-        session_id, task_state, activity
+        "command:update_session_meta session={} title={:?} task_state={:?} activity={:?}",
+        session_id, title, task_state, activity
     ));
-    state
-        .send_session_update(
-            &session_id,
-            activity.as_deref(),
-            preview.as_deref(),
-            task_state.as_deref(),
-        )
-        .await?;
+
+    if let Some(ref value) = title {
+        pty_manager.update_session_title(&session_id, value);
+    }
+
+    if state.is_connected() {
+        state
+            .send_session_update(
+                &session_id,
+                title.as_deref(),
+                activity.as_deref(),
+                preview.as_deref(),
+                task_state.as_deref(),
+            )
+            .await?;
+    }
+
     Ok("Session metadata updated".to_string())
 }
 

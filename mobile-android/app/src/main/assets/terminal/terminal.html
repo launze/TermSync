@@ -12,7 +12,7 @@
       width: 100%;
       height: 100%;
       overflow: hidden;
-      background: #000000;
+      background: #1e1e1e;
     }
 
     body {
@@ -24,7 +24,6 @@
       inset: 0;
       width: 100%;
       height: 100%;
-      padding: 8px;
       box-sizing: border-box;
     }
 
@@ -35,9 +34,9 @@
       padding: 8px;
       box-sizing: border-box;
       overflow: auto;
-      background: #000000;
-      color: #d4d4d4;
-      font: 13px/1.35 monospace;
+      background: #1e1e1e;
+      color: #cccccc;
+      font: 13px/1.4 'Cascadia Code', 'Consolas', 'Courier New', monospace;
       white-space: pre-wrap;
       word-break: break-word;
       display: none;
@@ -48,18 +47,32 @@
 
     .xterm {
       height: 100%;
-      padding: 0;
+      padding: 8px;
+      box-sizing: border-box;
+      background: #1e1e1e;
+    }
+
+    .xterm-viewport,
+    #fallback {
+      -webkit-overflow-scrolling: touch;
+      overscroll-behavior: contain;
+      touch-action: pan-y;
     }
 
     .xterm-viewport::-webkit-scrollbar,
     #fallback::-webkit-scrollbar {
-      width: 6px;
+      width: 10px;
     }
 
     .xterm-viewport::-webkit-scrollbar-thumb,
     #fallback::-webkit-scrollbar-thumb {
-      background: #333333;
-      border-radius: 6px;
+      background: #3c3c3c;
+      border-radius: 8px;
+    }
+
+    .xterm-viewport::-webkit-scrollbar-thumb:hover,
+    #fallback::-webkit-scrollbar-thumb:hover {
+      background: #505050;
     }
   </style>
 </head>
@@ -86,9 +99,13 @@
     var fallbackSyncTimer = null;
     var fallbackSyncDirty = false;
     var fallbackSyncReason = "";
+    var appendMaintenanceTimer = null;
+    var boundViewport = null;
+    var followOutput = true;
     var FALLBACK_SYNC_DEBOUNCE_MS = 280;
-    var FALLBACK_MAX_LINES = 240;
-    var INITIAL_RENDER_MAX_CHARS = 50000;
+    var FALLBACK_MAX_LINES = 1000;
+    var INITIAL_RENDER_MAX_CHARS = 200000;
+    var INITIAL_RENDER_MAX_LINES = 1000;
     var DEFAULT_FONT_SIZE = 13;
     var renderMode = "mobile-fit";
     var fontScale = 1;
@@ -149,10 +166,16 @@
         .replace(/\r(?!\n)/g, "\n");
     }
 
+    function isNearBottomEl(el) {
+      if (!el) return true;
+      return el.scrollTop + el.clientHeight >= el.scrollHeight - 32;
+    }
+
     function flushFallback(autoScroll) {
       if (!fallbackEl) return;
+      var shouldFollow = typeof autoScroll === "boolean" ? autoScroll : isNearBottomEl(fallbackEl);
       fallbackEl.textContent = fallbackBuffer;
-      if (autoScroll !== false) {
+      if (shouldFollow) {
         fallbackEl.scrollTop = fallbackEl.scrollHeight;
       }
     }
@@ -174,6 +197,20 @@
         normalized.push(line);
       }
       return normalized;
+    }
+
+    function trimToLastLines(text, maxLines) {
+      if (!text || maxLines <= 0) return text || "";
+      var lineCount = 0;
+      for (var i = text.length - 1; i >= 0; i -= 1) {
+        if (text.charCodeAt(i) === 10) {
+          lineCount += 1;
+          if (lineCount >= maxLines) {
+            return text.slice(i + 1);
+          }
+        }
+      }
+      return text;
     }
 
     function syncFallbackFromTerminal() {
@@ -202,15 +239,16 @@
 
     function applyRawFallback(mode, data) {
       if (!fallbackEl) return;
+      var shouldFollow = mode === "render" || isNearBottomEl(fallbackEl);
       if (mode === "render") {
         fallbackBuffer = stripAnsi(data);
       } else if (mode === "append" && data) {
         fallbackBuffer += stripAnsi(data);
       }
-      flushFallback(true);
+      flushFallback(shouldFollow);
     }
 
-    function scheduleFallbackSync(reason, immediate) {
+    function scheduleFallbackSync(reason, immediate, autoScroll) {
       if (!fallbackEl) return;
       if (!selectionMode && fallbackEl.style.display === "none") return;
       fallbackSyncDirty = true;
@@ -230,7 +268,7 @@
         if (!ok) {
           console.warn("FALLBACK_SYNC_RAW[" + fallbackSyncReason + "]");
         }
-        flushFallback(true);
+        flushFallback(autoScroll);
       }, immediate ? 0 : FALLBACK_SYNC_DEBOUNCE_MS);
     }
 
@@ -243,7 +281,7 @@
         terminalHost.style.visibility = showFallback ? "hidden" : "visible";
       }
       if (showFallback) {
-        scheduleFallbackSync("visibility", true);
+        scheduleFallbackSync("visibility", true, true);
       }
     }
 
@@ -263,11 +301,14 @@
     }
 
     function ensureLayout(reason) {
+      bindViewportTracking();
       fit();
       requestAnimationFrame(function() {
+        bindViewportTracking();
         fit();
         refreshTerminal();
         setTimeout(function() {
+          bindViewportTracking();
           fit();
           refreshTerminal();
           var health = healthSnapshot();
@@ -285,13 +326,26 @@
     }
 
     function viewport() {
-      return document.querySelector(".xterm-viewport");
+      return boundViewport || document.querySelector(".xterm-viewport");
+    }
+
+    function handleViewportScroll() {
+      followOutput = isNearBottomEl(viewport());
+    }
+
+    function bindViewportTracking() {
+      var el = document.querySelector(".xterm-viewport");
+      if (!el || el === boundViewport) return;
+      if (boundViewport) {
+        boundViewport.removeEventListener("scroll", handleViewportScroll);
+      }
+      boundViewport = el;
+      boundViewport.addEventListener("scroll", handleViewportScroll, { passive: true });
+      followOutput = isNearBottomEl(boundViewport);
     }
 
     function isNearBottom() {
-      var el = viewport();
-      if (!el) return true;
-      return el.scrollTop + el.clientHeight >= el.scrollHeight - 32;
+      return isNearBottomEl(viewport());
     }
 
     function decodeBase64Utf8(base64) {
@@ -310,10 +364,11 @@
     }
 
     function trimInitialRenderText(text) {
-      if (!text || text.length <= INITIAL_RENDER_MAX_CHARS) {
-        return text || "";
+      var next = trimToLastLines(text || "", INITIAL_RENDER_MAX_LINES);
+      if (next.length <= INITIAL_RENDER_MAX_CHARS) {
+        return next;
       }
-      return text.slice(text.length - INITIAL_RENDER_MAX_CHARS);
+      return next.slice(next.length - INITIAL_RENDER_MAX_CHARS);
     }
 
     function clampFontScale(value) {
@@ -327,7 +382,20 @@
       term.options.fontSize = Math.max(8, Math.min(24, DEFAULT_FONT_SIZE * fontScale));
     }
 
-    function writeTerminal(data, mode, followOutput) {
+    function scheduleAppendMaintenance(reason) {
+      if (appendMaintenanceTimer) return;
+      appendMaintenanceTimer = setTimeout(function() {
+        appendMaintenanceTimer = null;
+        bindViewportTracking();
+        if (!isHealthy()) {
+          ensureLayout(reason + ".recover");
+        } else {
+          updateFallbackVisibility(false);
+        }
+      }, 120);
+    }
+
+    function writeTerminal(data, mode, shouldFollowOutput) {
       if (!xtermReady || !term) {
         console.error(mode.toUpperCase() + "_ERR: xterm not ready");
         applyRawFallback(mode, data);
@@ -349,13 +417,21 @@
 
         term.write(data, function() {
           writeCount += 1;
-          scheduleFallbackSync(mode + ".write", mode === "render");
-          ensureLayout(mode + ".write");
-          if (followOutput || mode === "render") {
-            requestAnimationFrame(function() { term.scrollToBottom(); });
+          scheduleFallbackSync(mode + ".write", mode === "render", shouldFollowOutput || mode === "render");
+          if (mode === "render") {
+            bindViewportTracking();
+            ensureLayout(mode + ".write");
+          } else {
+            scheduleAppendMaintenance(mode + ".write");
+          }
+          if (shouldFollowOutput || mode === "render") {
+            requestAnimationFrame(function() {
+              term.scrollToBottom();
+              followOutput = true;
+            });
           }
           if (writeCount <= 5 || writeCount % 20 === 0) {
-            console.log(mode.toUpperCase() + "_OK: data.len=" + data.length + " writeCount=" + writeCount + " follow=" + !!followOutput);
+            console.log(mode.toUpperCase() + "_OK: data.len=" + data.length + " writeCount=" + writeCount + " follow=" + !!shouldFollowOutput);
           }
         });
 
@@ -376,15 +452,31 @@
       } else {
         term = new Terminal({
           convertEol: false,
-          cursorBlink: false,
+          cursorBlink: true,
           fontSize: DEFAULT_FONT_SIZE,
-          fontFamily: "monospace",
-          scrollback: 20000,
+          fontFamily: "'Cascadia Code', 'Consolas', 'Courier New', monospace",
+          scrollback: 5000,
           theme: {
-            background: "#000000",
-            foreground: "#d4d4d4",
+            background: "#1e1e1e",
+            foreground: "#cccccc",
             cursor: "#4ec9b0",
-            selectionBackground: "rgba(14,99,156,0.35)"
+            selectionBackground: "rgba(0,122,204,0.35)",
+            black: "#1e1e1e",
+            red: "#f44747",
+            green: "#4ec9b0",
+            yellow: "#cca700",
+            blue: "#0e639c",
+            magenta: "#c586c0",
+            cyan: "#4fc1ff",
+            white: "#d4d4d4",
+            brightBlack: "#808080",
+            brightRed: "#ff6b68",
+            brightGreen: "#6ad7be",
+            brightYellow: "#dcdcaa",
+            brightBlue: "#569cd6",
+            brightMagenta: "#d670d6",
+            brightCyan: "#9cdcfe",
+            brightWhite: "#ffffff"
           }
         });
 
@@ -401,6 +493,7 @@
         } else {
           term.open(terminalHost);
           xtermReady = true;
+          bindViewportTracking();
           console.log("XTERM_INIT: Terminal opened OK");
           ensureLayout("init");
         }
@@ -432,6 +525,7 @@
 
     window.termsyncAppend = function(data) {
       if (!data) return "OK:empty";
+      bindViewportTracking();
       return writeTerminal(data, "append", isNearBottom());
     };
 
@@ -455,6 +549,7 @@
 
     window.termsyncScrollToBottom = function() {
       if (term) term.scrollToBottom();
+      followOutput = true;
       if (fallbackEl) {
         fallbackEl.scrollTop = fallbackEl.scrollHeight;
       }
@@ -497,7 +592,7 @@
     window.termsyncSetSelectionMode = function(enabled) {
       selectionMode = !!enabled;
       if (selectionMode) {
-        scheduleFallbackSync("selection.on", true);
+        scheduleFallbackSync("selection.on", true, true);
       } else if (fallbackSyncTimer) {
         clearTimeout(fallbackSyncTimer);
         fallbackSyncTimer = null;
@@ -528,7 +623,7 @@
       }
 
       try {
-        // Measure available container width (minus padding)
+        // Measure available container width
         var hostStyle = window.getComputedStyle(terminalHost);
         var paddingLeft = parseInt(hostStyle.paddingLeft) || 0;
         var paddingRight = parseInt(hostStyle.paddingRight) || 0;
@@ -554,17 +649,23 @@
         term.resize(desktopCols, desktopRows || 24);
 
         requestAnimationFrame(function() {
-          // After resize, check actual dimensions and fine-tune
+          // After resize, check actual dimensions and fine-tune against both width and height.
           if (fitAddon) {
             var proposed = fitAddon.proposeDimensions();
-            if (proposed && proposed.cols < desktopCols) {
-              // Still too wide — shrink font more
-              var ratio = proposed.cols / desktopCols;
+            if (proposed) {
+              var colRatio = proposed.cols > 0 ? proposed.cols / desktopCols : 1;
+              var rowRatio = desktopRows > 0 && proposed.rows > 0 ? proposed.rows / desktopRows : 1;
+              var ratio = Math.min(colRatio, rowRatio);
               var adjusted = Math.floor(fontSize * ratio * 10) / 10;
-              adjusted = Math.max(3, adjusted);
-              console.log("MATCH_DESKTOP: fine-tune fontSize " + fontSize + " -> " + adjusted);
-              term.options.fontSize = adjusted;
-              term.resize(desktopCols, desktopRows || 24);
+              adjusted = Math.max(3, Math.min(16, adjusted));
+              if (Math.abs(adjusted - fontSize) >= 0.1) {
+                console.log(
+                  "MATCH_DESKTOP: fine-tune fontSize " + fontSize + " -> " + adjusted +
+                  " proposed=" + proposed.cols + "x" + proposed.rows
+                );
+                term.options.fontSize = adjusted;
+                term.resize(desktopCols, desktopRows || 24);
+              }
             }
           }
           refreshTerminal();

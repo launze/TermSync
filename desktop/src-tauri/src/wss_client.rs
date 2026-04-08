@@ -320,11 +320,15 @@ impl WssClientState {
     pub async fn send_session_update(
         &self,
         session_id: &str,
+        title: Option<&str>,
         activity: Option<&str>,
         preview: Option<&str>,
         task_state: Option<&str>,
     ) -> Result<(), String> {
         let mut payload = serde_json::Map::new();
+        if let Some(value) = title {
+            payload.insert("title".to_string(), Value::String(value.to_string()));
+        }
         if let Some(value) = activity {
             payload.insert("activity".to_string(), Value::String(value.to_string()));
         }

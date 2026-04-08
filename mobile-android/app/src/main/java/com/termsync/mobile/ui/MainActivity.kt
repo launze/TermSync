@@ -107,6 +107,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.launch
 import com.termsync.mobile.viewmodel.TerminalSession
+import com.termsync.mobile.viewmodel.TerminalDeltaBatch
 import com.termsync.mobile.viewmodel.ConnectionState
 import com.termsync.mobile.viewmodel.MainViewModel
 import com.termsync.mobile.viewmodel.SpecialKey
@@ -164,6 +165,7 @@ fun TTY1App(viewModel: MainViewModel) {
     val sessions by viewModel.sessions.collectAsState()
     val selectedSessionId by viewModel.selectedSessionId.collectAsState()
     val terminalOutput by viewModel.terminalOutput.collectAsState()
+    val terminalOutputVersion by viewModel.terminalOutputVersion.collectAsState()
     val statusMessage by viewModel.statusMessage.collectAsState()
     val replayLoading by viewModel.replayLoading.collectAsState()
     val terminalStreamStatus by viewModel.terminalStreamStatus.collectAsState()
@@ -206,6 +208,7 @@ fun TTY1App(viewModel: MainViewModel) {
                         connectionState = connectionState,
                         session = selectedSession,
                         output = terminalOutput,
+                        outputVersion = terminalOutputVersion,
                         terminalDelta = viewModel.terminalDelta,
                         replayLoading = replayLoading,
                         terminalStreamStatus = terminalStreamStatus,
@@ -776,7 +779,8 @@ fun TerminalViewScreen(
     connectionState: ConnectionState,
     session: TerminalSession?,
     output: String,
-    terminalDelta: SharedFlow<String>,
+    outputVersion: Long,
+    terminalDelta: SharedFlow<TerminalDeltaBatch>,
     replayLoading: Boolean,
     terminalStreamStatus: String,
     onSendInput: (String) -> Unit,
@@ -930,90 +934,75 @@ fun TerminalViewScreen(
                 )
             }
         }
-        Surface(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 2.dp)
-                .animateContentSize(),
-            shape = RoundedCornerShape(10.dp),
-            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
-        ) {
-            Column(modifier = Modifier.fillMaxWidth()) {
+        if (showLayoutControls) {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 2.dp)
+                    .animateContentSize(),
+                shape = RoundedCornerShape(10.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+            ) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = "布局与字号",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                if (showLayoutControls) {
                     Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(start = 10.dp, end = 10.dp, bottom = 8.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                        TextButton(
+                            onClick = { renderModeName = TerminalRenderMode.MobileFit.name },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
                         ) {
-                            TextButton(
-                                onClick = { renderModeName = TerminalRenderMode.MobileFit.name },
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
-                            ) {
-                                Text(
-                                    text = "手机适配",
-                                    color = if (renderMode == TerminalRenderMode.MobileFit) {
-                                        MaterialTheme.colorScheme.primary
-                                    } else {
-                                        MaterialTheme.colorScheme.onSurfaceVariant
-                                    },
-                                    style = MaterialTheme.typography.labelSmall
-                                )
-                            }
-                            TextButton(
-                                onClick = { renderModeName = TerminalRenderMode.DesktopMirror.name },
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
-                            ) {
-                                Text(
-                                    text = "桌面镜像",
-                                    color = if (renderMode == TerminalRenderMode.DesktopMirror) {
-                                        MaterialTheme.colorScheme.primary
-                                    } else {
-                                        MaterialTheme.colorScheme.onSurfaceVariant
-                                    },
-                                    style = MaterialTheme.typography.labelSmall
-                                )
-                            }
-                        }
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            TextButton(
-                                onClick = { fontScale = (fontScale - 0.1f).coerceIn(0.7f, 1.6f) },
-                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)
-                            ) {
-                                Text("A-", style = MaterialTheme.typography.labelSmall)
-                            }
                             Text(
-                                text = "${(fontScale * 100).toInt()}%",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                text = "手机适配",
+                                color = if (renderMode == TerminalRenderMode.MobileFit) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                                style = MaterialTheme.typography.labelSmall
                             )
-                            TextButton(
-                                onClick = { fontScale = (fontScale + 0.1f).coerceIn(0.7f, 1.6f) },
-                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)
-                            ) {
-                                Text("A+", style = MaterialTheme.typography.labelSmall)
-                            }
+                        }
+                        TextButton(
+                            onClick = { renderModeName = TerminalRenderMode.DesktopMirror.name },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                        ) {
+                            Text(
+                                text = "桌面镜像",
+                                color = if (renderMode == TerminalRenderMode.DesktopMirror) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                    }
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        TextButton(
+                            onClick = { fontScale = (fontScale - 0.1f).coerceIn(0.7f, 1.6f) },
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)
+                        ) {
+                            Text("A-", style = MaterialTheme.typography.labelSmall)
+                        }
+                        Text(
+                            text = "${(fontScale * 100).toInt()}%",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        TextButton(
+                            onClick = { fontScale = (fontScale + 0.1f).coerceIn(0.7f, 1.6f) },
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)
+                        ) {
+                            Text("A+", style = MaterialTheme.typography.labelSmall)
                         }
                     }
                 }
@@ -1041,12 +1030,13 @@ fun TerminalViewScreen(
                     .requiredHeightIn(min = terminalMinHeight)
                     .fillMaxWidth()
                     .padding(horizontal = 8.dp, vertical = 4.dp),
-                color = Color.Black,
+                color = Color(0xFF1E1E1E),
                 shape = RoundedCornerShape(8.dp)
             ) {
                 TerminalWebView(
                     sessionId = session?.sessionId,
                     output = output,
+                    outputVersion = outputVersion,
                     terminalDelta = terminalDelta,
                     desktopCols = session?.cols ?: 80,
                     desktopRows = session?.rows ?: 24,
@@ -1365,7 +1355,8 @@ fun ConnectionDialog(
 fun TerminalWebView(
     sessionId: String?,
     output: String,
-    terminalDelta: SharedFlow<String>,
+    outputVersion: Long,
+    terminalDelta: SharedFlow<TerminalDeltaBatch>,
     desktopCols: Int,
     desktopRows: Int,
     renderMode: TerminalRenderMode,
@@ -1378,6 +1369,7 @@ fun TerminalWebView(
     var pageReady by remember(sessionId) { mutableStateOf(false) }
     // Track the output that was last fully rendered (for session switch / replay detection)
     var lastFullRendered by remember(sessionId) { mutableStateOf("") }
+    var lastFullRenderedVersion by remember(sessionId) { mutableStateOf(0L) }
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(sessionId) {
@@ -1406,10 +1398,13 @@ fun TerminalWebView(
     // This bypasses Compose recomposition entirely for high-frequency updates
     LaunchedEffect(sessionId, pageReady, webView) {
         if (!pageReady || webView == null) return@LaunchedEffect
-        onDebug("WV_DELTA_COLLECTOR started sid=${sessionId?.take(8)}")
+        val activeSessionId = sessionId ?: return@LaunchedEffect
+        onDebug("WV_DELTA_COLLECTOR started sid=${activeSessionId.take(8)}")
         terminalDelta.collect { batchedDelta ->
             val wv = webView ?: return@collect
-            val b64 = batchedDelta.toJsBase64()
+            if (batchedDelta.sessionId != activeSessionId) return@collect
+            if (batchedDelta.version <= lastFullRenderedVersion) return@collect
+            val b64 = batchedDelta.data.toJsBase64()
             wv.evaluateJavascript(
                 "window.termsyncAppendBase64(\"$b64\");",
                 null
@@ -1420,8 +1415,8 @@ fun TerminalWebView(
     key(sessionId) {
         AndroidView(
             modifier = modifier
-                .background(Color.Black)
-                .border(1.dp, Color(0xFF1F1F1F), RoundedCornerShape(8.dp)),
+                .background(Color(0xFF1E1E1E))
+                .border(1.dp, Color(0xFF3C3C3C), RoundedCornerShape(8.dp)),
             factory = { context ->
                 onDebug("WV_FACTORY creating WebView sid=${sessionId?.take(8)}")
                 WebView(context).apply {
@@ -1435,7 +1430,7 @@ fun TerminalWebView(
                             evaluateJavascript("window.termsyncEnsureLayout && window.termsyncEnsureLayout(\"nativeLayout\")", null)
                         }
                     }
-                    setBackgroundColor(android.graphics.Color.BLACK)
+                    setBackgroundColor(android.graphics.Color.parseColor("#1E1E1E"))
                     webChromeClient = object : WebChromeClient() {
                         override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
                             val level = consoleMessage.messageLevel()?.name ?: "?"
@@ -1473,9 +1468,10 @@ fun TerminalWebView(
                 // Full render only when output changes (session switch / replay load).
                 // During streaming, _terminalOutput is NOT updated — all data goes through delta flow.
                 // So this block only fires on infrequent, "big" changes.
-                if (output.isNotEmpty() && output != lastFullRendered) {
-                    onDebug("WV_FULL_RENDER out.len=${output.length} reason=${if (lastFullRendered.isEmpty()) "initial" else "replay"}")
+                if (output.isNotEmpty() && (output != lastFullRendered || outputVersion != lastFullRenderedVersion)) {
+                    onDebug("WV_FULL_RENDER out.len=${output.length} version=$outputVersion reason=${if (lastFullRendered.isEmpty()) "initial" else "replay"}")
                     lastFullRendered = output
+                    lastFullRenderedVersion = outputVersion
                     view.evaluateJavascript(
                         "window.termsyncRenderBase64(\"${output.toJsBase64()}\");"
                     ) { result ->
@@ -1501,6 +1497,7 @@ fun TerminalWebView(
             webView = null
             pageReady = false
             lastFullRendered = ""
+            lastFullRenderedVersion = 0L
         }
     }
 }

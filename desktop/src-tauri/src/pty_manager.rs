@@ -215,6 +215,16 @@ impl PtyManager {
         Ok(())
     }
 
+    pub fn update_session_title(&self, session_id: &str, title: &str) -> bool {
+        let session = self.sessions.lock().get(session_id).cloned();
+        let Some(session) = session else {
+            return false;
+        };
+
+        session.lock().title = title.to_string();
+        true
+    }
+
     pub fn close_session(&self, session_id: &str) -> Result<(), String> {
         let session = self
             .sessions
