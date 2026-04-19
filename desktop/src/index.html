@@ -270,6 +270,191 @@
             flex: 1;
             min-height: 0;
         }
+        .command-library-popover {
+            position: fixed;
+            display: none;
+            flex-direction: column;
+            gap: 8px;
+            width: min(560px, calc(100vw - 16px));
+            max-height: min(72vh, 620px);
+            overflow: auto;
+            padding: 10px 12px;
+            background: linear-gradient(180deg, #252526 0%, #212224 100%);
+            border: 1px solid #34363a;
+            border-radius: 12px;
+            box-shadow: 0 18px 40px rgba(0, 0, 0, 0.42);
+            z-index: 2800;
+        }
+        .command-library-popover.visible {
+            display: flex;
+        }
+        .command-library-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+        }
+        .command-library-title {
+            display: flex;
+            align-items: baseline;
+            gap: 10px;
+            min-width: 0;
+        }
+        .command-library-title strong {
+            color: #f3f3f3;
+            font-size: 12px;
+            letter-spacing: 0.04em;
+        }
+        .command-library-title span {
+            color: #8a8d91;
+            font-size: 11px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .command-library-toggle {
+            border: 1px solid #3f4348;
+            background: #2c3137;
+            color: #d4d4d4;
+            border-radius: 999px;
+            padding: 4px 10px;
+            cursor: pointer;
+            font-size: 11px;
+        }
+        .command-library-toggle:hover {
+            background: #373d45;
+        }
+        .command-library-close {
+            width: 28px;
+            height: 28px;
+            border: 1px solid #3f4348;
+            background: #2c3137;
+            color: #d4d4d4;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            line-height: 1;
+        }
+        .command-library-close:hover {
+            background: #373d45;
+        }
+        .command-library-body {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .command-library-row-label {
+            color: #8a8d91;
+            font-size: 11px;
+        }
+        .command-library-strip {
+            display: flex;
+            gap: 6px;
+            overflow-x: auto;
+            padding-bottom: 2px;
+        }
+        .command-library-strip::-webkit-scrollbar {
+            height: 6px;
+        }
+        .command-library-strip::-webkit-scrollbar-thumb {
+            background: #3b3f45;
+            border-radius: 999px;
+        }
+        .command-library-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+        .command-library-grid.recommended {
+            align-items: flex-start;
+        }
+        .command-chip,
+        .command-tab,
+        .command-action-btn {
+            border: 1px solid #3f4348;
+            background: #2b2f34;
+            color: #d6d7da;
+            border-radius: 999px;
+            padding: 6px 11px;
+            font-size: 12px;
+            line-height: 1;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        .command-chip:hover,
+        .command-tab:hover,
+        .command-action-btn:hover {
+            background: #373d45;
+            border-color: #4b5159;
+        }
+        .command-tab.active {
+            background: rgba(78, 201, 176, 0.12);
+            border-color: rgba(78, 201, 176, 0.45);
+            color: #7be0c8;
+        }
+        .command-chip.favorite {
+            background: rgba(78, 201, 176, 0.12);
+            border-color: rgba(78, 201, 176, 0.32);
+            color: #7be0c8;
+        }
+        .command-chip.dangerous {
+            background: rgba(255, 152, 0, 0.12);
+            border-color: rgba(255, 152, 0, 0.38);
+            color: #ffcb7a;
+        }
+        .command-library-empty {
+            color: #8a8d91;
+            font-size: 12px;
+            padding: 6px 2px 2px;
+        }
+        .command-library-input-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        .command-library-input {
+            flex: 1;
+            min-width: 240px;
+            padding: 8px 12px;
+            border-radius: 10px;
+            border: 1px solid #444b54;
+            background: #1f2226;
+            color: #f5f5f5;
+            font-size: 13px;
+        }
+        .command-library-input:focus {
+            outline: none;
+            border-color: #4ec9b0;
+            box-shadow: 0 0 0 1px rgba(78, 201, 176, 0.24);
+        }
+        .command-library-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            align-items: center;
+        }
+        .command-action-btn.primary {
+            background: #0e639c;
+            border-color: #0e639c;
+            color: #ffffff;
+        }
+        .command-action-btn.primary:hover {
+            background: #1177ba;
+            border-color: #1177ba;
+        }
+        .command-action-btn:disabled {
+            opacity: 0.45;
+            cursor: not-allowed;
+        }
+        .command-library-hint {
+            color: #8a8d91;
+            font-size: 11px;
+            min-height: 16px;
+        }
+        .command-library-hint.dangerous {
+            color: #ffcb7a;
+        }
         .terminal-area {
             flex: 1;
             position: relative;
@@ -687,6 +872,7 @@
         <div class="tab-bar-actions">
             <button class="tab-icon-btn connection-status status-local" id="connStatus" onclick="window.app.toggleConnection()" title="本地模式" aria-label="连接状态"></button>
             <button class="tab-icon-btn" onclick="window.app.toggleAiPanel()" title="AI 助手" aria-label="AI 助手">AI</button>
+            <button class="tab-icon-btn" id="commandLibraryBtn" onclick="window.app.toggleCommandLibrary(event)" title="命令库" aria-label="命令库">⌘</button>
             <button class="tab-icon-btn" onclick="window.app.showSettings()" title="设置" aria-label="设置">⚙</button>
         </div>
         <div class="window-controls" id="windowControls" aria-label="窗口控制" hidden>
@@ -706,6 +892,8 @@
     <div class="main-container">
         <div class="terminal-area" id="terminalArea"></div>
     </div>
+
+    <div class="command-library-popover" id="commandLibraryPopover"></div>
 
     <!-- Status Bar -->
     <div class="status-bar">
@@ -1017,6 +1205,253 @@
             const normalized = collapseWhitespace(text);
             if (normalized.length <= maxLength) return normalized;
             return normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd() + '…';
+        }
+
+        const COMMAND_LIBRARY_STORAGE_KEY = 'TermSync-command-library';
+        const COMMAND_CATEGORY_LABELS = {
+            ai: 'AI 助手',
+            git: 'Git',
+            run: '运行',
+            test: '测试',
+            high_risk: '高权限',
+            custom: '自定义'
+        };
+        const COMMAND_CATEGORY_ORDER = ['ai', 'git', 'run', 'test', 'high_risk', 'custom'];
+        const COMMAND_PANEL_DEFAULT_SECTION_KEY = 'ai';
+
+        function normalizeCommandShortcutValue(value) {
+            return String(value || '')
+                .replace(/\r/g, '\n')
+                .split('\n')
+                .map((line) => line.trim())
+                .filter(Boolean)
+                .join(' && ');
+        }
+
+        function deriveCommandTitle(command) {
+            const normalized = normalizeCommandShortcutValue(command);
+            if (!normalized) return '自定义命令';
+            const compact = normalized.replace(/\s+/g, ' ').trim();
+            return compact.length <= 28 ? compact : compact.slice(0, 27) + '…';
+        }
+
+        function isDangerousCommand(command, category) {
+            const normalized = normalizeCommandShortcutValue(command);
+            const lower = normalized.toLowerCase();
+            if (!lower) return false;
+            if (category === 'high_risk') return true;
+            return [
+                '--dangerously',
+                '--dangerous',
+                'sudo ',
+                'su -',
+                ' rm -rf',
+                'rm -rf ',
+                'remove-item -recurse -force',
+                'del /f /s /q',
+                'rd /s /q',
+                'format ',
+                'mkfs',
+                'dd if=',
+                'shutdown',
+                'reboot',
+                'halt',
+                'docker system prune',
+                'git clean -fd',
+                'git reset --hard'
+            ].some((marker) => lower.includes(marker));
+        }
+
+        function suggestCommandCategory(command) {
+            const normalized = normalizeCommandShortcutValue(command);
+            const lower = normalized.toLowerCase();
+            if (!lower) return 'custom';
+            if (
+                lower.startsWith('codex') ||
+                lower.startsWith('claude') ||
+                lower.startsWith('gemini') ||
+                lower.startsWith('chatgpt') ||
+                lower.startsWith('openai')
+            ) {
+                return 'ai';
+            }
+            if (lower === 'git' || lower.startsWith('git ')) return 'git';
+            if (isDangerousCommand(normalized)) return 'high_risk';
+            if (
+                lower.includes(' test') ||
+                lower.startsWith('test') ||
+                lower.includes('pytest') ||
+                lower.includes('vitest') ||
+                lower.includes('jest') ||
+                lower.includes('cargo test') ||
+                lower.includes('go test')
+            ) {
+                return 'test';
+            }
+            if (
+                lower.startsWith('npm ') ||
+                lower.startsWith('pnpm ') ||
+                lower.startsWith('yarn ') ||
+                lower.startsWith('bun ') ||
+                lower.startsWith('cargo ') ||
+                lower.startsWith('docker ') ||
+                lower.startsWith('python ') ||
+                lower.startsWith('uv ') ||
+                lower.startsWith('make ') ||
+                lower.startsWith('./')
+            ) {
+                return 'run';
+            }
+            return 'custom';
+        }
+
+        function customCommandIdFor(command) {
+            const normalized = normalizeCommandShortcutValue(command);
+            let hash = 0;
+            for (let i = 0; i < normalized.length; i += 1) {
+                hash = ((hash << 5) - hash) + normalized.charCodeAt(i);
+                hash |= 0;
+            }
+            return 'custom_' + (hash >>> 0).toString(16);
+        }
+
+        function createCustomCommandShortcut(command, options = {}) {
+            const normalized = normalizeCommandShortcutValue(command);
+            const category = options.category || suggestCommandCategory(normalized);
+            return {
+                id: options.id || customCommandIdFor(normalized),
+                title: options.title || deriveCommandTitle(normalized),
+                command: normalized,
+                category: category,
+                dangerous: options.dangerous !== undefined
+                    ? !!options.dangerous
+                    : isDangerousCommand(normalized, category),
+                builtIn: false,
+                isFavorite: !!options.favorite,
+                useCount: Math.max(0, Number(options.useCount) || 0),
+                lastUsedAt: Math.max(0, Number(options.lastUsedAt) || 0),
+                createdAt: Number(options.createdAt) || Date.now(),
+                defaultRank: Number(options.defaultRank) || 20
+            };
+        }
+
+        function defaultCommandShortcuts(now = Date.now()) {
+            const preset = (id, title, command, category, defaultRank, dangerous) => ({
+                id,
+                title,
+                command,
+                category,
+                dangerous: !!dangerous,
+                builtIn: true,
+                isFavorite: false,
+                useCount: 0,
+                lastUsedAt: 0,
+                createdAt: now,
+                defaultRank
+            });
+
+            return [
+                preset('codex_default', 'Codex', 'codex', 'ai', 130),
+                preset('codex_full_auto', 'Codex 自动执行', 'codex --full-auto', 'ai', 122),
+                preset('claude_default', 'Claude', 'claude', 'ai', 120),
+                preset('claude_dont_ask', 'Claude 免确认', 'claude --permission-mode dontAsk', 'ai', 116),
+                preset(
+                    'codex_danger',
+                    'Codex 最大权限',
+                    'codex --dangerously-bypass-approvals-and-sandbox',
+                    'high_risk',
+                    112,
+                    true
+                ),
+                preset(
+                    'claude_danger',
+                    'Claude 最大权限',
+                    'claude --dangerously-skip-permissions',
+                    'high_risk',
+                    108,
+                    true
+                ),
+                preset('git_status', 'Git 状态', 'git status', 'git', 82),
+                preset('git_pull', 'Git 拉最新', 'git pull --rebase', 'git', 78),
+                preset('git_diff', 'Git 看改动', 'git diff', 'git', 76),
+                preset('git_log', 'Git 最近提交', 'git log --oneline -n 10', 'git', 72),
+                preset('pnpm_dev', 'PNPM 开发', 'pnpm dev', 'run', 70),
+                preset('npm_dev', 'NPM 开发', 'npm run dev', 'run', 68),
+                preset('cargo_run', 'Cargo 运行', 'cargo run', 'run', 66),
+                preset('docker_up', 'Docker Compose 启动', 'docker compose up -d', 'run', 62),
+                preset('pytest_q', 'Pytest', 'pytest -q', 'test', 64),
+                preset('cargo_test', 'Cargo 测试', 'cargo test', 'test', 62),
+                preset('pnpm_vitest', 'PNPM Vitest', 'pnpm vitest', 'test', 60),
+                preset('npm_test', 'NPM Test', 'npm test', 'test', 58)
+            ];
+        }
+
+        function compareCommandShortcuts(left, right) {
+            if (!!left.isFavorite !== !!right.isFavorite) {
+                return left.isFavorite ? -1 : 1;
+            }
+            if ((left.useCount || 0) !== (right.useCount || 0)) {
+                return (right.useCount || 0) - (left.useCount || 0);
+            }
+            if ((left.lastUsedAt || 0) !== (right.lastUsedAt || 0)) {
+                return (right.lastUsedAt || 0) - (left.lastUsedAt || 0);
+            }
+            if ((left.defaultRank || 0) !== (right.defaultRank || 0)) {
+                return (right.defaultRank || 0) - (left.defaultRank || 0);
+            }
+            return String(left.title || '').localeCompare(String(right.title || ''), 'zh-CN');
+        }
+
+        function recommendationScore(command, now) {
+            const favoriteBoost = command.isFavorite ? 260 : 0;
+            const customBoost = command.builtIn ? 0 : 40;
+            const usageBoost = command.useCount > 0 ? Math.log(command.useCount + 1) * 120 : 0;
+            const recencyBoost = command.lastUsedAt > 0
+                ? Math.max(0, 180 - ((Math.max(0, now - command.lastUsedAt) / 3600000) * 8))
+                : 0;
+            const riskPenalty = command.dangerous ? 12 : 0;
+            return (command.defaultRank || 0) + favoriteBoost + customBoost + usageBoost + recencyBoost - riskPenalty;
+        }
+
+        function buildCommandLibraryUiState(catalog, now = Date.now()) {
+            const byCommand = new Map();
+            (Array.isArray(catalog) ? catalog : []).forEach((item) => {
+                if (!item || !item.command) return;
+                const normalized = normalizeCommandShortcutValue(item.command);
+                if (!normalized || byCommand.has(normalized)) return;
+                byCommand.set(normalized, { ...item, command: normalized });
+            });
+            const normalizedCatalog = Array.from(byCommand.values());
+            const favorites = normalizedCatalog
+                .filter((item) => item.isFavorite)
+                .sort(compareCommandShortcuts)
+                .slice(0, 24);
+            const recent = normalizedCatalog
+                .filter((item) => item.lastUsedAt > 0)
+                .sort((left, right) => (right.lastUsedAt || 0) - (left.lastUsedAt || 0))
+                .slice(0, 8);
+            const recommended = normalizedCatalog
+                .slice()
+                .sort((left, right) => recommendationScore(right, now) - recommendationScore(left, now))
+                .slice(0, 6);
+            const sections = COMMAND_CATEGORY_ORDER.map((key) => {
+                const commands = normalizedCatalog
+                    .filter((item) => item.category === key)
+                    .sort(compareCommandShortcuts);
+                if (commands.length === 0) return null;
+                return {
+                    key,
+                    label: COMMAND_CATEGORY_LABELS[key] || key,
+                    commands
+                };
+            }).filter(Boolean);
+
+            return {
+                recommended,
+                favorites,
+                recent,
+                sections
+            };
         }
 
         function trimReplayBuffer(text, maxLength) {
@@ -1855,6 +2290,11 @@
                 this.sessionActivity = new Map();
                 this.sessionMetaSendTimers = new Map();
                 this.replayBuffers = new Map();
+                this.commandCatalog = this.loadCommandCatalog();
+                this.commandLibrary = buildCommandLibraryUiState(this.commandCatalog);
+                this.commandInput = '';
+                this.commandLibraryOpen = false;
+                this.selectedCommandSectionKey = COMMAND_PANEL_DEFAULT_SECTION_KEY;
                 this.titleEditState = null;
                 this.aiPanelOpen = false;
                 this.aiRequestPending = false;
@@ -1886,6 +2326,7 @@
                     const firstPaneId = this.splitTree.init();
                     this.createNewTab(firstPaneId);
                 }
+                this.renderCommandLibrary();
                 this.setupGlobalListeners();
                 this.setupHistoryKeys();
                 this.startSessionSync();
@@ -1953,6 +2394,473 @@
                 const current = normalizeTerminalFontSize(this.settings.get('fontSize'));
                 const next = normalizeTerminalFontSize(current + delta);
                 return this.setTerminalFontSize(next, { showToast: true });
+            }
+
+            getCommandLibraryInputValue() {
+                return document.getElementById('commandLibraryInput')?.value ?? this.commandInput;
+            }
+
+            getAllCommandShortcuts() {
+                const items = [];
+                const seen = new Set();
+                const buckets = [
+                    ...(this.commandLibrary.sections || []).flatMap((section) => section.commands || []),
+                    ...(this.commandLibrary.recommended || []),
+                    ...(this.commandLibrary.favorites || []),
+                    ...(this.commandLibrary.recent || [])
+                ];
+                for (const item of buckets) {
+                    if (!item || !item.command || seen.has(item.command)) continue;
+                    seen.add(item.command);
+                    items.push(item);
+                }
+                return items;
+            }
+
+            getCommandByValue(command) {
+                const normalized = normalizeCommandShortcutValue(command);
+                if (!normalized) return null;
+                return this.getAllCommandShortcuts().find((item) => item.command === normalized) || null;
+            }
+
+            findCommandIndexByValue(command) {
+                const normalized = normalizeCommandShortcutValue(command);
+                if (!normalized) return -1;
+                return this.commandCatalog.findIndex((item) => item.command === normalized);
+            }
+
+            loadCommandCatalog() {
+                const defaults = defaultCommandShortcuts();
+                const mergedById = new Map(defaults.map((item) => [item.id, { ...item }]));
+                const customCommands = [];
+                const raw = localStorage.getItem(COMMAND_LIBRARY_STORAGE_KEY);
+                if (!raw) return defaults;
+
+                try {
+                    const payload = JSON.parse(raw);
+                    if (!Array.isArray(payload)) return defaults;
+                    for (const entry of payload) {
+                        if (!entry || typeof entry !== 'object') continue;
+                        const command = normalizeCommandShortcutValue(entry.command);
+                        if (!command) continue;
+                        const id = entry.id || customCommandIdFor(command);
+                        const existing = mergedById.get(id);
+                        if (existing) {
+                            mergedById.set(id, {
+                                ...existing,
+                                isFavorite: !!entry.favorite,
+                                useCount: Math.max(0, Number(entry.useCount) || 0),
+                                lastUsedAt: Math.max(0, Number(entry.lastUsedAt) || 0),
+                                createdAt: Number(entry.createdAt) || existing.createdAt
+                            });
+                        } else {
+                            customCommands.push(createCustomCommandShortcut(command, {
+                                id,
+                                title: String(entry.title || '').trim() || deriveCommandTitle(command),
+                                category: COMMAND_CATEGORY_LABELS[entry.category] ? entry.category : suggestCommandCategory(command),
+                                dangerous: entry.dangerous,
+                                favorite: !!entry.favorite,
+                                useCount: entry.useCount,
+                                lastUsedAt: entry.lastUsedAt,
+                                createdAt: entry.createdAt,
+                                defaultRank: entry.defaultRank
+                            }));
+                        }
+                    }
+                    const distinctCustom = [];
+                    const seen = new Set();
+                    for (const item of customCommands) {
+                        if (seen.has(item.command)) continue;
+                        seen.add(item.command);
+                        distinctCustom.push(item);
+                    }
+                    return defaults.map((item) => mergedById.get(item.id) || item).concat(distinctCustom);
+                } catch (error) {
+                    console.warn('Load command library failed:', error);
+                    return defaults;
+                }
+            }
+
+            persistCommandCatalog() {
+                try {
+                    const payload = this.commandCatalog
+                        .filter((item) => !item.builtIn || item.isFavorite || item.useCount > 0 || item.lastUsedAt > 0)
+                        .sort((left, right) => String(left.id || '').localeCompare(String(right.id || ''), 'en'))
+                        .map((item) => ({
+                            id: item.id,
+                            title: item.title,
+                            command: item.command,
+                            category: item.category,
+                            dangerous: !!item.dangerous,
+                            builtIn: !!item.builtIn,
+                            favorite: !!item.isFavorite,
+                            useCount: Math.max(0, Number(item.useCount) || 0),
+                            lastUsedAt: Math.max(0, Number(item.lastUsedAt) || 0),
+                            createdAt: Number(item.createdAt) || Date.now(),
+                            defaultRank: Number(item.defaultRank) || 20
+                        }));
+                    localStorage.setItem(COMMAND_LIBRARY_STORAGE_KEY, JSON.stringify(payload));
+                } catch (error) {
+                    console.warn('Persist command library failed:', error);
+                }
+            }
+
+            publishCommandLibrary() {
+                this.commandLibrary = buildCommandLibraryUiState(this.commandCatalog);
+                const availableKeys = new Set([
+                    'favorites',
+                    'recent',
+                    ...(this.commandLibrary.sections || []).map((section) => section.key)
+                ]);
+                if (!availableKeys.has(this.selectedCommandSectionKey)) {
+                    this.selectedCommandSectionKey = (this.commandLibrary.sections || [])[0]?.key || COMMAND_PANEL_DEFAULT_SECTION_KEY;
+                }
+                this.persistCommandCatalog();
+                this.renderCommandLibrary();
+            }
+
+            recordCommandUsage(command) {
+                const normalized = normalizeCommandShortcutValue(command);
+                if (!normalized) return;
+                const now = Date.now();
+                const index = this.findCommandIndexByValue(normalized);
+                if (index >= 0) {
+                    const existing = this.commandCatalog[index];
+                    this.commandCatalog[index] = {
+                        ...existing,
+                        useCount: (existing.useCount || 0) + 1,
+                        lastUsedAt: now
+                    };
+                } else {
+                    this.commandCatalog.push(createCustomCommandShortcut(normalized, {
+                        useCount: 1,
+                        lastUsedAt: now,
+                        createdAt: now
+                    }));
+                }
+                this.publishCommandLibrary();
+            }
+
+            toggleFavoriteCommand(command) {
+                const normalized = normalizeCommandShortcutValue(command);
+                if (!normalized) return;
+                const index = this.findCommandIndexByValue(normalized);
+                if (index >= 0) {
+                    const existing = this.commandCatalog[index];
+                    this.commandCatalog[index] = {
+                        ...existing,
+                        isFavorite: !existing.isFavorite
+                    };
+                } else {
+                    this.commandCatalog.push(createCustomCommandShortcut(normalized, {
+                        favorite: true
+                    }));
+                }
+                this.publishCommandLibrary();
+            }
+
+            saveCurrentCommand() {
+                const normalized = normalizeCommandShortcutValue(this.getCommandLibraryInputValue());
+                if (!normalized) {
+                    this.showToast('先输入一条命令再保存', 'warning');
+                    return;
+                }
+                const existing = this.getCommandByValue(normalized);
+                if (existing?.builtIn) {
+                    this.showToast('这条命令已经是内置预设，可直接收藏', 'warning');
+                    return;
+                }
+
+                const currentTitle = existing && !existing.builtIn
+                    ? existing.title
+                    : deriveCommandTitle(normalized);
+                const nextTitle = window.prompt(
+                    existing && !existing.builtIn ? '编辑常用命令标题' : '输入常用命令标题',
+                    currentTitle
+                );
+                if (nextTitle === null) return;
+
+                const title = String(nextTitle || '').trim() || deriveCommandTitle(normalized);
+                const category = suggestCommandCategory(normalized);
+                const dangerous = isDangerousCommand(normalized, category);
+                const index = this.commandCatalog.findIndex((item) => item.command === normalized && !item.builtIn);
+                if (index >= 0) {
+                    const entry = this.commandCatalog[index];
+                    this.commandCatalog[index] = {
+                        ...entry,
+                        title,
+                        category,
+                        dangerous,
+                        isFavorite: true
+                    };
+                } else {
+                    this.commandCatalog.push(createCustomCommandShortcut(normalized, {
+                        title,
+                        category,
+                        dangerous,
+                        favorite: true
+                    }));
+                }
+                this.commandInput = normalized;
+                this.publishCommandLibrary();
+                this.showToast(index >= 0 ? '已更新常用命令' : '已保存为常用命令', 'success');
+            }
+
+            deleteCustomCommand(command) {
+                const normalized = normalizeCommandShortcutValue(command);
+                if (!normalized) {
+                    this.showToast('没有可删除的常用命令', 'warning');
+                    return;
+                }
+                const index = this.commandCatalog.findIndex((item) => item.command === normalized && !item.builtIn);
+                if (index < 0) {
+                    this.showToast('当前命令不是自定义常用命令', 'warning');
+                    return;
+                }
+                if (!window.confirm('删除这条自定义常用命令？')) return;
+                this.commandCatalog.splice(index, 1);
+                this.commandInput = '';
+                this.publishCommandLibrary();
+                this.showToast('已删除常用命令', 'success');
+            }
+
+            async submitCommand(command) {
+                const normalized = normalizeCommandShortcutValue(command);
+                if (!normalized) {
+                    this.showToast('先输入一条命令再发送', 'warning');
+                    return;
+                }
+                const terminal = this.terminals.get(this.activePaneId);
+                if (!terminal) {
+                    this.showToast('当前没有活动终端', 'warning');
+                    return;
+                }
+                if (!terminal.backendReady) {
+                    this.showToast('当前终端尚未就绪，请稍后再试', 'warning');
+                    return;
+                }
+                const ok = await terminal.sendText(normalized + '\r');
+                if (!ok) {
+                    this.showToast('发送命令失败', 'error');
+                    return;
+                }
+                this.recordCommandUsage(normalized);
+                this.commandInput = '';
+                this.renderCommandLibrary();
+            }
+
+            toggleCommandLibrary(event) {
+                event?.stopPropagation();
+                if (this.commandLibraryOpen) {
+                    this.closeCommandLibrary();
+                } else {
+                    this.openCommandLibrary();
+                }
+            }
+
+            openCommandLibrary() {
+                this.commandLibraryOpen = true;
+                this.renderCommandLibrary();
+                setTimeout(() => {
+                    document.getElementById('commandLibraryInput')?.focus();
+                }, 0);
+            }
+
+            closeCommandLibrary() {
+                this.commandLibraryOpen = false;
+                document.getElementById('commandLibraryPopover')?.classList.remove('visible');
+            }
+
+            positionCommandLibraryPopover() {
+                if (!this.commandLibraryOpen) return;
+                const menu = document.getElementById('commandLibraryPopover');
+                const button = document.getElementById('commandLibraryBtn');
+                if (!menu || !button) return;
+                const rect = button.getBoundingClientRect();
+                this.placeFloatingMenu(menu, rect.right, rect.bottom + 8, { alignRight: true });
+            }
+
+            refreshCommandInputActions() {
+                const rawInput = this.getCommandLibraryInputValue();
+                this.commandInput = rawInput;
+                const normalized = normalizeCommandShortcutValue(rawInput);
+                const matched = normalized ? this.getCommandByValue(normalized) : null;
+                const favoriteBtn = document.getElementById('commandFavoriteBtn');
+                const saveBtn = document.getElementById('commandSaveBtn');
+                const deleteBtn = document.getElementById('commandDeleteBtn');
+                const sendBtn = document.getElementById('commandSendBtn');
+                const hintEl = document.getElementById('commandLibraryHint');
+
+                if (favoriteBtn) {
+                    favoriteBtn.textContent = matched?.isFavorite ? '已收藏' : '收藏';
+                    favoriteBtn.disabled = !normalized;
+                }
+                if (saveBtn) {
+                    saveBtn.textContent = matched && !matched.builtIn ? '编辑常用' : matched?.builtIn ? '已内置' : '存为常用';
+                    saveBtn.disabled = !normalized || !!(matched && matched.builtIn);
+                }
+                if (deleteBtn) {
+                    deleteBtn.hidden = !(matched && !matched.builtIn);
+                }
+                if (sendBtn) {
+                    sendBtn.disabled = !normalized;
+                }
+                if (hintEl) {
+                    hintEl.classList.toggle('dangerous', !!(normalized && isDangerousCommand(normalized, matched?.category)));
+                    if (!normalized) {
+                        hintEl.textContent = '点一下命令卡片可填入输入框，再点发送。';
+                    } else if (matched?.builtIn) {
+                        hintEl.textContent = '这是内置预设，可直接收藏，也可以直接发送。';
+                    } else if (matched && !matched.builtIn) {
+                        hintEl.textContent = '这是你的自定义常用命令，会参与最近使用和动态推荐。';
+                    } else if (isDangerousCommand(normalized)) {
+                        hintEl.textContent = '检测到高风险命令，发送前确认当前目录和目标机器。';
+                    } else {
+                        hintEl.textContent = '当前输入还没保存到常用命令，点“存为常用”即可持久化。';
+                    }
+                }
+            }
+
+            renderCommandLibrary() {
+                const container = document.getElementById('commandLibraryPopover');
+                if (!container) return;
+                if (!this.commandLibraryOpen) {
+                    container.classList.remove('visible');
+                    return;
+                }
+
+                const sections = this.commandLibrary.sections || [];
+                const selectedKey = this.selectedCommandSectionKey;
+                const sectionTabs = [
+                    { key: 'favorites', label: '收藏' },
+                    { key: 'recent', label: '最近' },
+                    ...sections.map((section) => ({ key: section.key, label: section.label }))
+                ];
+                const selectedCommands = selectedKey === 'favorites'
+                    ? this.commandLibrary.favorites || []
+                    : selectedKey === 'recent'
+                        ? this.commandLibrary.recent || []
+                        : (sections.find((section) => section.key === selectedKey)?.commands || []);
+                const selectedSectionLabel = sectionTabs.find((section) => section.key === selectedKey)?.label || '命令';
+                const chipPrefix = (shortcut) => {
+                    if (shortcut.dangerous) return '危 ';
+                    if (shortcut.isFavorite) return '★ ';
+                    return '';
+                };
+                const renderChip = (shortcut) => (
+                    '<button class="command-chip'
+                        + (shortcut.isFavorite ? ' favorite' : '')
+                        + (shortcut.dangerous ? ' dangerous' : '')
+                        + '" data-command-fill="1" data-command="'
+                        + escapeHtml(shortcut.command)
+                        + '" title="'
+                        + escapeHtml(shortcut.command)
+                        + '">'
+                        + escapeHtml(chipPrefix(shortcut) + shortcut.title)
+                        + '</button>'
+                );
+
+                container.innerHTML = ''
+                    + '<div class="command-library-header">'
+                    + '  <div class="command-library-title">'
+                    + '    <strong>命令库</strong>'
+                    + '    <span>桌面端常用命令 / 动态推荐 / 收藏</span>'
+                    + '  </div>'
+                    + '  <button class="command-library-close" id="commandLibraryCloseBtn" title="关闭命令库" aria-label="关闭命令库">×</button>'
+                    + '</div>'
+                    + '<div class="command-library-body">'
+                    + '  <div class="command-library-row-label">推荐</div>'
+                    + '  <div class="command-library-grid recommended">'
+                    +      (this.commandLibrary.recommended || []).map(renderChip).join('')
+                    + '  </div>'
+                    + '  <div class="command-library-strip">'
+                    +      sectionTabs.map((section) => (
+                                '<button class="command-tab'
+                                    + (section.key === selectedKey ? ' active' : '')
+                                    + '" data-command-section="'
+                                    + escapeHtml(section.key)
+                                    + '">'
+                                    + escapeHtml(section.label)
+                                    + '</button>'
+                            )).join('')
+                    + '  </div>'
+                    + '  <div class="command-library-row-label">' + escapeHtml(selectedSectionLabel) + '</div>'
+                    + (
+                        selectedCommands.length > 0
+                            ? '<div class="command-library-grid">' + selectedCommands.map(renderChip).join('') + '</div>'
+                            : '<div class="command-library-empty">'
+                                + escapeHtml(
+                                    selectedKey === 'favorites'
+                                        ? '把当前命令加入收藏后，会出现在这里。'
+                                        : selectedKey === 'recent'
+                                            ? '你发送过的命令会自动进入最近使用。'
+                                            : '当前分组还没有命令。'
+                                )
+                                + '</div>'
+                    )
+                    + '  <div class="command-library-input-row">'
+                    + '    <input class="command-library-input" id="commandLibraryInput" type="text" spellcheck="false"'
+                    + '      placeholder="输入命令，或点上方预设" value="' + escapeHtml(this.commandInput) + '" />'
+                    + '    <button class="command-action-btn" id="commandFavoriteBtn">收藏</button>'
+                    + '    <button class="command-action-btn" id="commandSaveBtn">存为常用</button>'
+                    + '    <button class="command-action-btn" id="commandDeleteBtn" hidden>删除常用</button>'
+                    + '    <button class="command-action-btn primary" id="commandSendBtn">发送</button>'
+                    + '  </div>'
+                    + '  <div class="command-library-hint" id="commandLibraryHint"></div>'
+                    + '</div>';
+
+                container.onclick = (event) => {
+                    event.stopPropagation();
+                };
+                this.positionCommandLibraryPopover();
+                document.getElementById('commandLibraryCloseBtn')?.addEventListener('click', () => {
+                    this.closeCommandLibrary();
+                });
+                container.querySelectorAll('[data-command-fill="1"]').forEach((element) => {
+                    element.addEventListener('click', () => {
+                        this.commandInput = element.dataset.command || '';
+                        const input = document.getElementById('commandLibraryInput');
+                        if (input) {
+                            input.value = this.commandInput;
+                            input.focus();
+                        }
+                        this.refreshCommandInputActions();
+                    });
+                });
+                container.querySelectorAll('[data-command-section]').forEach((element) => {
+                    element.addEventListener('click', (event) => {
+                        event.stopPropagation();
+                        this.selectedCommandSectionKey = element.dataset.commandSection || COMMAND_PANEL_DEFAULT_SECTION_KEY;
+                        this.renderCommandLibrary();
+                    });
+                });
+
+                const input = document.getElementById('commandLibraryInput');
+                if (input) {
+                    input.addEventListener('input', (event) => {
+                        this.commandInput = event.target.value;
+                        this.refreshCommandInputActions();
+                    });
+                    input.addEventListener('keydown', (event) => {
+                        if (event.key === 'Enter' && !event.shiftKey) {
+                            event.preventDefault();
+                            this.submitCommand(event.target.value);
+                        }
+                    });
+                }
+                document.getElementById('commandFavoriteBtn')?.addEventListener('click', () => {
+                    this.toggleFavoriteCommand(this.getCommandLibraryInputValue());
+                });
+                document.getElementById('commandSaveBtn')?.addEventListener('click', () => {
+                    this.saveCurrentCommand();
+                });
+                document.getElementById('commandDeleteBtn')?.addEventListener('click', () => {
+                    this.deleteCustomCommand(this.getCommandLibraryInputValue());
+                });
+                document.getElementById('commandSendBtn')?.addEventListener('click', () => {
+                    this.submitCommand(this.getCommandLibraryInputValue());
+                });
+                this.refreshCommandInputActions();
             }
 
             getAiPreset(presetId) {
@@ -2166,6 +3074,9 @@
                 if (this.aiPanelOpen) {
                     this.closeAiPanel();
                     return;
+                }
+                if (this.commandLibraryOpen) {
+                    this.closeCommandLibrary();
                 }
                 this.aiPanelOpen = true;
                 document.getElementById('aiPanel').classList.add('visible');
@@ -3422,6 +4333,9 @@
                     }
                     document.getElementById('splitMenu').classList.remove('visible');
                     document.getElementById('contextMenu').classList.remove('visible');
+                    if (!event.target.closest('.command-library-popover, #commandLibraryBtn') && this.commandLibraryOpen) {
+                        this.closeCommandLibrary();
+                    }
                 });
                 document.addEventListener('mouseup', () => {
                     if (this.aiPanelOpen) {
@@ -3437,7 +4351,25 @@
                     if (e.ctrlKey && e.shiftKey && e.key === 'T') { e.preventDefault(); this.createNewTab(); }
                     if (e.ctrlKey && e.key === 'w') { e.preventDefault(); if (this.activePaneId) this.closePane(this.activePaneId); }
                     if (e.ctrlKey && e.shiftKey && e.key === '\\') { e.preventDefault(); if (this.activePaneId) this.splitPane('right'); }
-                    if (e.key === 'Escape' && this.aiPanelOpen) { this.closeAiPanel(); }
+                    if (e.key === 'Escape') {
+                        let handled = false;
+                        if (this.commandLibraryOpen) {
+                            this.closeCommandLibrary();
+                            handled = true;
+                        }
+                        if (this.aiPanelOpen) {
+                            this.closeAiPanel();
+                            handled = true;
+                        }
+                        if (handled) {
+                            e.preventDefault();
+                        }
+                    }
+                });
+                window.addEventListener('resize', () => {
+                    if (this.commandLibraryOpen) {
+                        this.positionCommandLibraryPopover();
+                    }
                 });
             }
 

@@ -4,6 +4,13 @@
 **/dist/
 *.exe
 *.db
+*.apk
+*.msi
+*.dmg
+*.deb
+*.AppImage
+coverage.out
+coverage.html
 
 # IDE
 .vscode/
@@ -20,6 +27,18 @@ desktop.ini
 
 # Node modules (if any frontend uses npm)
 node_modules/
+
+# Android / signing
+.gradle/
+local.properties
+*.jks
+*.keystore
+mobile-android/app/key.properties
+mobile-android/termsync.keystore
+
+# Runtime / release assets
+**/release-assets/
+artifacts/
 
 # Certificates (uncomment to exclude from git)
 # server/certs/

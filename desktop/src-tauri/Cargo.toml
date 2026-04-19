@@ -1,12 +1,12 @@
 [package]
-name = "tty1-desktop"
+name = "termsync-desktop"
 version = "0.1.0"
-description = "TTY1 Cross-Platform Terminal Emulator"
-authors = ["TTY1 Team"]
+description = "TermSync Cross-Platform Terminal Client"
+authors = ["TermSync Team"]
 edition = "2021"
 
 [[bin]]
-name = "tty1-desktop"
+name = "termsync-desktop"
 path = "src/main.rs"
 
 [build-dependencies]

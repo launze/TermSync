@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 
 sealed class ConnectionState {
@@ -113,6 +114,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _pairedDesktopName = MutableStateFlow(prefs.getString(KEY_PAIRED_DESKTOP_NAME, "") ?: "")
     private val _isPaired = MutableStateFlow(_pairedDesktopId.value.isNotBlank())
     private val sessionOutputCache = loadSessionOutputCache().toMutableMap()
+    private val commandCatalog = loadCommandCatalog().toMutableList()
+    private val _commandLibrary = MutableStateFlow(buildCommandLibraryUiState(commandCatalog))
     private val sessionOutputVersion = mutableMapOf<String, Long>()
     private val lastRequestedResizeBySession = mutableMapOf<String, Pair<Int, Int>>()
     private val lastResizeRequestAtBySession = mutableMapOf<String, Long>()
@@ -131,6 +134,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val KEY_PAIRED_DESKTOP_ID = "paired_desktop_id"
         private const val KEY_PAIRED_DESKTOP_NAME = "paired_desktop_name"
         private const val KEY_SESSION_OUTPUT_CACHE = "session_output_cache"
+        private const val KEY_COMMAND_LIBRARY = "command_library"
         private const val RECONNECT_DELAY_MS = 3_000L
         private const val MAX_RECONNECT_DELAY_MS = 60_000L
         /** Batched delta flush interval in ms — controls max render rate (~20fps) */
@@ -153,6 +157,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val pairedDesktopId: StateFlow<String> = _pairedDesktopId.asStateFlow()
     val pairedDesktopName: StateFlow<String> = _pairedDesktopName.asStateFlow()
     val isPaired: StateFlow<Boolean> = _isPaired.asStateFlow()
+    val commandLibrary: StateFlow<CommandLibraryUiState> = _commandLibrary.asStateFlow()
 
     init {
         viewModelScope.launch {
@@ -536,6 +541,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         wssClient.sendTerminalInput(sessionId, input)
     }
 
+    fun submitCommand(command: String) {
+        val normalized = normalizeCommandShortcutValue(command)
+        if (normalized.isBlank()) return
+        recordCommandUsage(normalized)
+        sendInput("$normalized\r")
+    }
+
+    fun toggleFavoriteCommand(command: String) {
+        val normalized = normalizeCommandShortcutValue(command)
+        if (normalized.isBlank()) return
+        val index = findCommandIndexByValue(normalized)
+        if (index >= 0) {
+            val existing = commandCatalog[index]
+            commandCatalog[index] = existing.copy(isFavorite = !existing.isFavorite)
+        } else {
+            commandCatalog.add(
+                createCustomCommandShortcut(
+                    command = normalized,
+                    favorite = true
+                )
+            )
+        }
+        publishCommandLibrary()
+    }
+
     fun sendSpecialKey(key: SpecialKey) {
         val sessionId = _selectedSessionId.value ?: return
         wssClient.sendTerminalInput(sessionId, key.escapeSequence)
@@ -804,6 +834,114 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         sessionOutputCache.clear()
         sessionOutputVersion.clear()
         prefs.edit().remove(KEY_SESSION_OUTPUT_CACHE).apply()
+    }
+
+    private fun recordCommandUsage(command: String) {
+        val normalized = normalizeCommandShortcutValue(command)
+        if (normalized.isBlank()) return
+        val now = System.currentTimeMillis()
+        val index = findCommandIndexByValue(normalized)
+        if (index >= 0) {
+            val existing = commandCatalog[index]
+            commandCatalog[index] = existing.copy(
+                useCount = existing.useCount + 1,
+                lastUsedAt = now
+            )
+        } else {
+            commandCatalog.add(
+                createCustomCommandShortcut(
+                    command = normalized,
+                    useCount = 1,
+                    lastUsedAt = now,
+                    createdAt = now
+                )
+            )
+        }
+        publishCommandLibrary()
+    }
+
+    private fun findCommandIndexByValue(command: String): Int {
+        return commandCatalog.indexOfFirst { it.command == command }
+    }
+
+    private fun publishCommandLibrary() {
+        _commandLibrary.value = buildCommandLibraryUiState(commandCatalog)
+        persistCommandCatalog()
+    }
+
+    private fun persistCommandCatalog() {
+        val payload = JSONArray()
+        commandCatalog
+            .filter { !it.builtIn || it.isFavorite || it.useCount > 0 || it.lastUsedAt > 0L }
+            .sortedBy { it.id }
+            .forEach { command ->
+                payload.put(
+                    JSONObject().apply {
+                        put("id", command.id)
+                        put("title", command.title)
+                        put("command", command.command)
+                        put("category", command.category.key)
+                        put("dangerous", command.dangerous)
+                        put("builtIn", command.builtIn)
+                        put("favorite", command.isFavorite)
+                        put("useCount", command.useCount)
+                        put("lastUsedAt", command.lastUsedAt)
+                        put("createdAt", command.createdAt)
+                        put("defaultRank", command.defaultRank)
+                    }
+                )
+            }
+        prefs.edit().putString(KEY_COMMAND_LIBRARY, payload.toString()).apply()
+    }
+
+    private fun loadCommandCatalog(): List<CommandShortcut> {
+        val defaults = defaultCommandShortcuts()
+        val mergedById = defaults.associateBy { it.id }.toMutableMap()
+        val customCommands = mutableListOf<CommandShortcut>()
+        val raw = prefs.getString(KEY_COMMAND_LIBRARY, null).orEmpty()
+        if (raw.isBlank()) {
+            return defaults
+        }
+
+        return try {
+            val payload = JSONArray(raw)
+            for (i in 0 until payload.length()) {
+                val obj = payload.optJSONObject(i) ?: continue
+                val command = normalizeCommandShortcutValue(obj.optString("command", ""))
+                if (command.isBlank()) continue
+                val id = obj.optString("id").ifBlank { customCommandIdFor(command) }
+                val builtIn = obj.optBoolean("builtIn", false)
+                val existing = mergedById[id]
+                if (existing != null) {
+                    mergedById[id] = existing.copy(
+                        isFavorite = obj.optBoolean("favorite", existing.isFavorite),
+                        useCount = obj.optInt("useCount", existing.useCount),
+                        lastUsedAt = obj.optLong("lastUsedAt", existing.lastUsedAt),
+                        createdAt = obj.optLong("createdAt", existing.createdAt)
+                    )
+                } else {
+                    customCommands.add(
+                        CommandShortcut(
+                            id = id,
+                            title = obj.optString("title", deriveCommandTitle(command)),
+                            command = command,
+                            category = CommandCategory.fromKey(obj.optString("category", CommandCategory.Custom.key)),
+                            dangerous = obj.optBoolean("dangerous", false),
+                            builtIn = builtIn,
+                            isFavorite = obj.optBoolean("favorite", false),
+                            useCount = obj.optInt("useCount", 0),
+                            lastUsedAt = obj.optLong("lastUsedAt", 0L),
+                            createdAt = obj.optLong("createdAt", System.currentTimeMillis()),
+                            defaultRank = obj.optInt("defaultRank", 20)
+                        )
+                    )
+                }
+            }
+            defaults.map { mergedById[it.id] ?: it } + customCommands.distinctBy { it.command }
+        } catch (error: Exception) {
+            Log.w(TAG, "Failed to restore command catalog", error)
+            defaults
+        }
     }
 
     private fun describeException(error: Throwable): String {

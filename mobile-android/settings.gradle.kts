@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "TTY1"
+rootProject.name = "TermSync"
 include(":app")

@@ -109,6 +109,8 @@ import kotlinx.coroutines.launch
 import com.termsync.mobile.viewmodel.TerminalSession
 import com.termsync.mobile.viewmodel.TerminalDeltaBatch
 import com.termsync.mobile.viewmodel.ConnectionState
+import com.termsync.mobile.viewmodel.CommandLibraryUiState
+import com.termsync.mobile.viewmodel.CommandShortcut
 import com.termsync.mobile.viewmodel.MainViewModel
 import com.termsync.mobile.viewmodel.SpecialKey
 import androidx.compose.ui.text.input.KeyboardType
@@ -118,6 +120,11 @@ private const val DEFAULT_SERVER_URL = "wss://nas.smarthome2020.top:7373/ws"
 enum class TerminalRenderMode {
     MobileFit,
     DesktopMirror
+}
+
+private enum class CommandPanelSection(val key: String, val label: String) {
+    Favorites("favorites", "收藏"),
+    Recent("recent", "最近");
 }
 
 private val PRIMARY_SPECIAL_KEYS = listOf(
@@ -174,6 +181,7 @@ fun TTY1App(viewModel: MainViewModel) {
     val deviceName by viewModel.deviceName.collectAsState()
     val isPaired by viewModel.isPaired.collectAsState()
     val pairedDesktopName by viewModel.pairedDesktopName.collectAsState()
+    val commandLibrary by viewModel.commandLibrary.collectAsState()
     val selectedSession = sessions.firstOrNull { it.sessionId == selectedSessionId }
     val hasToken = deviceToken.isNotBlank()
     val canRequestRemoteTerminal = connectionState is ConnectionState.Connected && isPaired
@@ -212,7 +220,9 @@ fun TTY1App(viewModel: MainViewModel) {
                         terminalDelta = viewModel.terminalDelta,
                         replayLoading = replayLoading,
                         terminalStreamStatus = terminalStreamStatus,
-                        onSendInput = { viewModel.sendInput(it) },
+                        commandLibrary = commandLibrary,
+                        onSubmitCommand = { viewModel.submitCommand(it) },
+                        onToggleFavoriteCommand = { viewModel.toggleFavoriteCommand(it) },
                         onSendSpecialKey = { viewModel.sendSpecialKey(it) },
                         onRequestCloseSession = { viewModel.requestRemoteSessionClose(it) },
                         onDebug = { msg -> viewModel.addDebugLine(msg) },
@@ -783,7 +793,9 @@ fun TerminalViewScreen(
     terminalDelta: SharedFlow<TerminalDeltaBatch>,
     replayLoading: Boolean,
     terminalStreamStatus: String,
-    onSendInput: (String) -> Unit,
+    commandLibrary: CommandLibraryUiState,
+    onSubmitCommand: (String) -> Unit,
+    onToggleFavoriteCommand: (String) -> Unit,
     onSendSpecialKey: (SpecialKey) -> Unit,
     onRequestCloseSession: (String) -> Unit,
     onDebug: (String) -> Unit,
@@ -796,8 +808,23 @@ fun TerminalViewScreen(
     var renderModeName by rememberSaveable(session?.sessionId) { mutableStateOf(TerminalRenderMode.MobileFit.name) }
     var fontScale by rememberSaveable(session?.sessionId) { mutableStateOf(1.0f) }
     var showLayoutControls by rememberSaveable(session?.sessionId) { mutableStateOf(false) }
+    var showCommandLibrary by rememberSaveable(session?.sessionId) { mutableStateOf(true) }
+    var selectedCommandSectionKey by rememberSaveable(session?.sessionId) {
+        mutableStateOf(CommandPanelSection.Favorites.key)
+    }
     val focusManager = LocalFocusManager.current
     val renderMode = remember(renderModeName) { TerminalRenderMode.valueOf(renderModeName) }
+    val normalizedInput = remember(input) {
+        input
+            .replace("\r", "\n")
+            .lines()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .joinToString(" && ")
+    }
+    val currentInputFavorited = remember(normalizedInput, commandLibrary.favorites) {
+        normalizedInput.isNotBlank() && commandLibrary.favorites.any { it.command == normalizedInput }
+    }
     
     val stateVisual = sessionTaskVisual(session, false)
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
@@ -1113,6 +1140,15 @@ fun TerminalViewScreen(
                     }
                 }
             }
+
+            CommandLibraryPanel(
+                library = commandLibrary,
+                selectedSectionKey = selectedCommandSectionKey,
+                expanded = showCommandLibrary,
+                onToggleExpanded = { showCommandLibrary = !showCommandLibrary },
+                onSectionSelected = { selectedCommandSectionKey = it },
+                onCommandSelected = { shortcut -> input = shortcut.command }
+            )
             
             Row(
                 modifier = Modifier
@@ -1124,22 +1160,32 @@ fun TerminalViewScreen(
                     value = input,
                     onValueChange = { input = it },
                     modifier = Modifier.weight(1f),
-                    placeholder = { Text("输入命令") },
+                    placeholder = { Text("输入命令，或点上方预设") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
                     keyboardActions = KeyboardActions(onDone = {
                         if (input.isNotBlank()) {
-                            onSendInput(input + "\r")
+                            onSubmitCommand(input)
                             input = ""
                             focusManager.clearFocus()
                         }
                     })
                 )
+                TextButton(
+                    onClick = {
+                        if (normalizedInput.isNotBlank()) {
+                            onToggleFavoriteCommand(normalizedInput)
+                        }
+                    },
+                    enabled = normalizedInput.isNotBlank()
+                ) {
+                    Text(if (currentInputFavorited) "已收藏" else "收藏")
+                }
                 Button(onClick = {
-                    onSendInput(input + "\r")
+                    onSubmitCommand(input)
                     input = ""
                     focusManager.clearFocus()
-                }) {
+                }, enabled = input.isNotBlank()) {
                     Icon(Icons.Default.Send, contentDescription = "发送", modifier = Modifier.size(18.dp))
                 }
             }
@@ -1177,6 +1223,204 @@ fun SpecialKeyButton(label: String, onClick: () -> Unit) {
         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 5.dp)
     ) {
         Text(label, fontSize = 12.sp)
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun CommandLibraryPanel(
+    library: CommandLibraryUiState,
+    selectedSectionKey: String,
+    expanded: Boolean,
+    onToggleExpanded: () -> Unit,
+    onSectionSelected: (String) -> Unit,
+    onCommandSelected: (CommandShortcut) -> Unit
+) {
+    val sectionTabs = remember(library.sections) {
+        buildList {
+            add(CommandPanelSection.Favorites.key to CommandPanelSection.Favorites.label)
+            add(CommandPanelSection.Recent.key to CommandPanelSection.Recent.label)
+            library.sections.forEach { section ->
+                add(section.key to section.label)
+            }
+        }
+    }
+    val selectedCommands = remember(selectedSectionKey, library.favorites, library.recent, library.sections) {
+        when (selectedSectionKey) {
+            CommandPanelSection.Favorites.key -> library.favorites
+            CommandPanelSection.Recent.key -> library.recent
+            else -> library.sections.firstOrNull { it.key == selectedSectionKey }?.commands.orEmpty()
+        }
+    }
+    val selectedSectionLabel = sectionTabs.firstOrNull { it.first == selectedSectionKey }?.second ?: "收藏"
+
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 2.dp)
+            .animateContentSize(),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "命令库",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                TextButton(
+                    onClick = onToggleExpanded,
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)
+                ) {
+                    Text(if (expanded) "收起" else "展开")
+                    Icon(
+                        imageVector = if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+
+            if (expanded) {
+                Text(
+                    text = "推荐",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                LazyRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    contentPadding = PaddingValues(horizontal = 2.dp)
+                ) {
+                    items(library.recommended, key = { it.id }) { shortcut ->
+                        CommandShortcutChip(
+                            shortcut = shortcut,
+                            onClick = { onCommandSelected(shortcut) }
+                        )
+                    }
+                }
+
+                LazyRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    contentPadding = PaddingValues(horizontal = 2.dp)
+                ) {
+                    items(sectionTabs, key = { it.first }) { (key, label) ->
+                        SectionTabChip(
+                            label = label,
+                            selected = key == selectedSectionKey,
+                            onClick = { onSectionSelected(key) }
+                        )
+                    }
+                }
+
+                Text(
+                    text = selectedSectionLabel,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (selectedCommands.isEmpty()) {
+                    Text(
+                        text = when (selectedSectionKey) {
+                            CommandPanelSection.Favorites.key -> "把当前命令加入收藏后，会出现在这里"
+                            CommandPanelSection.Recent.key -> "你发过的命令会自动进入最近使用"
+                            else -> "当前分组还没有命令"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        selectedCommands.forEach { shortcut ->
+                            CommandShortcutChip(
+                                shortcut = shortcut,
+                                onClick = { onCommandSelected(shortcut) }
+                            )
+                        }
+                    }
+                }
+
+                Text(
+                    text = "点一下把命令填入输入框，再点发送",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CommandShortcutChip(
+    shortcut: CommandShortcut,
+    onClick: () -> Unit
+) {
+    val background = when {
+        shortcut.dangerous -> Color(0x33FF9800)
+        shortcut.isFavorite -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f)
+        else -> MaterialTheme.colorScheme.surface.copy(alpha = 0.9f)
+    }
+    val textColor = when {
+        shortcut.dangerous -> Color(0xFFFFC107)
+        shortcut.isFavorite -> MaterialTheme.colorScheme.onPrimaryContainer
+        else -> MaterialTheme.colorScheme.onSurface
+    }
+
+    Surface(
+        shape = RoundedCornerShape(999.dp),
+        color = background
+    ) {
+        TextButton(
+            onClick = onClick,
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp)
+        ) {
+            Text(
+                text = shortcut.title,
+                style = MaterialTheme.typography.labelSmall,
+                color = textColor
+            )
+        }
+    }
+}
+
+@Composable
+private fun SectionTabChip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(999.dp),
+        color = if (selected) {
+            MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+        } else {
+            MaterialTheme.colorScheme.surface.copy(alpha = 0.82f)
+        }
+    ) {
+        TextButton(
+            onClick = onClick,
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp)
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelSmall,
+                color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
     }
 }
 

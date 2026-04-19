@@ -1,0 +1,82 @@
+name: Quick Build
+
+on:
+  push:
+    branches: [ dev, develop ]
+  pull_request:
+    branches: [ dev, develop ]
+  workflow_dispatch:
+
+jobs:
+  quick-build-server:
+    name: Quick Build Server
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache-dependency-path: server/go.sum
+
+      - name: Build server
+        working-directory: server
+        run: make build
+
+      - name: Run tests
+        working-directory: server
+        run: go test ./...
+
+  quick-build-android:
+    name: Quick Build Android
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Grant execute permission for gradlew
+        working-directory: mobile-android
+        run: chmod +x gradlew
+
+      - name: Build debug APK
+        working-directory: mobile-android
+        run: ./gradlew assembleDebug
+
+  quick-build-desktop:
+    name: Quick Build Desktop
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version '^2.0'
+
+      - name: Build Tauri app (debug)
+        working-directory: desktop/src-tauri
+        run: cargo tauri build --debug

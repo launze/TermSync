@@ -1,36 +1,79 @@
 # TermSync
 
-TermSync 是一个跨端终端同步系统。
+> 手机上的终端入口，桌面上的真实终端。
 
-它的核心思路很直接: 真实终端进程只运行在桌面端，服务端负责认证、配对和消息中继，移动端负责远程查看、输入和控制已经配对的桌面会话。
+`TermSync` 是一个跨平台终端同步项目：真实终端进程运行在桌面端，服务端负责认证、配对与消息中继，Android 客户端负责远程查看、输入和控制已经配对的桌面会话。
 
-## 核心能力
+当前公开版本：**`0.1.0`**
 
-- 桌面端基于 Tauri + Rust + xterm.js，持有真实本地 PTY。
-- 服务端基于 Go + SQLite，提供 HTTPS / WSS、设备注册、登录、配对和会话中继。
-- Android 客户端可查看已配对桌面的活跃终端，并支持输入、缩放、回放和关闭会话。
-- 桌面端内置 AI 助手面板，可接入 OpenAI-compatible 网关生成命令或结合当前终端上下文提问。
-- 支持自签名证书分发，方便局域网或自部署环境下直接联通。
+## 核心特性
 
-## 系统结构
-
-```text
-Desktop Client  <---- HTTPS / WSS ---->  TermSync Server  <---- HTTPS / WSS ---->  Android Client
-Tauri + Rust                              Go + SQLite                               Compose + WebView
-真实 PTY owner                            认证 / 配对 / 消息中继                    远程查看与输入
-```
+- **桌面端持有真实 PTY**
+- **Android 远程查看与输入终端**
+- **服务端负责认证、配对和消息中继**
+- **自签名证书分发，适合局域网/自部署场景**
+- **桌面端集成 AI 助手面板**
+- **跨平台桌面目标**：Windows / macOS / Linux
 
 ## 仓库结构
 
-- `server/`: Go 服务端，负责 REST API、WebSocket 中继、SQLite 持久化和配对流程。
-- `desktop/`: Tauri 桌面端，包含 Rust 后端命令和 `desktop/src/index.html` 前端界面。
-- `mobile-android/`: Android 客户端，基于 Kotlin + Compose + WebView。
-- `docs/architecture.md`: 当前落地架构说明，适合快速了解协议和模块边界。
-- `start.ps1`: Windows 下的便捷启动脚本。
+```text
+tty1/
+├── desktop/         # 桌面客户端 (Rust + Tauri + xterm.js)
+├── mobile-android/  # Android 客户端 (Kotlin + Compose + WebView)
+├── server/          # 服务端 (Go + SQLite)
+├── docs/            # 架构与实现文档
+├── start.ps1        # Windows 开发启动脚本
+└── README.md
+```
 
-## 快速启动
+## 组件说明
 
-### 1. 启动服务端
+### Desktop Client
+桌面应用负责：
+- 创建和持有本地真实终端会话
+- 渲染终端 UI 与多标签页/分屏布局
+- 接收移动端输入并写入 PTY
+- 将终端输出同步给远端客户端
+- 提供 AI 辅助命令面板
+
+### Android Client
+Android 应用负责：
+- 查看已配对桌面的活动终端
+- 发送输入、快捷键和控制命令
+- 远程订阅终端输出
+- 在移动端提供轻量终端操控体验
+
+### Relay Server
+服务端负责：
+- 注册设备与登录认证
+- 生成和完成配对码流程
+- 中继桌面端与移动端消息
+- 提供证书下载与健康检查接口
+
+## 技术栈
+
+### Desktop
+- Rust
+- Tauri 2
+- Tokio
+- xterm.js
+
+### Android
+- Kotlin
+- Jetpack Compose
+- OkHttp
+- WebView
+
+### Server
+- Go
+- Chi
+- SQLite
+- WebSocket
+
+## 快速开始
+
+## 1. 启动服务端
 
 ```bash
 cd server
@@ -38,81 +81,99 @@ make all
 ./termsync-server
 ```
 
-默认端口:
-
+默认端口：
 - `7373`: HTTPS / WSS
 - `8080`: HTTP 重定向
 
-常用环境变量:
-
+常用环境变量：
 - `TERMSYNC_PORT`
 - `TERMSYNC_HTTP_PORT`
 - `TERMSYNC_DB_PATH`
 - `TERMSYNC_JWT_SECRET`
 
-### 2. 启动桌面端
-
-前提:
-
-- Rust 1.70+
-- Node.js 18+
-- Tauri CLI
+## 2. 启动桌面端
 
 ```bash
 cd desktop/src-tauri
 cargo tauri dev
 ```
 
-### 3. 构建 Android 客户端
+构建发布版：
 
-前提:
+```bash
+cd desktop/src-tauri
+cargo tauri build
+```
 
-- Android Studio Hedgehog+
-- Android SDK 34
-- Kotlin 1.9.20
-- JDK 17
+## 3. 构建 Android 客户端
+
+在 Android Studio 中直接打开 `mobile-android` 运行，或者使用命令行：
 
 ```bash
 cd mobile-android
-./gradlew assembleDebug
+./gradlew assembleRelease
 ```
 
-Windows 下可直接使用:
+Windows 下：
 
 ```powershell
 cd mobile-android
-.\gradlew.bat assembleDebug
+.\gradlew.bat assembleRelease
 ```
 
 ## 使用流程
 
-1. 启动服务端。
-2. 启动桌面端并完成登录。
-3. 在桌面端生成 6 位配对码。
-4. 在 Android 客户端输入配对码完成绑定。
-5. 在移动端查看已配对桌面的会话列表，订阅终端输出并执行远程输入或控制。
+### 局域网 / 自部署模式
+1. 启动服务端
+2. 启动桌面端并完成登录
+3. 在桌面端生成 6 位配对码
+4. 在 Android 客户端输入配对码完成绑定
+5. 在移动端查看终端列表并开始远程操作
 
 ## 证书说明
 
 项目默认使用自签名证书。
 
-如果你重新生成服务端证书，需要同步更新以下文件:
-
+如果重新生成服务端证书，需要同步更新：
 - `server/certs/server.crt`
 - `desktop/assets/server.crt`
 - `mobile-android/app/src/main/res/raw/server_cert.crt`
 
-根目录 `start.ps1` 已内置证书生成与复制流程，适合在 Windows 开发环境下快速操作。
+根目录 `start.ps1` 已包含生成证书并分发到各端的便捷流程。
 
-## 当前实现说明
+## GitHub Actions 与 Release
 
-- 产品当前名称为 `TermSync`。
-- 仓库目录、部分类名、日志和 UI 文案中仍保留 `tty1` / `TTY1` 的历史命名，这是迁移遗留，不影响当前架构和运行。
-- 桌面端当前已经包含终端回放中继与 AI 助手面板。
+项目已提供两套工作流：
+
+- `.github/workflows/quick-build.yml`
+  - 针对 `dev` / `develop` 分支进行快速构建校验
+  - 包含 server / android / desktop 三端基础构建
+- `.github/workflows/build-all.yml`
+  - 针对 `main` / `master` 分支和 `v*` 标签执行完整构建
+  - 自动打包服务端、Android APK、桌面端安装包
+  - 推送 `v0.1.0` 这类标签时自动创建 GitHub Release
+
+典型 Release 产物命名：
+
+- `termsync-server-linux-x64-v0.1.0`
+- `termsync-android-v0.1.0.apk`
+- `termsync-desktop-windows-x64-v0.1.0.msi`
+- `termsync-desktop-windows-x64-v0.1.0-setup.exe`
+- `termsync-desktop-macos-x64-v0.1.0.dmg`
+- `termsync-desktop-macos-arm64-v0.1.0.dmg`
+- `termsync-desktop-linux-x64-v0.1.0.deb`
+- `termsync-desktop-linux-x64-v0.1.0.AppImage`
+
+## 当前状态
+
+`0.1.0` 可视为当前对外发布起点版本。
+
+当前仓库仍保留少量 `tty1` 历史命名，但项目产品名、服务名和 UI 主文案以 `TermSync` 为主。
 
 ## 参考文档
 
 - `docs/architecture.md`
+- `docs/implementation-checklist.md`
 - `server/README.md`
 - `desktop/README.md`
 - `mobile-android/README.md`
