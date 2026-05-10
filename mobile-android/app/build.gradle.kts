@@ -12,7 +12,7 @@ if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(FileInputStream(keystorePropertiesFile))
 }
 
-setProperty("archivesBaseName", "termsync-mobile-0.1.0")
+setProperty("archivesBaseName", "termsync-mobile-0.1.1")
 
 android {
     namespace = "com.termsync.mobile"
@@ -22,8 +22,8 @@ android {
         applicationId = "com.termsync.mobile"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.1.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
             useSupportLibrary = true
