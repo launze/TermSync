@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"html/template"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -87,7 +88,7 @@ func main() {
 	r.Use(handler.CORSMiddleware)
 
 	// Routes
-	r.Get("/", serveHome(downloadsDir))
+	r.Get("/", serveHome(downloadsDir, httpPort))
 	r.Handle("/downloads/*", http.StripPrefix("/downloads/", http.FileServer(http.Dir(downloadsDir))))
 	r.Post("/api/register", authHandler.HandleRegister)
 	r.Post("/api/login", authHandler.HandleLogin)
@@ -99,16 +100,29 @@ func main() {
 	r.Get("/api/cert", apiHandler.ServeCertContent("server.crt", embeddedServerCert))
 	r.Get("/ws", wsHandler.HandleWebSocket)
 
-	// HTTP redirect server (8080 -> WSS port)
+	// HTTP download server. Downloads are intentionally available over plain HTTP
+	// because mobile and desktop browsers commonly block executable downloads
+	// from this server's private HTTPS certificate.
 	go func() {
-		redirectHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			target := fmt.Sprintf("https://%s:%s%s", r.Host[:len(r.Host)-len(":"+httpPort)], port, r.URL.String())
+		downloadRouter := chi.NewRouter()
+		downloadRouter.Use(middleware.Logger)
+		downloadRouter.Use(middleware.Recoverer)
+		downloadRouter.Use(handler.CORSMiddleware)
+		downloadRouter.Get("/", serveHome(downloadsDir, httpPort))
+		downloadRouter.Handle("/downloads/*", http.StripPrefix("/downloads/", http.FileServer(http.Dir(downloadsDir))))
+
+		httpHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/" || strings.HasPrefix(r.URL.Path, "/downloads/") {
+				downloadRouter.ServeHTTP(w, r)
+				return
+			}
+			target := fmt.Sprintf("https://%s:%s%s", hostWithoutPort(r.Host), port, r.URL.RequestURI())
 			http.Redirect(w, r, target, http.StatusMovedPermanently)
 		})
 
-		log.Printf("🔄 HTTP redirect server listening on :%s", httpPort)
-		if err := http.ListenAndServe(":"+httpPort, redirectHandler); err != nil {
-			log.Printf("⚠️ HTTP redirect server error: %v", err)
+		log.Printf("📥 HTTP download server listening on :%s", httpPort)
+		if err := http.ListenAndServe(":"+httpPort, httpHandler); err != nil {
+			log.Printf("⚠️ HTTP download server error: %v", err)
 		}
 	}()
 
@@ -206,16 +220,20 @@ type homePageData struct {
 	Generated string
 }
 
-func serveHome(downloadsDir string) http.HandlerFunc {
+func serveHome(downloadsDir, httpPort string) http.HandlerFunc {
 	tmpl := template.Must(template.New("home").Parse(homeHTML))
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
 			return
 		}
+		downloadBaseURL := ""
+		if r.TLS != nil && httpPort != "" {
+			downloadBaseURL = "http://" + hostWithoutPort(r.Host) + ":" + httpPort
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := tmpl.Execute(w, homePageData{
-			Downloads: listDownloads(downloadsDir),
+			Downloads: listDownloads(downloadsDir, downloadBaseURL),
 			Generated: time.Now().Format("2006-01-02 15:04:05"),
 		}); err != nil {
 			log.Printf("render home failed: %v", err)
@@ -223,7 +241,7 @@ func serveHome(downloadsDir string) http.HandlerFunc {
 	}
 }
 
-func listDownloads(downloadsDir string) []downloadItem {
+func listDownloads(downloadsDir, downloadBaseURL string) []downloadItem {
 	entries, err := os.ReadDir(downloadsDir)
 	if err != nil {
 		log.Printf("read downloads dir failed: %v", err)
@@ -243,9 +261,13 @@ func listDownloads(downloadsDir string) []downloadItem {
 		if shouldHideDownload(name) {
 			continue
 		}
+		path := "/downloads/" + name
+		if downloadBaseURL != "" {
+			path = strings.TrimRight(downloadBaseURL, "/") + path
+		}
 		items = append(items, downloadItem{
 			Name:      name,
-			Path:      "/downloads/" + name,
+			Path:      path,
 			Size:      humanSize(info.Size()),
 			UpdatedAt: info.ModTime().Format("2006-01-02 15:04"),
 			Platform:  platformLabel(name),
@@ -258,6 +280,22 @@ func listDownloads(downloadsDir string) []downloadItem {
 func shouldHideDownload(name string) bool {
 	lower := strings.ToLower(name)
 	return strings.Contains(lower, "server")
+}
+
+func hostWithoutPort(host string) string {
+	if host == "" {
+		return ""
+	}
+	if hostname, _, err := net.SplitHostPort(host); err == nil {
+		return hostname
+	}
+	if strings.HasPrefix(host, "[") && strings.Contains(host, "]") {
+		return strings.Trim(host, "[]")
+	}
+	if idx := strings.LastIndex(host, ":"); idx > -1 && strings.Count(host, ":") == 1 {
+		return host[:idx]
+	}
+	return host
 }
 
 func platformLabel(name string) string {
