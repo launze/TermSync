@@ -67,6 +67,8 @@
         }
         .tab:hover { background-color: #3c3c3c; }
         .tab.active { background-color: #1e1e1e; color: #ffffff; }
+        .tab.has-attention:not(.active) { color: #ffdf9a; background-color: rgba(204, 167, 0, 0.10); }
+        .tab.has-error:not(.active) { color: #ffb8b8; background-color: rgba(244, 71, 71, 0.10); }
         .tab-status {
             width: 14px;
             height: 14px;
@@ -84,6 +86,43 @@
             box-shadow: 0 0 0 0 rgba(78, 201, 176, 0.55);
             animation: tabRunningPulse 1.05s ease-out infinite;
         }
+        .tab-status-completed {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            border: 1px solid #4ec9b0;
+            position: relative;
+        }
+        .tab-status-completed::after {
+            content: '';
+            position: absolute;
+            left: 3px;
+            top: 1px;
+            width: 4px;
+            height: 7px;
+            border-right: 1px solid #4ec9b0;
+            border-bottom: 1px solid #4ec9b0;
+            transform: rotate(38deg);
+        }
+        .tab-status-error {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            border: 1px solid #f44747;
+            position: relative;
+        }
+        .tab-status-error::before,
+        .tab-status-error::after {
+            content: '';
+            position: absolute;
+            left: 5px;
+            top: 2px;
+            width: 1px;
+            height: 7px;
+            background: #f44747;
+        }
+        .tab-status-error::before { transform: rotate(45deg); }
+        .tab-status-error::after { transform: rotate(-45deg); }
         .tab-bell {
             position: relative;
             width: 11px;
@@ -928,6 +967,94 @@
             from { transform: translateX(100%); opacity: 0; }
             to { transform: translateX(0); opacity: 1; }
         }
+
+        .connection-guide {
+            position: fixed;
+            top: 48px;
+            left: 14px;
+            width: min(390px, calc(100vw - 28px));
+            z-index: 3200;
+            border: 1px solid #3c3c3c;
+            border-left: 3px solid #007acc;
+            border-radius: 6px;
+            background: rgba(37, 37, 38, 0.98);
+            box-shadow: 0 12px 30px rgba(0, 0, 0, 0.36);
+            padding: 12px;
+            display: none;
+        }
+        .connection-guide.visible { display: block; }
+        .connection-guide.success { border-left-color: #4ec9b0; }
+        .connection-guide.warning { border-left-color: #cca700; }
+        .connection-guide.error { border-left-color: #f44747; }
+        .connection-guide-header {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 10px;
+        }
+        .connection-guide-title {
+            color: #ffffff;
+            font-size: 13px;
+            font-weight: 600;
+            line-height: 1.35;
+        }
+        .connection-guide-detail {
+            color: #bdbdbd;
+            font-size: 12px;
+            line-height: 1.45;
+            margin-top: 2px;
+            user-select: text;
+        }
+        .connection-guide-close {
+            width: 22px;
+            height: 22px;
+            border: none;
+            border-radius: 4px;
+            background: transparent;
+            color: #969696;
+            cursor: pointer;
+        }
+        .connection-guide-close:hover {
+            color: #ffffff;
+            background: #3c3c3c;
+        }
+        .connection-steps {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 6px;
+            margin-bottom: 10px;
+        }
+        .connection-step {
+            border: 1px solid #3c3c3c;
+            border-radius: 5px;
+            padding: 7px 6px;
+            background: #1f1f1f;
+            color: #8f8f8f;
+            font-size: 11px;
+            line-height: 1.25;
+            text-align: center;
+        }
+        .connection-step.active {
+            color: #ffffff;
+            border-color: #cca700;
+            background: #2e2915;
+        }
+        .connection-step.done {
+            color: #b9efe3;
+            border-color: #315f58;
+            background: #12211f;
+        }
+        .connection-step.error {
+            color: #ffb8b8;
+            border-color: #703131;
+            background: #2a1717;
+        }
+        .connection-guide-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
     </style>
 </head>
 <body>
@@ -973,6 +1100,18 @@
         <span class="status-item" id="statusShell">pwsh</span>
     </div>
 
+    <div class="connection-guide" id="connectionGuide" role="status" aria-live="polite">
+        <div class="connection-guide-header">
+            <div>
+                <div class="connection-guide-title" id="connectionGuideTitle">正在连接服务器</div>
+                <div class="connection-guide-detail" id="connectionGuideDetail">准备连接状态...</div>
+            </div>
+            <button class="connection-guide-close" onclick="window.app.hideConnectionGuide()" title="收起" aria-label="收起">×</button>
+        </div>
+        <div class="connection-steps" id="connectionSteps"></div>
+        <div class="connection-guide-actions" id="connectionGuideActions"></div>
+    </div>
+
     <!-- Split Menu -->
     <div class="split-menu" id="splitMenu">
         <div class="split-menu-item" onclick="window.app.splitPane('right')">
@@ -1011,12 +1150,18 @@
         <div class="modal">
             <h3>⚙ 设置</h3>
             <details class="form-group" style="padding:10px 12px;background:#252526;border:1px solid #3c3c3c;border-radius:4px;">
-                <summary style="cursor:pointer;color:#fff;font-size:13px;">首次使用</summary>
-                <small>1. 先确认服务器地址。</small>
-                <small>2. 点击“注册本机”生成桌面设备 Token。</small>
-                <small>3. 再点击“生成配对码”，到手机端输入 6 位配对码完成绑定。</small>
-                <small>4. 返回主界面后，用设备 Token 连接服务器。</small>
+                <summary style="cursor:pointer;color:#fff;font-size:13px;">手机配对</summary>
+                <small>点击“生成配对码”，桌面身份会自动准备。</small>
+                <small>在手机端输入 6 位配对码后即可绑定并连接。</small>
             </details>
+            <div class="form-group">
+                <label>手机配对码</label>
+                <input type="text" id="pairingCodeDisplay" class="readonly-output pairing-code" placeholder="点击生成" readonly />
+                <small id="pairingCodeHint">配对码有效期 5 分钟，在手机端输入后即可绑定。</small>
+                <div class="inline-actions" style="margin-top:8px;">
+                    <button class="btn btn-primary" onclick="window.app.generatePairingCode()">生成配对码</button>
+                </div>
+            </div>
             <div class="form-group">
                 <label>默认 Shell</label>
                 <select id="settingShell" onchange="window.app.updateCustomShellVisibility()">
@@ -1041,30 +1186,18 @@
             </div>
             <div class="form-group">
                 <label>桌面设备名称</label>
-                <input type="text" id="settingDeviceName" placeholder="我的桌面电脑" />
+                <input type="text" id="settingDeviceName" placeholder="自动使用系统名称" />
             </div>
-            <div class="form-group">
+            <details class="form-group" style="padding:10px 12px;background:#252526;border:1px solid #3c3c3c;border-radius:4px;">
+                <summary style="cursor:pointer;color:#fff;font-size:13px;">高级连接设置</summary>
+                <div style="height:10px;"></div>
                 <label>桌面设备 Token</label>
-                <input type="text" id="settingDeviceToken" placeholder="注册后自动生成" />
-                <small>连接服务器与生成配对码都使用这个 Token，不是手机输入的 6 位配对码。</small>
-            </div>
-            <div class="form-group">
-                <label>设备注册</label>
-                <div class="inline-actions">
-                    <button class="btn btn-secondary" onclick="window.app.registerDesktopDevice()">注册本机</button>
+                <input type="text" id="settingDeviceToken" placeholder="自动生成" />
+                <small>通常无需手动修改。清空后，下次连接或生成配对码会自动重新注册。</small>
+                <div class="inline-actions" style="margin-top:8px;">
+                    <button class="btn btn-secondary" onclick="window.app.registerDesktopDevice()">重新生成桌面身份</button>
                 </div>
-                <small>首次使用先注册一次，成功后会自动保存 Token。</small>
-            </div>
-            <div class="form-group">
-                <label>手机配对码</label>
-                <input type="text" id="pairingCodeDisplay" class="readonly-output pairing-code" placeholder="点击生成" readonly />
-                <small id="pairingCodeHint">配对码有效期 5 分钟，在手机端输入后即可绑定。</small>
-            </div>
-            <div class="form-group">
-                <div class="inline-actions">
-                    <button class="btn btn-primary" onclick="window.app.generatePairingCode()">生成配对码</button>
-                </div>
-            </div>
+            </details>
             <div class="form-group">
                 <label>启动时自动连接</label>
                 <select id="settingAutoConnect">
@@ -1209,6 +1342,12 @@
         const XtermFitAddon = window.FitAddon?.FitAddon;
         const XtermWebLinksAddon = window.WebLinksAddon?.WebLinksAddon;
         const IS_WINDOWS_DESKTOP = typeof invoke !== 'undefined' && /\bWindows\b/i.test(navigator.userAgent);
+        const CONNECTION_STEP_LABELS = {
+            address: '服务器',
+            identity: '身份',
+            socket: '连接',
+            auth: '认证'
+        };
 
         function pushDebugLog(message, payload) {
             const text = payload === undefined
@@ -1303,6 +1442,66 @@
             const normalized = collapseWhitespace(text);
             if (normalized.length <= maxLength) return normalized;
             return normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd() + '…';
+        }
+
+        function diagnoseConnectionError(error, context = {}) {
+            const raw = String(error || '').trim();
+            const lower = raw.toLowerCase();
+            const serverUrl = context.serverUrl ? String(context.serverUrl) : '';
+            const urlHint = serverUrl ? '当前服务器: ' + serverUrl + '。' : '';
+
+            if (!raw) {
+                return {
+                    title: '连接失败',
+                    detail: urlHint + '没有拿到明确错误信息，请重试或检查服务器状态。'
+                };
+            }
+            if (/certificate|cert|tls|x509|unknown issuer|self[- ]signed|invalid peer/i.test(raw)) {
+                return {
+                    title: '证书校验失败',
+                    detail: urlHint + '客户端内置证书和当前服务器证书不匹配，需要用最新客户端，或重新打包客户端证书。'
+                };
+            }
+            if (/401|unauthorized|forbidden|403|token|authentication|auth/i.test(raw)) {
+                return {
+                    title: '设备身份无效',
+                    detail: urlHint + '服务器拒绝了当前设备 token。可以重新生成桌面身份后再连接。'
+                };
+            }
+            if (/register|device|json|unexpected|bad request|400/i.test(raw) && context.stage === 'identity') {
+                return {
+                    title: '自动注册失败',
+                    detail: urlHint + '服务器没有接受桌面设备注册请求，请确认服务端版本已经更新并正在运行。'
+                };
+            }
+            if (/timeout|timed out|elapsed|deadline/i.test(raw)) {
+                return {
+                    title: '连接超时',
+                    detail: urlHint + '服务器没有及时响应，可能是端口、防火墙、安全组或服务进程异常。'
+                };
+            }
+            if (/connection refused|actively refused|os error 10061|refused/i.test(raw)) {
+                return {
+                    title: '服务器端口未响应',
+                    detail: urlHint + '目标地址能解析，但服务端口没有接受连接，请检查 TermSync 服务是否启动。'
+                };
+            }
+            if (/dns|resolve|lookup|name or service|no such host|nodename/i.test(raw)) {
+                return {
+                    title: '服务器地址无法解析',
+                    detail: urlHint + '服务器地址可能写错，或当前网络无法解析该域名。'
+                };
+            }
+            if (/network|unreachable|reset|closed|broken pipe|10054|10060/i.test(raw)) {
+                return {
+                    title: '网络连接中断',
+                    detail: urlHint + '连接被网络或服务器中断，请检查网络、防火墙和服务端运行状态。'
+                };
+            }
+            return {
+                title: '连接失败',
+                detail: urlHint + clipText(raw, 180)
+            };
         }
 
         const COMMAND_LIBRARY_STORAGE_KEY = 'TermSync-command-library';
@@ -1796,6 +1995,7 @@
 
         const DEFAULT_SERVER_URL = 'wss://8.153.163.104:7373/ws';
         const LEGACY_DEFAULT_SERVER_URL = 'wss://nas.smarthome2020.top:7373/ws';
+        const DEFAULT_DESKTOP_DEVICE_NAME = 'TTY1 Desktop';
         const DEFAULT_AI_PRESET = 'termsync';
         const DEFAULT_AI_MODEL = 'DeepSeek-V4-Pro';
         const TERMINAL_FONT_SIZE_DEFAULT = 14;
@@ -1871,7 +2071,7 @@
                 this.defaults = {
                     shell: 'pwsh', customShell: '', fontSize: TERMINAL_FONT_SIZE_DEFAULT,
                     serverUrl: DEFAULT_SERVER_URL, serverToken: '',
-                    deviceName: '我的桌面电脑',
+                    deviceName: DEFAULT_DESKTOP_DEVICE_NAME,
                     autoConnect: true, autoReconnect: true,
                     reconnectInterval: 3000, maxReconnectAttempts: 10,
                     aiPreset: DEFAULT_AI_PRESET,
@@ -1886,12 +2086,19 @@
                 this.settings = { ...this.defaults };
                 this.load();
             }
+            isDefaultDeviceName(value) {
+                const normalized = String(value || '').trim();
+                return normalized === '' || normalized === DEFAULT_DESKTOP_DEVICE_NAME || normalized === '我的桌面电脑';
+            }
             load() {
                 try {
                     const saved = localStorage.getItem('TermSync-settings');
                     if (saved) this.settings = { ...this.defaults, ...JSON.parse(saved) };
                     if (this.settings.serverUrl === LEGACY_DEFAULT_SERVER_URL) {
                         this.settings.serverUrl = DEFAULT_SERVER_URL;
+                    }
+                    if (this.isDefaultDeviceName(this.settings.deviceName)) {
+                        this.settings.deviceName = DEFAULT_DESKTOP_DEVICE_NAME;
                     }
                     const aiIsOldBlankDefault = this.settings.aiPreset === 'litellm'
                         && !String(this.settings.aiApiKey || '').trim()
@@ -2520,6 +2727,13 @@
                 this.windowStateSyncTimer = null;
                 this.windowCloseInProgress = false;
                 this.backendRecoveryPromises = new Map();
+                this.connectionGuideDismissed = false;
+                this.connectionGuideState = {
+                    phase: 'idle',
+                    steps: {},
+                    title: '',
+                    detail: ''
+                };
             }
 
             debug(message, payload) {
@@ -2536,6 +2750,7 @@
                     hasInvoke: typeof invoke !== 'undefined',
                     hasListen: typeof listen !== 'undefined'
                 });
+                await this.applyDefaultDeviceName();
                 this.setupWindowChrome();
                 this.refreshConnectionInputs();
                 this.syncAiConfigInputs();
@@ -2557,7 +2772,7 @@
                 }
                 this.showToast(this.hasDesktopToken()
                     ? 'TTY1 终端已启动 - 默认使用 ' + this.settings.get('shell')
-                    : '首次使用请先到设置里注册本机，再生成手机配对码', 'success');
+                    : '首次使用可直接生成手机配对码', 'success');
                 this.debug('init:done', {
                     tabs: this.tabs.size,
                     activeTabId: this.activeTabId,
@@ -2569,10 +2784,118 @@
                 return !!(this.settings.get('serverToken') || '').trim();
             }
 
+            hideConnectionGuide() {
+                this.connectionGuideDismissed = true;
+                document.getElementById('connectionGuide')?.classList.remove('visible');
+            }
+
+            setConnectionGuide(update = {}) {
+                const phase = update.phase || this.connectionGuideState.phase || 'idle';
+                const isTerminal = phase === 'error' || phase === 'success';
+                if (!isTerminal) this.connectionGuideDismissed = false;
+                this.connectionGuideState = {
+                    ...this.connectionGuideState,
+                    ...update,
+                    phase,
+                    steps: {
+                        ...(this.connectionGuideState.steps || {}),
+                        ...(update.steps || {})
+                    }
+                };
+                this.renderConnectionGuide();
+                if (update.autoHideMs) {
+                    setTimeout(() => {
+                        if (this.connectionGuideState.phase === phase) this.hideConnectionGuide();
+                    }, update.autoHideMs);
+                }
+            }
+
+            renderConnectionGuide() {
+                const panel = document.getElementById('connectionGuide');
+                if (!panel) return;
+                const state = this.connectionGuideState;
+                if (!state.title || this.connectionGuideDismissed) {
+                    panel.classList.remove('visible');
+                    return;
+                }
+
+                panel.className = 'connection-guide visible ' + (state.phase || 'warning');
+                document.getElementById('connectionGuideTitle').textContent = state.title;
+                document.getElementById('connectionGuideDetail').textContent = state.detail || '';
+
+                const stepsEl = document.getElementById('connectionSteps');
+                stepsEl.innerHTML = '';
+                for (const [key, label] of Object.entries(CONNECTION_STEP_LABELS)) {
+                    const step = document.createElement('div');
+                    const status = state.steps?.[key] || 'pending';
+                    step.className = 'connection-step ' + status;
+                    step.textContent = label;
+                    stepsEl.appendChild(step);
+                }
+
+                const actionsEl = document.getElementById('connectionGuideActions');
+                actionsEl.innerHTML = '';
+                const actions = state.actions || [];
+                for (const action of actions) {
+                    const button = document.createElement('button');
+                    button.className = 'btn ' + (action.primary ? 'btn-primary' : 'btn-secondary');
+                    button.textContent = action.label;
+                    button.addEventListener('click', () => this.handleConnectionGuideAction(action.id));
+                    actionsEl.appendChild(button);
+                }
+            }
+
+            async handleConnectionGuideAction(actionId) {
+                if (actionId === 'settings') {
+                    this.showSettings();
+                    return;
+                }
+                if (actionId === 'reset-identity') {
+                    this.settings.set('serverToken', '');
+                    const tokenInput = document.getElementById('settingDeviceToken');
+                    if (tokenInput) tokenInput.value = '';
+                    this.refreshConnectionInputs();
+                    await this.connect({ forceGuide: true });
+                    return;
+                }
+                if (actionId === 'reconnect') {
+                    await this.connect({ forceGuide: true });
+                }
+            }
+
             openOnboardingIfNeeded() {
                 if (this.hasDesktopToken()) return;
+                if (normalizeServerUrl(this.settings.get('serverUrl'))) {
+                    this.setConnectionGuide({
+                        phase: 'warning',
+                        title: '首次启动正在准备连接',
+                        detail: '将使用默认服务器自动注册这台电脑，不需要手动填写 token。',
+                        steps: { address: 'done', identity: 'pending', socket: 'pending', auth: 'pending' },
+                        actions: [{ id: 'settings', label: '打开设置' }]
+                    });
+                    return;
+                }
                 this.showSettings();
-                this.showToast('首次连接会自动注册本机，也可以在设置里手动注册。', 'warning');
+                this.showToast('请先填写服务器地址或生成手机配对码。', 'warning');
+            }
+
+            async applyDefaultDeviceName() {
+                if (!this.settings.isDefaultDeviceName(this.settings.get('deviceName'))) return;
+                const name = await this.resolveDefaultDeviceName();
+                if (!name || !name.trim()) return;
+                this.settings.set('deviceName', name.trim());
+            }
+
+            async resolveDefaultDeviceName() {
+                if (typeof invoke !== 'undefined') {
+                    try {
+                        const name = await invoke('get_default_device_name');
+                        if (name && String(name).trim()) return String(name).trim();
+                    } catch (err) {
+                        this.debug('device-name:resolve-failed', err);
+                    }
+                }
+                return DEFAULT_DESKTOP_DEVICE_NAME;
             }
 
             shouldConnectOnStartup() {
@@ -3537,11 +3860,11 @@
                 let token = (this.settings.get('serverToken') || '').trim();
                 if (token) return token;
                 if (typeof invoke === 'undefined') {
-                    throw new Error('Tauri API 未注入，无法自动注册本机');
+                    throw new Error('Tauri API 未注入，无法准备桌面身份');
                 }
                 const result = await this.registerDesktopDeviceFor(
                     serverUrl,
-                    this.settings.get('deviceName') || '我的桌面电脑'
+                    this.settings.get('deviceName') || DEFAULT_DESKTOP_DEVICE_NAME
                 );
                 token = result?.device?.token || '';
                 if (!token) throw new Error('自动注册没有返回设备 token');
@@ -4439,15 +4762,41 @@
                 return state?.taskState === 'waiting_input';
             }
 
-            getTabRuntimeState(tab) {
-                if (!tab) return { running: false, attention: false };
-                let running = false;
-                let attention = !!tab.attention;
-                for (const paneId of tab.panes || []) {
-                    running = running || this.isPaneRunning(paneId);
-                    attention = attention || this.isPaneNeedsAttention(paneId);
+            getPaneRuntimeState(paneId) {
+                const state = this.sessionActivity.get(this.sessionIdForPane(paneId));
+                const taskState = state?.taskState || 'idle';
+                if (taskState === 'waiting_input') {
+                    return { kind: 'waiting_input', label: '等待输入', priority: 4 };
                 }
-                return { running, attention };
+                if (taskState === 'error') {
+                    return { kind: 'error', label: '终端任务出错', priority: 3 };
+                }
+                if (taskState === 'running') {
+                    return { kind: 'running', label: '终端正在运行', priority: 2 };
+                }
+                if (taskState === 'completed') {
+                    return { kind: 'completed', label: '任务已完成', priority: 1 };
+                }
+                return { kind: 'idle', label: '空闲', priority: 0 };
+            }
+
+            getTabRuntimeState(tab) {
+                if (!tab) return { kind: 'idle', label: '空闲', running: false, attention: false, error: false, completed: false };
+                let best = { kind: 'idle', label: '空闲', priority: 0 };
+                for (const paneId of tab.panes || []) {
+                    const paneState = this.getPaneRuntimeState(paneId);
+                    if (paneState.priority > best.priority) best = paneState;
+                }
+                if (tab.attention && best.priority < 4) {
+                    best = { kind: 'waiting_input', label: '有终端需要关注', priority: 4 };
+                }
+                return {
+                    ...best,
+                    running: best.kind === 'running',
+                    attention: best.kind === 'waiting_input',
+                    error: best.kind === 'error',
+                    completed: best.kind === 'completed'
+                };
             }
 
             updateTabAttentionForPane(paneId, wasRunning, nextTaskState) {
@@ -4722,6 +5071,12 @@
                 if (state === 'connecting') {
                     this.connectionPending = true;
                     this.updateConnectionStatus('connecting');
+                    this.setConnectionGuide({
+                        phase: 'warning',
+                        title: '正在连接服务器',
+                        detail: 'WebSocket 已开始连接，等待服务器响应。',
+                        steps: { address: 'done', identity: 'done', socket: 'active', auth: 'pending' }
+                    });
                     return;
                 }
 
@@ -4736,6 +5091,14 @@
                     }
                     this.updateConnectionStatus('connected');
                     this.updateStatusBar();
+                    this.setConnectionGuide({
+                        phase: 'success',
+                        title: '服务器连接成功',
+                        detail: payload.message || '设备认证完成，手机端可以看到这台电脑的终端。',
+                        steps: { address: 'done', identity: 'done', socket: 'done', auth: 'done' },
+                        actions: [],
+                        autoHideMs: 2200
+                    });
                     try { await invoke('sync_active_sessions'); } catch (e) { console.warn('Sync sessions failed:', e); }
                     await this.syncAllSessionActivity();
                     if (payload.message) this.showToast(payload.message, 'success');
@@ -4750,7 +5113,22 @@
                 this.updateStatusBar();
 
                 if (payload.message && !this.manualDisconnect) {
-                    this.showToast(payload.message, 'error');
+                    const diagnosis = diagnoseConnectionError(payload.message, {
+                        serverUrl: this.settings.get('serverUrl'),
+                        stage: 'auth'
+                    });
+                    this.setConnectionGuide({
+                        phase: 'error',
+                        title: diagnosis.title,
+                        detail: diagnosis.detail,
+                        steps: { address: 'done', identity: 'done', socket: wasConnected ? 'done' : 'error', auth: 'error' },
+                        actions: [
+                            { id: 'reconnect', label: '重新连接', primary: true },
+                            { id: 'reset-identity', label: '重新生成身份' },
+                            { id: 'settings', label: '打开设置' }
+                        ]
+                    });
+                    this.showToast(diagnosis.title + ': ' + diagnosis.detail, 'error');
                 }
 
                 if (!this.manualDisconnect && (wasConnected || state === 'disconnected') && this.settings.get('autoReconnect')) {
@@ -4851,21 +5229,21 @@
 
             async registerDesktopDevice() {
                 const serverUrl = document.getElementById('settingServerUrl').value.trim() || this.settings.get('serverUrl');
-                const deviceName = document.getElementById('settingDeviceName').value.trim() || '我的桌面电脑';
+                const deviceName = document.getElementById('settingDeviceName').value.trim() || this.settings.get('deviceName') || DEFAULT_DESKTOP_DEVICE_NAME;
                 if (!serverUrl) { this.showToast('请先填写服务器地址', 'warning'); return; }
                 try {
                     const result = await this.registerDesktopDeviceFor(serverUrl, deviceName);
-                    this.showToast('桌面设备已注册: ' + result.device.name, 'success');
+                    this.showToast('桌面身份已准备: ' + result.device.name, 'success');
                 } catch (err) {
                     console.error('Register device failed:', err);
-                    this.showToast('注册桌面设备失败: ' + err, 'error');
+                    this.showToast('准备桌面身份失败: ' + err, 'error');
                 }
             }
 
             async registerDesktopDeviceFor(serverUrl, deviceName) {
                 const result = await invoke('register_device', {
                     serverUrl: serverUrl,
-                    name: deviceName || '我的桌面电脑',
+                    name: deviceName || DEFAULT_DESKTOP_DEVICE_NAME,
                     deviceType: 'desktop'
                 });
                 this.settings.set('serverUrl', serverUrl);
@@ -4886,13 +5264,13 @@
                 if (!serverUrl) { this.showToast('请先填写服务器地址', 'warning'); return; }
                 if (!token) {
                     try {
-                        this.showToast('正在自动注册本机...', 'warning');
-                        const deviceName = document.getElementById('settingDeviceName').value.trim() || this.settings.get('deviceName') || '我的桌面电脑';
+                        this.showToast('正在准备桌面身份...', 'warning');
+                        const deviceName = document.getElementById('settingDeviceName').value.trim() || this.settings.get('deviceName') || DEFAULT_DESKTOP_DEVICE_NAME;
                         const result = await this.registerDesktopDeviceFor(serverUrl, deviceName);
                         token = result.device.token;
                     } catch (err) {
                         console.error('Auto register before pairing failed:', err);
-                        this.showToast('自动注册失败: ' + err, 'error');
+                        this.showToast('准备桌面身份失败: ' + err, 'error');
                         return;
                     }
                 }
@@ -5179,9 +5557,12 @@
                     const statusEl = document.createElement('span');
                     const closeEl = document.createElement('span');
                     const runtimeState = this.getTabRuntimeState(tab);
-                    el.className = 'tab' + (tab.id === this.activeTabId ? ' active' : '');
+                    el.className = 'tab' + (tab.id === this.activeTabId ? ' active' : '')
+                        + (runtimeState.attention ? ' has-attention' : '')
+                        + (runtimeState.error ? ' has-error' : '');
                     el.type = 'button';
                     el.dataset.tabId = tab.id;
+                    el.title = tab.title + (runtimeState.kind !== 'idle' ? ' - ' + runtimeState.label : '');
                     titleEl.className = 'tab-title';
                     titleEl.textContent = tab.title;
                     titleEl.title = tab.title;
@@ -5191,16 +5572,23 @@
                     });
                     statusEl.className = 'tab-status';
                     statusEl.setAttribute('aria-hidden', 'true');
+                    statusEl.title = runtimeState.label;
                     if (runtimeState.running) {
                         const dot = document.createElement('span');
                         dot.className = 'tab-running-dot';
-                        statusEl.title = '终端正在运行';
                         statusEl.appendChild(dot);
                     } else if (runtimeState.attention) {
                         const bell = document.createElement('span');
                         bell.className = 'tab-bell';
-                        statusEl.title = '终端已停止或正在等待处理';
                         statusEl.appendChild(bell);
+                    } else if (runtimeState.error) {
+                        const error = document.createElement('span');
+                        error.className = 'tab-status-error';
+                        statusEl.appendChild(error);
+                    } else if (runtimeState.completed) {
+                        const completed = document.createElement('span');
+                        completed.className = 'tab-status-completed';
+                        statusEl.appendChild(completed);
                     }
                     closeEl.className = 'tab-close';
                     closeEl.textContent = '×';
@@ -5209,7 +5597,7 @@
                         this.closeTab(tab.id);
                     });
                     el.appendChild(titleEl);
-                    if (runtimeState.running || runtimeState.attention) {
+                    if (runtimeState.kind !== 'idle') {
                         el.appendChild(statusEl);
                     }
                     el.appendChild(closeEl);
@@ -5511,7 +5899,7 @@
                 else await this.connect();
             }
 
-            async connect() {
+            async connect(options = {}) {
                 const url = (this.settings.get('serverUrl') || '').trim();
                 let token = (this.settings.get('serverToken') || '').trim();
                 if (this.connectionPending) {
@@ -5520,19 +5908,49 @@
                     return;
                 }
                 this.debug('connection:request', { url, tokenLength: token.length });
-                if (!url) { this.showToast('请输入服务器地址', 'warning'); return; }
+                if (!url) {
+                    this.setConnectionGuide({
+                        phase: 'error',
+                        title: '缺少服务器地址',
+                        detail: '请先在设置里填写 TermSync 服务器地址。',
+                        steps: { address: 'error', identity: 'pending', socket: 'pending', auth: 'pending' },
+                        actions: [{ id: 'settings', label: '打开设置', primary: true }]
+                    });
+                    this.showToast('请输入服务器地址', 'warning');
+                    return;
+                }
+                this.setConnectionGuide({
+                    phase: 'warning',
+                    title: options.forceGuide ? '正在重新连接服务器' : '正在连接服务器',
+                    detail: '正在检查服务器地址并准备桌面身份。',
+                    steps: { address: 'active', identity: token ? 'done' : 'pending', socket: 'pending', auth: 'pending' },
+                    actions: []
+                });
                 if (!token) {
                     if (typeof invoke === 'undefined') {
-                        this.showToast('Tauri API 未注入，当前页面不是桌面应用上下文', 'error');
+                        const detail = 'Tauri API 未注入，当前页面不是桌面应用上下文。';
+                        this.setConnectionGuide({
+                            phase: 'error',
+                            title: '无法使用桌面能力',
+                            detail,
+                            steps: { address: 'done', identity: 'error', socket: 'pending', auth: 'pending' },
+                            actions: []
+                        });
+                        this.showToast(detail, 'error');
                         this.debug('connection:invoke-missing');
                         return;
                     }
                     try {
                         this.updateConnectionStatus('connecting');
-                        this.showToast('首次连接正在自动注册本机...', 'warning');
+                        this.setConnectionGuide({
+                            phase: 'warning',
+                            title: '首次连接正在注册设备',
+                            detail: '正在向服务器注册这台电脑，成功后会自动保存设备 token。',
+                            steps: { address: 'done', identity: 'active', socket: 'pending', auth: 'pending' }
+                        });
                         const result = await this.registerDesktopDeviceFor(
                             url,
-                            this.settings.get('deviceName') || '我的桌面电脑'
+                            this.settings.get('deviceName') || DEFAULT_DESKTOP_DEVICE_NAME
                         );
                         token = result.device.token;
                         this.debug('connection:auto-register-ok', {
@@ -5547,12 +5965,31 @@
                             url,
                             error: String(err)
                         });
-                        this.showToast('首次连接自动注册失败: ' + err, 'error');
+                        const diagnosis = diagnoseConnectionError(err, { serverUrl: url, stage: 'identity' });
+                        this.setConnectionGuide({
+                            phase: 'error',
+                            title: diagnosis.title,
+                            detail: diagnosis.detail,
+                            steps: { address: 'done', identity: 'error', socket: 'pending', auth: 'pending' },
+                            actions: [
+                                { id: 'reconnect', label: '重试', primary: true },
+                                { id: 'settings', label: '打开设置' }
+                            ]
+                        });
+                        this.showToast(diagnosis.title + ': ' + diagnosis.detail, 'error');
                         return;
                     }
                 }
                 if (typeof invoke === 'undefined') {
-                    this.showToast('Tauri API 未注入，当前页面不是桌面应用上下文', 'error');
+                    const detail = 'Tauri API 未注入，当前页面不是桌面应用上下文。';
+                    this.setConnectionGuide({
+                        phase: 'error',
+                        title: '无法连接服务器',
+                        detail,
+                        steps: { address: 'done', identity: 'done', socket: 'error', auth: 'pending' },
+                        actions: []
+                    });
+                    this.showToast(detail, 'error');
                     this.debug('connection:invoke-missing');
                     return;
                 }
@@ -5566,9 +6003,20 @@
                 }
                 this.updateConnectionStatus('connecting');
                 try {
+                    this.setConnectionGuide({
+                        phase: 'warning',
+                        title: '正在建立服务器连接',
+                        detail: '桌面身份已准备，正在连接 WebSocket 并等待认证。',
+                        steps: { address: 'done', identity: 'done', socket: 'active', auth: 'pending' }
+                    });
                     await invoke('connect_server', { url: url, token: token });
                     this.debug('connection:invoke-sent');
-                    this.showToast('连接请求已发送，等待认证', 'success');
+                    this.setConnectionGuide({
+                        phase: 'warning',
+                        title: '等待服务器认证',
+                        detail: '连接请求已发送，正在等待服务器返回认证结果。',
+                        steps: { address: 'done', identity: 'done', socket: 'done', auth: 'active' }
+                    });
                 } catch (err) {
                     console.error('Connection failed:', err);
                     this.connectionPending = false;
@@ -5578,7 +6026,19 @@
                         url: url,
                         error: String(err)
                     });
-                    this.showToast('连接失败: ' + err, 'error');
+                    const diagnosis = diagnoseConnectionError(err, { serverUrl: url, stage: 'socket' });
+                    this.setConnectionGuide({
+                        phase: 'error',
+                        title: diagnosis.title,
+                        detail: diagnosis.detail,
+                        steps: { address: 'done', identity: 'done', socket: 'error', auth: 'pending' },
+                        actions: [
+                            { id: 'reconnect', label: '重新连接', primary: true },
+                            { id: 'reset-identity', label: '重新生成身份' },
+                            { id: 'settings', label: '打开设置' }
+                        ]
+                    });
+                    this.showToast(diagnosis.title + ': ' + diagnosis.detail, 'error');
                     if (this.settings.get('autoReconnect')) this.scheduleReconnect();
                 }
             }
@@ -5595,6 +6055,14 @@
                 if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
                 this.reconnectAttempts = 0;
                 this.updateConnectionStatus('local');
+                this.setConnectionGuide({
+                    phase: 'success',
+                    title: '已断开服务器连接',
+                    detail: '当前回到本地终端模式。',
+                    steps: { address: 'done', identity: this.hasDesktopToken() ? 'done' : 'pending', socket: 'pending', auth: 'pending' },
+                    actions: [{ id: 'reconnect', label: '重新连接', primary: true }],
+                    autoHideMs: 1800
+                });
                 this.showToast('已断开服务器连接，使用本地终端', 'success');
                 this.updateStatusBar();
             }
@@ -5668,9 +6136,13 @@
                 if (controls) controls.hidden = !this.windowControlsEnabled;
                 if (!this.windowControlsEnabled) return;
 
-                dragRegion?.addEventListener('dblclick', () => {
+                const handleTitlebarDoubleClick = (event) => {
+                    if (event.target.closest('button, input, select, textarea, .tab, .tab-bar-actions, .window-controls')) return;
+                    event.preventDefault();
                     this.toggleWindowMaximize();
-                });
+                };
+                dragRegion?.addEventListener('dblclick', handleTitlebarDoubleClick);
+                tabBar?.addEventListener('dblclick', handleTitlebarDoubleClick);
                 document.getElementById('windowMinimizeBtn')?.addEventListener('click', () => {
                     this.minimizeWindow();
                 });
@@ -5687,6 +6159,9 @@
                     this.windowStateSyncTimer = setTimeout(() => {
                         this.syncWindowMaximizedState();
                     }, 60);
+                });
+                document.addEventListener('visibilitychange', () => {
+                    if (!document.hidden) this.syncWindowMaximizedState();
                 });
                 this.syncWindowMaximizedState();
             }
@@ -5777,7 +6252,7 @@
                 this.setTerminalFontSize(document.getElementById('settingFontSize').value);
                 const customServerUrl = normalizeServerUrl(document.getElementById('settingServerUrl').value);
                 this.settings.set('serverUrl', customServerUrl || DEFAULT_SERVER_URL);
-                this.settings.set('deviceName', document.getElementById('settingDeviceName').value.trim() || '我的桌面电脑');
+                this.settings.set('deviceName', document.getElementById('settingDeviceName').value.trim() || DEFAULT_DESKTOP_DEVICE_NAME);
                 this.settings.set('serverToken', document.getElementById('settingDeviceToken').value.trim());
                 this.settings.set('autoConnect', document.getElementById('settingAutoConnect').value === 'true');
                 this.settings.set('autoReconnect', document.getElementById('settingAutoReconnect').value === 'true');

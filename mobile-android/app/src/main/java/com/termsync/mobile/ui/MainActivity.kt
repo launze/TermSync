@@ -1,6 +1,9 @@
 package com.termsync.mobile.ui
 
 import android.annotation.SuppressLint
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -12,6 +15,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.webkit.JavascriptInterface
 import android.view.ViewGroup
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
@@ -125,6 +129,7 @@ import com.termsync.mobile.viewmodel.SpecialKey
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalContext
 
 private const val DEFAULT_SERVER_URL = "wss://8.153.163.104:7373/ws"
 enum class TerminalRenderMode {
@@ -195,6 +200,7 @@ fun TTY1App(viewModel: MainViewModel) {
     val selectedSession = sessions.firstOrNull { it.sessionId == selectedSessionId }
     val hasToken = deviceToken.isNotBlank()
     val canRequestRemoteTerminal = connectionState is ConnectionState.Connected && isPaired
+    val activeSessionCount = sessions.count { it.taskState == "running" || it.taskState == "waiting_input" }
 
     LaunchedEffect(hasToken) {
         if (!hasToken) {
@@ -207,6 +213,8 @@ fun TTY1App(viewModel: MainViewModel) {
             if (selectedSessionId == null) {
                 CompactHomeTopBar(
                     sessionCount = sessions.size,
+                    activeSessionCount = activeSessionCount,
+                    connectionState = connectionState,
                     canCreateTerminal = canRequestRemoteTerminal,
                     onCreateTerminal = { viewModel.requestRemoteSessionCreate() },
                     onRefresh = { viewModel.refreshSessions() },
@@ -255,10 +263,8 @@ fun TTY1App(viewModel: MainViewModel) {
                         pairedDesktopName = pairedDesktopName,
                         statusMessage = statusMessage,
                         onOpenSettings = { showConnectionDialog = true },
-                        onRegister = { showConnectionDialog = true },
                         onConnect = {
-                            if (hasToken) viewModel.connect(serverUrl, deviceToken)
-                            else showConnectionDialog = true
+                            viewModel.connect(serverUrl, deviceToken)
                         },
                         onDisconnect = { viewModel.disconnect() },
                         onRefresh = { viewModel.refreshSessions() },
@@ -293,11 +299,14 @@ fun TTY1App(viewModel: MainViewModel) {
 @Composable
 fun CompactHomeTopBar(
     sessionCount: Int,
+    activeSessionCount: Int,
+    connectionState: ConnectionState,
     canCreateTerminal: Boolean,
     onCreateTerminal: () -> Unit,
     onRefresh: () -> Unit,
     onOpenSettings: () -> Unit
 ) {
+    val (connectionLabel, connectionColor) = connectionStateVisual(connectionState)
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
@@ -309,19 +318,41 @@ fun CompactHomeTopBar(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(1.dp)
             ) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(7.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "TermSync",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Box(
+                        modifier = Modifier
+                            .size(7.dp)
+                            .background(connectionColor, RoundedCornerShape(999.dp))
+                    )
+                    Text(
+                        text = connectionLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = connectionColor,
+                        maxLines = 1
+                    )
+                }
                 Text(
-                    text = "TermSync",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Text(
-                    text = "$sessionCount 个终端",
+                    text = if (activeSessionCount > 0) {
+                        "$activeSessionCount 活跃 · $sessionCount 总计"
+                    } else {
+                        "$sessionCount 个终端"
+                    },
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
             Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -391,7 +422,6 @@ fun HomeScreen(
     pairedDesktopName: String,
     statusMessage: String,
     onOpenSettings: () -> Unit,
-    onRegister: () -> Unit,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
     onRefresh: () -> Unit,
@@ -410,7 +440,6 @@ fun HomeScreen(
                     deviceName = deviceName,
                     hasToken = hasToken,
                     onOpenSettings = onOpenSettings,
-                    onRegister = onRegister,
                     onConnect = onConnect,
                     onDisconnect = onDisconnect,
                     onRefresh = onRefresh
@@ -475,7 +504,6 @@ fun QuickStartCard(
     deviceName: String,
     hasToken: Boolean,
     onOpenSettings: () -> Unit,
-    onRegister: () -> Unit,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
     onRefresh: () -> Unit
@@ -484,8 +512,8 @@ fun QuickStartCard(
     val isConnecting = connectionState is ConnectionState.Connecting
     val showCustomServerUrl = isCustomServerUrl(serverUrl)
     val detail = buildList {
-        add(if (hasToken) "已注册" else "未注册")
-        add(if (hasToken) "等待配对码" else "先生成 Token")
+        add(if (hasToken) "手机身份已准备" else "首次配对会自动准备手机身份")
+        add("等待桌面配对码")
         add(deviceName)
         if (showCustomServerUrl) add("自定义服务器")
     }.joinToString(" · ")
@@ -493,25 +521,22 @@ fun QuickStartCard(
     HomeSummaryBar(
         icon = if (hasToken) Icons.Default.Verified else Icons.Default.Smartphone,
         iconTint = MaterialTheme.colorScheme.primary,
-        headline = if (hasToken) "快速开始" else "先注册手机",
+        headline = "连接桌面终端",
         detail = detail,
         containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.52f)
     ) {
         val primaryIcon = when {
-            !hasToken -> Icons.Default.Smartphone
             isConnected -> Icons.Default.Refresh
             else -> Icons.Default.Link
         }
         SummaryActionButton(
             icon = primaryIcon,
             contentDescription = when {
-                !hasToken -> "注册"
                 isConnected -> "刷新"
                 isConnecting -> "连接中"
                 else -> "连接服务器"
             },
             onClick = when {
-                !hasToken -> onRegister
                 isConnected -> onRefresh
                 else -> onConnect
             },
@@ -698,92 +723,131 @@ fun SessionCard(session: TerminalSession, onClick: () -> Unit) {
     } else {
         1f
     }
+    val activityText = session.activity.ifBlank {
+        when (stateVisual.state) {
+            "completed" -> "任务已完成"
+            "waiting_input" -> "等待输入"
+            "running" -> session.preview.ifBlank { "正在处理终端任务" }
+            "error" -> session.preview.ifBlank { "终端任务出错" }
+            else -> session.preview.ifBlank { "等待新的输出" }
+        }
+    }
+    val previewText = session.preview.takeIf { it.isNotBlank() && it != activityText }
+    val relativeTime = formatRelativeActivity(now, session.lastActivityAt)
     Card(
         modifier = Modifier.fillMaxWidth(),
         onClick = onClick,
-        shape = RoundedCornerShape(10.dp)
+        shape = RoundedCornerShape(8.dp)
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 12.dp, vertical = 10.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+            verticalArrangement = Arrangement.spacedBy(7.dp)
         ) {
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(3.dp)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = session.title,
-                        style = MaterialTheme.typography.titleSmall,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Box(
-                        modifier = Modifier
-                            .size(8.dp)
-                            .graphicsLayer { alpha = pulseAlpha }
-                            .background(
-                                color = stateVisual.color,
-                                shape = RoundedCornerShape(999.dp)
-                            )
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = stateVisual.label,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = stateVisual.color
-                    )
-                }
-                val activityText = session.activity.ifBlank {
-                    when (stateVisual.state) {
-                        "completed" -> "任务已完成"
-                        "waiting_input" -> "等待输入"
-                        "running" -> session.preview.ifBlank { "正在处理终端任务" }
-                        "error" -> session.preview.ifBlank { "终端任务出错" }
-                        else -> session.preview.ifBlank { "等待新的输出" }
-                    }
-                }
-                Text(
-                    text = activityText,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                Box(
+                    modifier = Modifier
+                        .size(9.dp)
+                        .graphicsLayer { alpha = pulseAlpha }
+                        .background(
+                            color = stateVisual.color,
+                            shape = RoundedCornerShape(999.dp)
+                        )
                 )
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                Text(
+                    text = session.title,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Surface(
+                    shape = RoundedCornerShape(999.dp),
+                    color = stateVisual.color.copy(alpha = 0.14f)
                 ) {
                     Text(
-                        text = "${session.cols}x${session.rows}",
+                        text = stateVisual.label,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = stateVisual.color,
+                        maxLines = 1
                     )
-                    if (session.preview.isNotBlank() && session.preview != activityText) {
-                        Text(
-                            text = session.preview,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
                 }
             }
-            
-            Icon(
-                imageVector = Icons.Default.Terminal,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier
-                    .padding(start = 10.dp)
-                    .size(18.dp)
+
+            Text(
+                text = activityText,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
             )
+
+            if (previewText != null) {
+                Text(
+                    text = previewText,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                SessionMetaChip("${session.cols}x${session.rows}")
+                if (session.isOwner) {
+                    SessionMetaChip("本机")
+                }
+                if (relativeTime.isNotBlank()) {
+                    SessionMetaChip(relativeTime)
+                }
+                Spacer(modifier = Modifier.weight(1f))
+                Icon(
+                    imageVector = Icons.Default.Terminal,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
         }
+    }
+}
+
+@Composable
+private fun SessionMetaChip(text: String) {
+    Surface(
+        shape = RoundedCornerShape(999.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f)
+    ) {
+        Text(
+            text = text,
+            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1
+        )
+    }
+}
+
+private fun formatRelativeActivity(now: Long, lastActivityAt: Long): String {
+    if (lastActivityAt <= 0L) return ""
+    val seconds = ((now - lastActivityAt).coerceAtLeast(0L) / 1000L).toInt()
+    return when {
+        seconds < 5 -> "刚刚"
+        seconds < 60 -> "${seconds}秒前"
+        seconds < 3600 -> "${seconds / 60}分钟前"
+        seconds < 86400 -> "${seconds / 3600}小时前"
+        else -> "${seconds / 86400}天前"
     }
 }
 
@@ -1035,6 +1099,7 @@ fun TerminalViewScreen(
                         onTerminalResize = onTerminalResize,
                         onScrollAtBottom = { terminalAtBottom = it },
                         onTuiDetected = { tuiHintVisible = true },
+                        onReaderCommand = onSubmitCommand,
                         onDebug = onDebug,
                         modifier = Modifier.fillMaxSize()
                     )
@@ -1729,7 +1794,7 @@ fun EmptyStateScreen(connectionState: ConnectionState, hasToken: Boolean, isPair
             Text(
                 text = when (connectionState) {
                     is ConnectionState.Disconnected -> when {
-                        !hasToken -> "先注册并完成配对"
+                        !hasToken -> "输入桌面配对码即可开始"
                         !isPaired -> "先完成桌面配对"
                         else -> "还没有连接服务器"
                     }
@@ -1745,13 +1810,13 @@ fun EmptyStateScreen(connectionState: ConnectionState, hasToken: Boolean, isPair
             Text(
                 text = when (connectionState) {
                     is ConnectionState.Disconnected -> when {
-                        !hasToken -> "先在设置里注册手机，再输入桌面端生成的 6 位配对码。"
-                        !isPaired -> "去设置里输入桌面端生成的 6 位配对码，完成一次绑定后这里就不会再提示。"
+                        !hasToken -> "在桌面端生成 6 位配对码，手机会自动准备身份并完成绑定。"
+                        !isPaired -> "输入桌面端生成的 6 位配对码，完成一次绑定后这里就不会再提示。"
                         else -> "点击上方连接服务器，随后就能看到桌面端共享的终端。"
                     }
                     is ConnectionState.Connecting -> "请稍等，正在建立安全连接。"
                     is ConnectionState.Connected -> "去桌面端打开一个终端，手机上会自动显示在这里。"
-                    is ConnectionState.Error -> "检查服务器地址、设备 Token 和证书后重试。"
+                    is ConnectionState.Error -> "检查服务器地址、网络和证书后重试。"
                 },
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1776,11 +1841,12 @@ fun ConnectionDialog(
     onConnect: () -> Unit
 ) {
     var pairingCode by remember { mutableStateOf("") }
+    var showAdvanced by rememberSaveable { mutableStateOf(false) }
     val displayedServerUrl = if (isCustomServerUrl(serverUrl)) serverUrl else ""
     
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("手机连接设置") },
+        title = { Text("连接桌面") },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(androidx.compose.foundation.rememberScrollState()),
@@ -1791,56 +1857,58 @@ fun ConnectionDialog(
                     color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f)
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
-                        Text("推荐流程", fontWeight = FontWeight.SemiBold)
+                        Text("输入桌面端生成的 6 位配对码", fontWeight = FontWeight.SemiBold)
                         Spacer(modifier = Modifier.height(4.dp))
-                        Text("1. 注册手机设备", style = MaterialTheme.typography.bodySmall)
-                        Text("2. 输入桌面端 6 位配对码", style = MaterialTheme.typography.bodySmall)
-                        Text("3. 点击连接查看桌面终端", style = MaterialTheme.typography.bodySmall)
+                        Text("手机身份会自动准备，配对成功后会直接连接到桌面终端。", style = MaterialTheme.typography.bodySmall)
                     }
-                }
-                OutlinedTextField(
-                    value = displayedServerUrl,
-                    onValueChange = {
-                        val trimmed = it.trim()
-                        onServerUrlChange(if (trimmed.isBlank()) DEFAULT_SERVER_URL else trimmed)
-                    },
-                    label = { Text("服务器地址") },
-                    placeholder = { Text(DEFAULT_SERVER_URL) },
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = deviceName,
-                    onValueChange = onDeviceNameChange,
-                    label = { Text("手机设备名称") },
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = deviceToken,
-                    onValueChange = onDeviceTokenChange,
-                    label = { Text("手机设备 Token") },
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Button(
-                    onClick = onRegister,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("注册本机")
                 }
                 OutlinedTextField(
                     value = pairingCode,
                     onValueChange = { pairingCode = it.filter(Char::isDigit).take(6) },
                     label = { Text("桌面配对码") },
                     modifier = Modifier.fillMaxWidth(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    singleLine = true
                 )
                 Button(
                     onClick = { onPair(pairingCode) },
                     enabled = pairingCode.length == 6,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("完成配对")
+                    Text("完成配对并连接")
+                }
+                TextButton(onClick = { showAdvanced = !showAdvanced }) {
+                    Text(if (showAdvanced) "收起高级设置" else "高级设置")
+                }
+                if (showAdvanced) {
+                    OutlinedTextField(
+                        value = displayedServerUrl,
+                        onValueChange = {
+                            val trimmed = it.trim()
+                            onServerUrlChange(if (trimmed.isBlank()) DEFAULT_SERVER_URL else trimmed)
+                        },
+                        label = { Text("服务器地址") },
+                        placeholder = { Text(DEFAULT_SERVER_URL) },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = deviceName,
+                        onValueChange = onDeviceNameChange,
+                        label = { Text("手机名称") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = deviceToken,
+                        onValueChange = onDeviceTokenChange,
+                        label = { Text("手机身份 Token") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                    TextButton(onClick = onRegister) {
+                        Text("重新生成手机身份")
+                    }
                 }
                 if (statusMessage.isNotBlank()) {
                     Spacer(modifier = Modifier.height(12.dp))
@@ -1860,8 +1928,7 @@ fun ConnectionDialog(
         },
         confirmButton = {
             Button(
-                onClick = onConnect,
-                enabled = deviceToken.isNotBlank()
+                onClick = onConnect
             ) {
                 Text("连接")
             }
@@ -1875,9 +1942,11 @@ fun ConnectionDialog(
 }
 
 private class TerminalAndroidBridge(
+    private val context: Context,
     private val onResize: (Int, Int, Boolean) -> Unit,
     private val onScrollAtBottom: (Boolean) -> Unit,
     private val onTuiDetected: () -> Unit,
+    private val onReaderCommand: (String) -> Unit,
     private val onDebug: (String) -> Unit
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -1914,6 +1983,26 @@ private class TerminalAndroidBridge(
             onTuiDetected()
         }
     }
+
+    @JavascriptInterface
+    fun copyReaderText(text: String?) {
+        val value = text.orEmpty()
+        if (value.isBlank()) return
+        mainHandler.post {
+            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.setPrimaryClip(ClipData.newPlainText("TTY1", value))
+            Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    @JavascriptInterface
+    fun sendReaderCommand(command: String?) {
+        val value = command.orEmpty().trim()
+        if (value.isBlank()) return
+        mainHandler.post {
+            onReaderCommand(value)
+        }
+    }
 }
 
 @SuppressLint("SetJavaScriptEnabled")
@@ -1932,9 +2021,11 @@ fun TerminalWebView(
     onTerminalResize: (Int, Int, Boolean) -> Unit,
     onScrollAtBottom: (Boolean) -> Unit,
     onTuiDetected: () -> Unit,
+    onReaderCommand: (String) -> Unit,
     onDebug: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     var webView by remember { mutableStateOf<WebView?>(null) }
     var pageReady by remember(sessionId) { mutableStateOf(false) }
     // Track the output that was last fully rendered (for session switch / replay detection)
@@ -1944,9 +2035,11 @@ fun TerminalWebView(
     var pendingFullRender by remember(sessionId) { mutableStateOf<Pair<String, Long>?>(null) }
     val bridge = remember(sessionId) {
         TerminalAndroidBridge(
+            context = context,
             onResize = onTerminalResize,
             onScrollAtBottom = onScrollAtBottom,
             onTuiDetected = onTuiDetected,
+            onReaderCommand = onReaderCommand,
             onDebug = onDebug
         )
     }

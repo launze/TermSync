@@ -54,6 +54,7 @@ fn main() {
             commands::sync_active_sessions,
             commands::list_local_sessions,
             commands::get_server_status,
+            commands::get_default_device_name,
             commands::register_device,
             commands::generate_pairing_code,
             commands::debug_log,

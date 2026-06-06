@@ -9,6 +9,7 @@ use image::{ColorType, ImageFormat};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Serialize;
 use serde_json::{json, Value};
+use sysinfo::System;
 use tauri::{command, AppHandle, State};
 use uuid::Uuid;
 
@@ -296,6 +297,24 @@ pub async fn get_server_status(
     state: State<'_, WssClientState>,
 ) -> Result<ServerStatusSnapshot, String> {
     Ok(state.status_snapshot().await)
+}
+
+#[command]
+pub fn get_default_device_name() -> Result<String, String> {
+    let name = std::env::var("COMPUTERNAME")
+        .ok()
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .or_else(System::host_name)
+        .map(|value| {
+            value
+                .trim()
+                .chars()
+                .filter(|ch| !ch.is_control())
+                .collect::<String>()
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "TTY1 Desktop".to_string());
+    Ok(name)
 }
 
 #[command]

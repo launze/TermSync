@@ -2,6 +2,8 @@ package com.termsync.mobile.viewmodel
 
 import android.app.Application
 import android.content.Context
+import android.os.Build
+import android.provider.Settings
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -109,7 +111,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _terminalStreamStatus = MutableStateFlow("等待进入终端")
     private val _serverUrl = MutableStateFlow(normalizeSavedServerUrl(prefs.getString(KEY_SERVER_URL, DEFAULT_SERVER_URL)))
     private val _deviceToken = MutableStateFlow(prefs.getString(KEY_DEVICE_TOKEN, "") ?: "")
-    private val _deviceName = MutableStateFlow(prefs.getString(KEY_DEVICE_NAME, "我的手机") ?: "我的手机")
+    private val defaultDeviceName = resolveDefaultDeviceName(application)
+    private val _deviceName = MutableStateFlow(
+        prefs.getString(KEY_DEVICE_NAME, defaultDeviceName)
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?: defaultDeviceName
+    )
     private val _pairedDesktopId = MutableStateFlow(prefs.getString(KEY_PAIRED_DESKTOP_ID, "") ?: "")
     private val _pairedDesktopName = MutableStateFlow(prefs.getString(KEY_PAIRED_DESKTOP_NAME, "") ?: "")
     private val _isPaired = MutableStateFlow(_pairedDesktopId.value.isNotBlank())
@@ -148,6 +156,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 DEFAULT_SERVER_URL
             } else {
                 normalized
+            }
+        }
+
+        private fun resolveDefaultDeviceName(context: Context): String {
+            val resolver = context.contentResolver
+            val manufacturer = Build.MANUFACTURER.orEmpty().trim()
+            val model = Build.MODEL.orEmpty().trim()
+            val hardwareName = when {
+                model.isBlank() -> manufacturer
+                manufacturer.isBlank() -> model
+                model.startsWith(manufacturer, ignoreCase = true) -> model
+                else -> "$manufacturer $model"
+            }.trim()
+
+            return listOf(
+                runCatching { Settings.Global.getString(resolver, Settings.Global.DEVICE_NAME) }.getOrNull(),
+                runCatching { Settings.Secure.getString(resolver, "bluetooth_name") }.getOrNull(),
+                hardwareName,
+                "Android 手机"
+            ).firstNotNullOf { candidate ->
+                candidate?.trim()?.takeIf { it.isNotBlank() }
             }
         }
     }
@@ -404,12 +433,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun connect(url: String, token: String) {
-        saveConnectionSettings(url, token, _deviceName.value)
+        val normalizedUrl = url.trim()
+        val normalizedToken = token.trim()
+        if (normalizedUrl.isBlank()) {
+            _statusMessage.value = "请先填写服务器地址"
+            return
+        }
+        if (normalizedToken.isBlank()) {
+            viewModelScope.launch {
+                try {
+                    val readyToken = ensureMobileToken(normalizedUrl)
+                    connectWithToken(normalizedUrl, readyToken)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to prepare mobile device before connect", e)
+                    _statusMessage.value = "准备手机身份失败: ${describeException(e)}"
+                }
+            }
+            return
+        }
+        connectWithToken(normalizedUrl, normalizedToken)
+    }
+
+    private fun connectWithToken(url: String, token: String) {
         manualDisconnect = false
         cancelReconnect()
         _connectionState.value = ConnectionState.Connecting
         _statusMessage.value = "正在连接桌面终端服务…"
-        wssClient.connect(url.trim(), token.trim())
+        saveConnectionSettings(url, token, _deviceName.value)
+        wssClient.connect(url, token)
     }
 
     fun updateServerUrl(value: String) {
@@ -426,7 +477,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun registerMobileDevice() {
         val url = _serverUrl.value.trim()
-        val name = _deviceName.value.trim().ifBlank { "我的手机" }
         if (url.isBlank()) {
             _statusMessage.value = "请先填写服务器地址"
             return
@@ -434,50 +484,72 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             try {
-                val device = withContext(Dispatchers.IO) {
-                    apiClient.registerDevice(url, name, "mobile")
-                }
-                saveConnectionSettings(url, device.token, device.name)
+                ensureMobileToken(url, forceRefresh = true)
                 clearPairingState()
-                _statusMessage.value = "手机设备已注册: ${device.name}"
+                _statusMessage.value = "手机身份已准备好"
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to register mobile device", e)
-                _statusMessage.value = "注册手机设备失败: ${describeException(e)}"
+                _statusMessage.value = "准备手机身份失败: ${describeException(e)}"
             }
         }
     }
 
     fun completePairing(code: String) {
         val url = _serverUrl.value.trim()
-        val token = _deviceToken.value.trim()
+        val normalizedCode = code.filter(Char::isDigit).take(6)
         if (url.isBlank()) {
             _statusMessage.value = "请先填写服务器地址"
             return
         }
-        if (token.isBlank()) {
-            _statusMessage.value = "请先注册手机设备获取 Token"
-            return
-        }
-        if (code.isBlank()) {
-            _statusMessage.value = "请输入桌面配对码"
+        if (normalizedCode.length != 6) {
+            _statusMessage.value = "请输入桌面端生成的 6 位配对码"
             return
         }
 
         viewModelScope.launch {
             try {
+                val token = ensureMobileToken(url)
                 val result = withContext(Dispatchers.IO) {
-                    apiClient.completePairing(url, token, code)
+                    apiClient.completePairing(url, token, normalizedCode)
                 }
                 savePairingState(result.desktopId, result.desktopName)
-                _statusMessage.value = "已绑定桌面: ${result.desktopName}"
                 if (_connectionState.value is ConnectionState.Connected) {
+                    _statusMessage.value = "已绑定桌面: ${result.desktopName}"
                     wssClient.requestSessionList()
+                } else {
+                    _statusMessage.value = "已绑定桌面: ${result.desktopName}，正在连接…"
+                    connectWithToken(url, token)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to complete pairing", e)
                 _statusMessage.value = "配对失败: ${describeException(e)}"
             }
         }
+    }
+
+    private suspend fun ensureMobileToken(url: String, forceRefresh: Boolean = false): String {
+        val normalizedUrl = url.trim()
+        if (normalizedUrl.isBlank()) {
+            throw IllegalArgumentException("服务器地址为空")
+        }
+        val existingToken = _deviceToken.value.trim()
+        if (existingToken.isNotBlank() && !forceRefresh) {
+            saveConnectionSettings(normalizedUrl, existingToken, normalizedDeviceName())
+            return existingToken
+        }
+
+        _statusMessage.value = if (forceRefresh) "正在重新生成手机身份…" else "正在准备手机身份…"
+        val device = withContext(Dispatchers.IO) {
+            apiClient.registerDevice(normalizedUrl, normalizedDeviceName(), "mobile")
+        }
+        saveConnectionSettings(normalizedUrl, device.token, device.name)
+        return device.token
+    }
+
+    private fun normalizedDeviceName(): String {
+        val name = _deviceName.value.trim().ifBlank { defaultDeviceName }
+        _deviceName.value = name
+        return name
     }
 
     fun disconnect() {
