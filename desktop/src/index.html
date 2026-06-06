@@ -5480,22 +5480,6 @@
                 if (controls) controls.hidden = !this.windowControlsEnabled;
                 if (!this.windowControlsEnabled) return;
 
-                const beginWindowDrag = (event) => {
-                    if (event.button !== 0 || event.detail > 1) return;
-                    event.preventDefault();
-                    this.invokeWindowCommand('window_start_dragging');
-                };
-                const isInteractiveChromeTarget = (target) => {
-                    if (!(target instanceof Element)) return false;
-                    return !!target.closest(
-                        'button, input, select, textarea, .tab, .tab-bar-actions, .window-controls, .command-library-popover'
-                    );
-                };
-                dragRegion?.addEventListener('mousedown', beginWindowDrag);
-                tabBar?.addEventListener('mousedown', (event) => {
-                    if (event.target !== tabBar && isInteractiveChromeTarget(event.target)) return;
-                    beginWindowDrag(event);
-                });
                 dragRegion?.addEventListener('dblclick', () => {
                     this.toggleWindowMaximize();
                 });

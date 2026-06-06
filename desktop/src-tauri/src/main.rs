@@ -61,7 +61,6 @@ fn main() {
             commands::read_clipboard_text,
             commands::save_clipboard_image_to_screenshots,
             commands::window_minimize,
-            commands::window_start_dragging,
             commands::window_toggle_maximize,
             commands::window_is_maximized,
             commands::window_close,

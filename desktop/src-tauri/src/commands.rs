@@ -391,22 +391,6 @@ pub fn window_minimize(window: tauri::WebviewWindow) -> Result<String, String> {
 }
 
 #[command]
-pub fn window_start_dragging(window: tauri::WebviewWindow) -> Result<String, String> {
-    if window
-        .is_maximized()
-        .map_err(|error| format!("读取窗口状态失败: {error}"))?
-    {
-        window
-            .unmaximize()
-            .map_err(|error| format!("窗口还原失败: {error}"))?;
-    }
-    window
-        .start_dragging()
-        .map_err(|error| format!("开始拖动窗口失败: {error}"))?;
-    Ok("Window drag started".to_string())
-}
-
-#[command]
 pub fn window_toggle_maximize(window: tauri::WebviewWindow) -> Result<bool, String> {
     let maximized = window
         .is_maximized()
