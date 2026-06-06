@@ -240,6 +240,9 @@ func listDownloads(downloadsDir string) []downloadItem {
 			continue
 		}
 		name := entry.Name()
+		if shouldHideDownload(name) {
+			continue
+		}
 		items = append(items, downloadItem{
 			Name:      name,
 			Path:      "/downloads/" + name,
@@ -250,6 +253,11 @@ func listDownloads(downloadsDir string) []downloadItem {
 		})
 	}
 	return items
+}
+
+func shouldHideDownload(name string) bool {
+	lower := strings.ToLower(name)
+	return strings.Contains(lower, "server")
 }
 
 func platformLabel(name string) string {
