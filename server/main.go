@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -32,6 +33,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("❌ Failed to resolve executable directory: %v", err)
 	}
+	if err := loadEnvFile(filepath.Join(execDir, ".env")); err != nil {
+		log.Printf("⚠️ Failed to load .env: %v", err)
+	}
 
 	// Configuration
 	port := getEnv("TERMSYNC_PORT", "7373")
@@ -39,12 +43,16 @@ func main() {
 	dbPath := resolveRuntimePath(execDir, getEnv("TERMSYNC_DB_PATH", "./data/termsync.db"))
 	downloadsDir := resolveRuntimePath(execDir, getEnv("TERMSYNC_DOWNLOADS_DIR", "./downloads"))
 	jwtSecret := getEnv("TERMSYNC_JWT_SECRET", "termsync-secret-change-in-production")
+	defaultAIAPIKey := getEnv("TERMSYNC_DEFAULT_AI_API_KEY", "")
+	defaultAIBaseURL := getEnv("TERMSYNC_DEFAULT_AI_BASE_URL", "https://ark.cn-beijing.volces.com/api/coding/v3")
+	defaultAIModel := getEnv("TERMSYNC_DEFAULT_AI_MODEL", "DeepSeek-V4-Pro")
 
 	log.Println("🚀 TermSync Server starting...")
 	log.Printf("📡 WSS Port: %s", port)
 	log.Printf("🌐 HTTP Port: %s", httpPort)
 	log.Printf("💾 Database: %s", dbPath)
 	log.Printf("📦 Downloads: %s", downloadsDir)
+	log.Printf("🤖 Default AI: %s", enabledLabel(defaultAIAPIKey != ""))
 
 	// Ensure the runtime data directory exists next to the configured database path.
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
@@ -70,6 +78,7 @@ func main() {
 	authHandler := handler.NewAuthHandler(dbStore, []byte(jwtSecret))
 	wsHandler := handler.NewWSHandler(sessionManager, authHandler)
 	apiHandler := handler.NewAPIHandler(sessionManager, dbStore)
+	aiHandler := handler.NewAIHandler(dbStore, defaultAIAPIKey, defaultAIBaseURL, defaultAIModel)
 
 	// Setup Chi router
 	r := chi.NewRouter()
@@ -82,6 +91,7 @@ func main() {
 	r.Handle("/downloads/*", http.StripPrefix("/downloads/", http.FileServer(http.Dir(downloadsDir))))
 	r.Post("/api/register", authHandler.HandleRegister)
 	r.Post("/api/login", authHandler.HandleLogin)
+	r.Post("/api/ai/chat", aiHandler.HandleDefaultChat)
 	r.Post("/api/pairing/start", apiHandler.HandleStartPairing)
 	r.Post("/api/pairing/complete", apiHandler.HandleCompletePairing)
 	r.Get("/api/sessions", apiHandler.HandleGetSessions)
@@ -129,6 +139,42 @@ func getEnv(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func loadEnvFile(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.Trim(strings.TrimSpace(value), `"'`)
+		if key == "" || os.Getenv(key) != "" {
+			continue
+		}
+		if err := os.Setenv(key, value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func enabledLabel(enabled bool) string {
+	if enabled {
+		return "enabled"
+	}
+	return "disabled"
 }
 
 func executableDir() (string, error) {

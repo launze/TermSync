@@ -254,7 +254,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             sessionList.add(parseSessionSnapshot(obj, previous, sessionId))
                             subscribeForPreview(sessionId)
                         }
-                        _sessions.value = sessionList
+                        _sessions.value = sortSessionsForDisplay(sessionList)
                         if (sessionList.isEmpty()) {
                             _statusMessage.value = "已连接服务器，当前没有可用终端"
                             scheduleSessionListRetry()
@@ -279,7 +279,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val previous = _sessions.value.firstOrNull { it.sessionId == sessionId }
                     val session = parseSessionSnapshot(snapshot, previous, sessionId)
                     val existing = _sessions.value.filterNot { it.sessionId == session.sessionId }
-                    _sessions.value = existing + session
+                    _sessions.value = sortSessionsForDisplay(existing + session)
                     _statusMessage.value = ""
                     subscribeForPreview(session.sessionId)
                     cancelSessionListRetry()
@@ -321,18 +321,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val preview = extractPreview(data)
                     if (msg.sessionId != null) {
                         val now = System.currentTimeMillis()
-                        _sessions.value = _sessions.value.map { session ->
+                        _sessions.value = sortSessionsForDisplay(_sessions.value.map { session ->
                             if (session.sessionId == msg.sessionId) {
                                 session.copy(
                                     activity = session.activity.ifBlank { preview },
-                                    taskState = session.taskState.ifBlank { "running" },
+                                    taskState = "running",
                                     preview = preview.ifBlank { session.preview },
                                     lastActivityAt = now
                                 )
                             } else {
                                 session
                             }
-                        }
+                        })
                     }
                 }
             }
@@ -722,6 +722,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val now = System.currentTimeMillis()
         val preview = snapshot.optString("preview", previous?.preview.orEmpty()).orEmpty()
         val activity = snapshot.optString("activity", previous?.activity.orEmpty()).orEmpty()
+        val taskState = snapshot.optString("task_state", previous?.taskState.orEmpty()).orEmpty()
+        val previousActivityAt = previous?.lastActivityAt ?: 0L
+        val activityChanged = activity != previous?.activity || preview != previous?.preview || taskState != previous?.taskState
         return TerminalSession(
             sessionId = snapshot.optString("session_id", fallbackSessionId),
             title = snapshot.optString("title", previous?.title ?: "Terminal"),
@@ -730,13 +733,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             status = snapshot.optString("status", previous?.status ?: "running"),
             isOwner = snapshot.optString("owner_id") == wssClient.deviceId,
             activity = activity,
-            taskState = snapshot.optString("task_state", previous?.taskState.orEmpty()).orEmpty(),
+            taskState = taskState,
             preview = preview,
-            lastActivityAt = if (activity.isNotBlank() || preview.isNotBlank()) {
-                previous?.lastActivityAt ?: now
+            lastActivityAt = if (activity.isNotBlank() || preview.isNotBlank() || taskState.isNotBlank()) {
+                if (previousActivityAt == 0L || activityChanged || taskState == "running" || taskState == "waiting_input") now else previousActivityAt
             } else {
-                previous?.lastActivityAt ?: 0L
+                previousActivityAt
             }
+        )
+    }
+
+    private fun sortSessionsForDisplay(sessions: List<TerminalSession>): List<TerminalSession> {
+        fun activeRank(session: TerminalSession): Int {
+            return when (session.taskState) {
+                "running", "waiting_input" -> 0
+                else -> 1
+            }
+        }
+
+        return sessions.sortedWith(
+            compareBy<TerminalSession> { activeRank(it) }
+                .thenByDescending { it.lastActivityAt }
+                .thenBy { it.title.lowercase() }
+                .thenBy { it.sessionId }
         )
     }
 

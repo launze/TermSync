@@ -67,6 +67,56 @@
         }
         .tab:hover { background-color: #3c3c3c; }
         .tab.active { background-color: #1e1e1e; color: #ffffff; }
+        .tab-status {
+            width: 14px;
+            height: 14px;
+            margin-left: 6px;
+            flex: 0 0 auto;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .tab-running-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: #4ec9b0;
+            box-shadow: 0 0 0 0 rgba(78, 201, 176, 0.55);
+            animation: tabRunningPulse 1.05s ease-out infinite;
+        }
+        .tab-bell {
+            position: relative;
+            width: 11px;
+            height: 11px;
+            border: 1px solid #ffcb7a;
+            border-top-left-radius: 7px;
+            border-top-right-radius: 7px;
+            border-bottom: none;
+        }
+        .tab-bell::before {
+            content: '';
+            position: absolute;
+            left: -2px;
+            right: -2px;
+            bottom: -2px;
+            height: 1px;
+            background: #ffcb7a;
+        }
+        .tab-bell::after {
+            content: '';
+            position: absolute;
+            left: 4px;
+            bottom: -5px;
+            width: 3px;
+            height: 3px;
+            border-radius: 50%;
+            background: #ffcb7a;
+        }
+        @keyframes tabRunningPulse {
+            0% { box-shadow: 0 0 0 0 rgba(78, 201, 176, 0.55); opacity: 1; }
+            70% { box-shadow: 0 0 0 7px rgba(78, 201, 176, 0); opacity: 0.75; }
+            100% { box-shadow: 0 0 0 0 rgba(78, 201, 176, 0); opacity: 1; }
+        }
         .tab-title {
             flex: 1;
             overflow: hidden;
@@ -1052,6 +1102,7 @@
                 <div class="form-group" style="margin-bottom:0;">
                     <label>厂商</label>
                     <select id="aiPreset" onchange="window.app.applyAiPreset(this.value)">
+                        <option value="termsync">TermSync 默认 AI</option>
                         <option value="litellm">LiteLLM / 统一网关</option>
                         <option value="openai">OpenAI</option>
                         <option value="deepseek">DeepSeek</option>
@@ -1588,6 +1639,18 @@
         });
 
         const AI_PRESETS = {
+            termsync: {
+                label: 'TermSync 默认 AI',
+                baseUrl: '',
+                model: 'DeepSeek-V4-Pro',
+                models: [
+                    { value: 'DeepSeek-V4-Pro', label: 'DeepSeek-V4-Pro' }
+                ],
+                chatPath: '',
+                editableBaseUrl: false,
+                serverManaged: true,
+                hint: '默认 AI 由 TermSync 服务端托管，客户端不会保存或携带供应商 API Key。'
+            },
             litellm: {
                 label: 'LiteLLM / 统一网关',
                 baseUrl: 'http://127.0.0.1:4000',
@@ -1733,6 +1796,8 @@
 
         const DEFAULT_SERVER_URL = 'wss://8.153.163.104:7373/ws';
         const LEGACY_DEFAULT_SERVER_URL = 'wss://nas.smarthome2020.top:7373/ws';
+        const DEFAULT_AI_PRESET = 'termsync';
+        const DEFAULT_AI_MODEL = 'DeepSeek-V4-Pro';
         const TERMINAL_FONT_SIZE_DEFAULT = 14;
         const TERMINAL_FONT_SIZE_MIN = 10;
         const TERMINAL_FONT_SIZE_MAX = 24;
@@ -1809,9 +1874,9 @@
                     deviceName: '我的桌面电脑',
                     autoConnect: true, autoReconnect: true,
                     reconnectInterval: 3000, maxReconnectAttempts: 10,
-                    aiPreset: 'litellm',
-                    aiBaseUrl: AI_PRESETS.litellm.baseUrl,
-                    aiModel: AI_PRESETS.litellm.model,
+                    aiPreset: DEFAULT_AI_PRESET,
+                    aiBaseUrl: AI_PRESETS[DEFAULT_AI_PRESET].baseUrl,
+                    aiModel: DEFAULT_AI_MODEL,
                     aiApiKey: '',
                     aiProviderConfigs: {},
                     aiUseTerminalContext: true,
@@ -1827,6 +1892,15 @@
                     if (saved) this.settings = { ...this.defaults, ...JSON.parse(saved) };
                     if (this.settings.serverUrl === LEGACY_DEFAULT_SERVER_URL) {
                         this.settings.serverUrl = DEFAULT_SERVER_URL;
+                    }
+                    const aiIsOldBlankDefault = this.settings.aiPreset === 'litellm'
+                        && !String(this.settings.aiApiKey || '').trim()
+                        && normalizeApiBaseUrl(this.settings.aiBaseUrl) === normalizeApiBaseUrl(AI_PRESETS.litellm.baseUrl)
+                        && this.settings.aiModel === AI_PRESETS.litellm.model;
+                    if (aiIsOldBlankDefault) {
+                        this.settings.aiPreset = DEFAULT_AI_PRESET;
+                        this.settings.aiBaseUrl = AI_PRESETS[DEFAULT_AI_PRESET].baseUrl;
+                        this.settings.aiModel = DEFAULT_AI_MODEL;
                     }
                     this.settings.fontSize = normalizeTerminalFontSize(this.settings.fontSize);
                 } catch (e) { console.warn('Load settings failed:', e); }
@@ -3077,7 +3151,7 @@
             }
 
             getAiConfigState() {
-                const presetId = document.getElementById('aiPreset')?.value || this.settings.get('aiPreset') || 'litellm';
+                const presetId = document.getElementById('aiPreset')?.value || this.settings.get('aiPreset') || DEFAULT_AI_PRESET;
                 const preset = this.getAiPreset(presetId);
                 const providerConfigs = this.getAiProviderConfigMap();
                 const providerConfig = providerConfigs[presetId] && typeof providerConfigs[presetId] === 'object'
@@ -3123,13 +3197,23 @@
                 const baseUrlInput = document.getElementById('aiBaseUrl');
                 baseUrlInput.readOnly = !preset.editableBaseUrl;
                 baseUrlInput.style.opacity = preset.editableBaseUrl ? '1' : '0.82';
+                const apiKeyInput = document.getElementById('aiApiKey');
+                if (apiKeyInput) {
+                    apiKeyInput.readOnly = !!preset.serverManaged;
+                    apiKeyInput.placeholder = preset.serverManaged ? '由服务端 .env 托管' : 'sk-...';
+                    apiKeyInput.style.opacity = preset.serverManaged ? '0.82' : '1';
+                }
                 document.getElementById('aiPresetHint').textContent = preset.hint;
-                document.getElementById('aiBaseUrlHint').textContent = config.presetId === 'zhipu'
+                document.getElementById('aiBaseUrlHint').textContent = preset.serverManaged
+                    ? '默认 AI 请求会发送到当前 TermSync 服务器，由服务端代理到上游模型。'
+                    : config.presetId === 'zhipu'
                     ? '智谱标准接口是 https://open.bigmodel.cn/api/paas/v4；如果用 Coding Plan，可切到 /api/coding/paas/v4。'
                     : preset.editableBaseUrl
                         ? '这个预设允许直接修改 Base URL，适合私有网关、方舟地区域名或自建代理。'
                         : '官方预设的 Base URL 已内置，通常只需要填 API Key 和模型。';
-                document.getElementById('aiModelHint').textContent = config.presetId === 'volcengine'
+                document.getElementById('aiModelHint').textContent = preset.serverManaged
+                    ? '默认模型由服务端控制，当前使用 DeepSeek-V4-Pro。'
+                    : config.presetId === 'volcengine'
                     ? '默认下拉给常见官方模型；如果你使用 Endpoint ID、Bot ID 或 Coding Plan，选“自定义输入”。'
                     : config.presetId === 'custom'
                         ? '自定义端点通常直接选“自定义输入”，填写真实模型名。'
@@ -3137,7 +3221,7 @@
             }
 
             syncAiConfigInputs() {
-                const presetId = this.settings.get('aiPreset') || 'litellm';
+                const presetId = this.settings.get('aiPreset') || DEFAULT_AI_PRESET;
                 const preset = this.getAiPreset(presetId);
                 const providerConfigs = this.getAiProviderConfigMap();
                 const providerConfig = providerConfigs[presetId] && typeof providerConfigs[presetId] === 'object'
@@ -3277,11 +3361,12 @@
 
             getAiConfigWarnings(config = this.getAiConfigState()) {
                 const requestUrl = this.resolveAiRequestUrl(config.presetId, config.baseUrl, config.model);
+                const preset = this.getAiPreset(config.presetId);
                 const warnings = [];
 
-                if (!requestUrl) warnings.push('请先配置 AI 设置：Base URL 不能为空');
+                if (!preset.serverManaged && !requestUrl) warnings.push('请先配置 AI 设置：Base URL 不能为空');
                 if (!config.model) warnings.push('请先配置 AI 设置：请选择模型');
-                if (!config.apiKey && config.presetId !== 'litellm' && config.presetId !== 'custom') {
+                if (!preset.serverManaged && !config.apiKey && config.presetId !== 'litellm' && config.presetId !== 'custom') {
                     warnings.push('请先配置 AI 设置：该预设需要 API Key');
                 }
 
@@ -3437,6 +3522,7 @@
 
             resolveAiRequestUrl(presetId, baseUrl, model) {
                 const preset = this.getAiPreset(presetId);
+                if (preset.serverManaged) return 'termsync-default-ai';
                 const normalizedBaseUrl = normalizeApiBaseUrl(baseUrl);
                 let path = preset.chatPath || '/chat/completions';
 
@@ -3445,6 +3531,21 @@
                 }
 
                 return joinApiUrl(normalizedBaseUrl, path);
+            }
+
+            async ensureDesktopTokenForServer(serverUrl) {
+                let token = (this.settings.get('serverToken') || '').trim();
+                if (token) return token;
+                if (typeof invoke === 'undefined') {
+                    throw new Error('Tauri API 未注入，无法自动注册本机');
+                }
+                const result = await this.registerDesktopDeviceFor(
+                    serverUrl,
+                    this.settings.get('deviceName') || '我的桌面电脑'
+                );
+                token = result?.device?.token || '';
+                if (!token) throw new Error('自动注册没有返回设备 token');
+                return token;
             }
 
             async requestAiCommand() {
@@ -3502,30 +3603,43 @@
                     '<div class="ai-empty">正在请求 ' + escapeHtml(preset.label) + ' / ' + escapeHtml(model) + ' ...</div>';
 
                 try {
-                    const headers = {
-                        'Content-Type': 'application/json'
-                    };
-                    if (apiKey) headers.Authorization = 'Bearer ' + apiKey;
-
                     if (typeof invoke === 'undefined') {
                         throw new Error('Tauri API 未注入，无法发送 AI 请求');
                     }
 
-                    console.log('AI请求URL(后端代理):', requestUrl);
-                    console.log('AI请求模型:', model);
+                    const requestBody = {
+                        model: model,
+                        stream: false,
+                        messages: [
+                            { role: 'system', content: systemPrompt },
+                            { role: 'user', content: userPrompt }
+                        ]
+                    };
 
-                    const response = await invoke('proxy_ai_request', {
-                        url: requestUrl,
-                        headers: headers,
-                        body: {
-                            model: model,
-                            stream: false,
-                            messages: [
-                                { role: 'system', content: systemPrompt },
-                                { role: 'user', content: userPrompt }
-                            ]
-                        }
-                    });
+                    let response = null;
+                    if (preset.serverManaged) {
+                        const serverUrl = (this.settings.get('serverUrl') || DEFAULT_SERVER_URL).trim();
+                        const serverToken = await this.ensureDesktopTokenForServer(serverUrl);
+                        console.log('AI请求URL(服务端默认代理):', requestUrl);
+                        response = await invoke('proxy_default_ai_request', {
+                            serverUrl: serverUrl,
+                            token: serverToken,
+                            body: requestBody
+                        });
+                    } else {
+                        const headers = {
+                            'Content-Type': 'application/json'
+                        };
+                        if (apiKey) headers.Authorization = 'Bearer ' + apiKey;
+
+                        console.log('AI请求URL(后端代理):', requestUrl);
+                        response = await invoke('proxy_ai_request', {
+                            url: requestUrl,
+                            headers: headers,
+                            body: requestBody
+                        });
+                    }
+                    console.log('AI请求模型:', model);
 
                     console.log('AI响应状态:', response?.status);
                     const payload = response?.body || {};
@@ -3628,6 +3742,7 @@
                             id: tab.id,
                             title: tab.title,
                             titleMode: normalizeTitleMode(tab.titleMode),
+                            attention: !!tab.attention,
                             root: this.splitTree.cloneNode(tab.root),
                             panes: Array.from(tab.panes).map((paneId) => ({
                                 paneId,
@@ -3948,6 +4063,7 @@
                         ),
                         root,
                         panes: new Set(paneIds),
+                        attention: !!tabState.attention,
                         paneTitles: new Map(
                             paneIds.map((paneId) => [
                                 paneId,
@@ -4313,6 +4429,55 @@
                 return state;
             }
 
+            isPaneRunning(paneId) {
+                const state = this.sessionActivity.get(this.sessionIdForPane(paneId));
+                return state?.taskState === 'running';
+            }
+
+            isPaneNeedsAttention(paneId) {
+                const state = this.sessionActivity.get(this.sessionIdForPane(paneId));
+                return state?.taskState === 'waiting_input';
+            }
+
+            getTabRuntimeState(tab) {
+                if (!tab) return { running: false, attention: false };
+                let running = false;
+                let attention = !!tab.attention;
+                for (const paneId of tab.panes || []) {
+                    running = running || this.isPaneRunning(paneId);
+                    attention = attention || this.isPaneNeedsAttention(paneId);
+                }
+                return { running, attention };
+            }
+
+            updateTabAttentionForPane(paneId, wasRunning, nextTaskState) {
+                const tab = this.findTabByPaneId(paneId);
+                if (!tab) return;
+                const isRunning = nextTaskState === 'running';
+                const stopped = wasRunning && nextTaskState !== 'running';
+                const needsInput = nextTaskState === 'waiting_input';
+                let changed = wasRunning !== isRunning;
+                if (isRunning && tab.attention) {
+                    tab.attention = false;
+                    changed = true;
+                }
+                if ((stopped || needsInput) && !tab.attention) {
+                    tab.attention = true;
+                    changed = true;
+                    this.scheduleWorkspaceSave();
+                }
+                if (changed) this.renderTabs();
+            }
+
+            clearTabAttention(tabId) {
+                const tab = this.tabs.get(tabId);
+                if (!tab || !tab.attention) return false;
+                tab.attention = false;
+                this.renderTabs();
+                this.scheduleWorkspaceSave();
+                return true;
+            }
+
             forgetSessionActivity(paneId) {
                 const sessionId = this.sessionIdForPane(paneId);
                 const timer = this.sessionMetaSendTimers.get(sessionId);
@@ -4372,6 +4537,7 @@
                 const meaningfulLine = extractMeaningfulLine(text);
                 const sourceText = collapseWhitespace(stripAnsi(text));
                 const lower = sourceText.toLowerCase();
+                const wasRunning = state.taskState === 'running';
 
                 state.lastUpdatedAt = Date.now();
 
@@ -4387,6 +4553,7 @@
                         activity: state.activity,
                         preview: state.preview
                     });
+                    this.updateTabAttentionForPane(paneId, wasRunning, state.taskState);
                     return;
                 }
 
@@ -4422,6 +4589,7 @@
                     activity: state.activity,
                     preview: state.preview
                 });
+                this.updateTabAttentionForPane(paneId, wasRunning, state.taskState);
             }
 
             scheduleSessionMetaSend(sessionId, immediate) {
@@ -4926,7 +5094,8 @@
                     root: rootNode,
                     panes: new Set([paneId]),
                     paneTitles: new Map([[paneId, normalizeEditableTitle(options.paneTitle, defaultPane)]]),
-                    paneTitleModes: new Map([[paneId, options.paneTitle ? 'manual' : 'auto']])
+                    paneTitleModes: new Map([[paneId, options.paneTitle ? 'manual' : 'auto']]),
+                    attention: false
                 };
                 this.tabs.set(tabId, tab);
                 this.activeTabId = tabId;
@@ -4959,7 +5128,8 @@
 
             switchTab(tabId) {
                 this.activeTabId = tabId;
-                this.renderTabs();
+                const rerendered = this.clearTabAttention(tabId);
+                if (!rerendered) this.renderTabs();
                 const tab = this.tabs.get(tabId);
                 if (tab) {
                     this.renderActiveTab();
@@ -5006,7 +5176,9 @@
                 for (const tab of this.tabs.values()) {
                     const el = document.createElement('button');
                     const titleEl = document.createElement('span');
+                    const statusEl = document.createElement('span');
                     const closeEl = document.createElement('span');
+                    const runtimeState = this.getTabRuntimeState(tab);
                     el.className = 'tab' + (tab.id === this.activeTabId ? ' active' : '');
                     el.type = 'button';
                     el.dataset.tabId = tab.id;
@@ -5017,6 +5189,19 @@
                         event.stopPropagation();
                         this.startTabTitleEdit(tab.id);
                     });
+                    statusEl.className = 'tab-status';
+                    statusEl.setAttribute('aria-hidden', 'true');
+                    if (runtimeState.running) {
+                        const dot = document.createElement('span');
+                        dot.className = 'tab-running-dot';
+                        statusEl.title = '终端正在运行';
+                        statusEl.appendChild(dot);
+                    } else if (runtimeState.attention) {
+                        const bell = document.createElement('span');
+                        bell.className = 'tab-bell';
+                        statusEl.title = '终端已停止或正在等待处理';
+                        statusEl.appendChild(bell);
+                    }
                     closeEl.className = 'tab-close';
                     closeEl.textContent = '×';
                     closeEl.addEventListener('click', (event) => {
@@ -5024,6 +5209,9 @@
                         this.closeTab(tab.id);
                     });
                     el.appendChild(titleEl);
+                    if (runtimeState.running || runtimeState.attention) {
+                        el.appendChild(statusEl);
+                    }
                     el.appendChild(closeEl);
                     el.addEventListener('click', () => this.switchTab(tab.id));
                     el.addEventListener('contextmenu', (event) => {

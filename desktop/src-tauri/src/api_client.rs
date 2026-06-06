@@ -30,7 +30,7 @@ pub struct PairingCodeResponse {
     pub expires_at: i64,
 }
 
-fn http_client() -> Result<reqwest::Client, String> {
+pub fn http_client() -> Result<reqwest::Client, String> {
     let cert = Certificate::from_pem(include_bytes!("../../assets/server.crt"))
         .map_err(|e| format!("Failed to load bundled certificate: {e}"))?;
 

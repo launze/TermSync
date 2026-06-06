@@ -37,7 +37,6 @@
       background: #1e1e1e;
       color: #d4d4d4;
       font: 14px/1.55 'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-      white-space: pre-wrap;
       overflow-wrap: anywhere;
       word-break: break-word;
       display: block;
@@ -45,6 +44,53 @@
       -webkit-user-select: text;
       -webkit-touch-callout: default;
     }
+
+    .reader-block {
+      margin: 0 0 10px;
+      white-space: pre-wrap;
+    }
+
+    .reader-block:last-child {
+      margin-bottom: 0;
+    }
+
+    .reader-command,
+    .reader-code,
+    .reader-diff {
+      border: 1px solid #3c3c3c;
+      border-radius: 8px;
+      background: #151515;
+      padding: 9px 10px;
+      font-family: 'Cascadia Code', 'Consolas', 'Courier New', monospace;
+      font-size: 0.92em;
+      line-height: 1.45;
+      overflow-x: auto;
+      overflow-y: hidden;
+      white-space: pre;
+      word-break: normal;
+      overflow-wrap: normal;
+    }
+
+    .reader-command {
+      border-color: #315f58;
+      background: #12211f;
+      color: #b9efe3;
+    }
+
+    .reader-status {
+      display: inline-block;
+      border: 1px solid #4a4634;
+      border-radius: 999px;
+      background: #232115;
+      color: #ffdc8a;
+      padding: 4px 9px;
+      font-size: 0.9em;
+      white-space: normal;
+    }
+
+    .reader-diff-add { color: #7ee787; }
+    .reader-diff-del { color: #ff7b72; }
+    .reader-diff-meta { color: #79c0ff; }
 
     #reader.reader-selecting {
       background: #202124;
@@ -155,6 +201,8 @@
     var writeGeneration = 0;
     var ensureLayoutTimer = null;
     var ensureLayoutReason = "";
+    var lastReportedAtBottom = null;
+    var tuiDetectedReported = false;
 
     function isReaderMode() {
       return renderMode !== "desktop-mirror";
@@ -164,9 +212,13 @@
       var readerVisible = isReaderMode();
       applyReaderFont();
       if (readerEl) {
+        readerEl.removeEventListener("scroll", handleViewportScroll);
         readerEl.style.display = readerVisible ? "block" : "none";
         readerEl.style.pointerEvents = readerVisible ? "auto" : "none";
         readerEl.classList.toggle("reader-selecting", selectionMode);
+        if (readerVisible) {
+          readerEl.addEventListener("scroll", handleViewportScroll, { passive: true });
+        }
       }
       if (terminalHost) {
         terminalHost.style.visibility = readerVisible ? "hidden" : "visible";
@@ -176,6 +228,7 @@
         fallbackEl.style.display = "none";
         fallbackEl.style.pointerEvents = "none";
       }
+      reportScrollAtBottom(true);
     }
 
     function applyReaderFont() {
@@ -231,66 +284,148 @@
       );
     }
 
-    function stripAnsi(text) {
-      if (!text) return "";
-      return text
-        .replace(/\u001B\][^\u0007]*(\u0007|\u001B\\)/g, "")
-        .replace(/\u001B\[[0-9;?]*[ -/]*[@-~]/g, "")
-        .replace(/\u001B[@-_]/g, "");
-    }
-
-    function overlayLine(base, patch) {
-      if (!base) return patch || "";
-      if (!patch) return base;
-      return patch + base.slice(patch.length);
-    }
-
     function terminalTextToPlain(text, appendTo) {
-      var stripped = stripAnsi(text || "");
       var lines = String(appendTo || "").split("\n");
       if (!lines.length) lines = [""];
-      var line = lines.pop() || "";
-      var overlay = false;
-      var overlayText = "";
-      for (var i = 0; i < stripped.length; i += 1) {
-        var ch = stripped.charAt(i);
-        if (ch === "\r") {
-          if (stripped.charAt(i + 1) === "\n") {
-            if (overlay) {
-              line = overlayLine(line, overlayText);
-              overlay = false;
-              overlayText = "";
+      var row = lines.length - 1;
+      var col = lines[row].length;
+
+      function ensureRow(index) {
+        while (lines.length <= index) lines.push("");
+      }
+
+      function putChar(ch) {
+        ensureRow(row);
+        var line = lines[row] || "";
+        if (col > line.length) line += " ".repeat(col - line.length);
+        lines[row] = line.slice(0, col) + ch + line.slice(col + 1);
+        col += 1;
+      }
+
+      function clearLine(mode) {
+        ensureRow(row);
+        var line = lines[row] || "";
+        if (mode === 1) {
+          lines[row] = line.slice(col);
+          col = 0;
+        } else if (mode === 2) {
+          lines[row] = "";
+          col = 0;
+        } else {
+          lines[row] = line.slice(0, col);
+        }
+      }
+
+      function csiNumber(params, fallback) {
+        var raw = (params || "").replace(/[?>=]/g, "").split(";")[0];
+        var value = parseInt(raw, 10);
+        return isFinite(value) && value > 0 ? value : fallback;
+      }
+
+      var input = String(text || "");
+      for (var i = 0; i < input.length; i += 1) {
+        var ch = input.charAt(i);
+        if (ch === "\u001b") {
+          var next = input.charAt(i + 1);
+          if (next === "]") {
+            var oscEnd = input.indexOf("\u0007", i + 2);
+            var stEnd = input.indexOf("\u001b\\", i + 2);
+            if (oscEnd < 0 || (stEnd >= 0 && stEnd < oscEnd)) oscEnd = stEnd >= 0 ? stEnd + 1 : input.length - 1;
+            i = oscEnd;
+            continue;
+          }
+          if (next === "[") {
+            var j = i + 2;
+            while (j < input.length && !/[A-Za-z~]/.test(input.charAt(j))) j += 1;
+            var finalCh = input.charAt(j);
+            var params = input.slice(i + 2, j);
+            var amount = csiNumber(params, 1);
+            if (finalCh === "A") {
+              row = Math.max(0, row - amount);
+              col = Math.min(col, (lines[row] || "").length);
+            } else if (finalCh === "B") {
+              row += amount;
+              ensureRow(row);
+              col = Math.min(col, (lines[row] || "").length);
+            } else if (finalCh === "C") {
+              col += amount;
+            } else if (finalCh === "D") {
+              col = Math.max(0, col - amount);
+            } else if (finalCh === "G") {
+              col = Math.max(0, amount - 1);
+            } else if (finalCh === "K") {
+              clearLine(csiNumber(params, 0));
+            } else if (finalCh === "J" && csiNumber(params, 0) === 2) {
+              lines = [""];
+              row = 0;
+              col = 0;
+            } else if ((finalCh === "H" || finalCh === "f") && params) {
+              var parts = params.split(";");
+              row = Math.max(0, (parseInt(parts[0] || "1", 10) || 1) - 1);
+              col = Math.max(0, (parseInt(parts[1] || "1", 10) || 1) - 1);
+              ensureRow(row);
             }
-            lines.push(line);
-            line = "";
+            i = j;
+            continue;
+          }
+          i += 1;
+          continue;
+        }
+        if (ch === "\r") {
+          if (input.charAt(i + 1) === "\n") {
+            row += 1;
+            ensureRow(row);
+            col = 0;
             i += 1;
           } else {
-            overlay = true;
-            overlayText = "";
+            col = 0;
           }
           continue;
         }
         if (ch === "\n") {
-          if (overlay) {
-            line = overlayLine(line, overlayText);
-            overlay = false;
-            overlayText = "";
-          }
-          lines.push(line);
-          line = "";
+          row += 1;
+          ensureRow(row);
+          col = 0;
           continue;
         }
-        if (overlay) {
-          overlayText += ch;
-        } else {
-          line += ch;
+        if (ch === "\b") {
+          col = Math.max(0, col - 1);
+          continue;
+        }
+        if (ch === "\t") {
+          var spaces = 4 - (col % 4);
+          for (var tabIndex = 0; tabIndex < spaces; tabIndex += 1) putChar(" ");
+          continue;
+        }
+        if (ch >= " ") {
+          putChar(ch);
         }
       }
-      if (overlay) {
-        line = overlayLine(line, overlayText);
+      return normalizeReaderText(lines.join("\n"));
+    }
+
+    function normalizeReaderText(text) {
+      var source = String(text || "").replace(/[ \t]+\n/g, "\n");
+      var lines = source.split("\n");
+      var out = [];
+      var blankRun = 0;
+      var previous = "";
+      for (var i = 0; i < lines.length; i += 1) {
+        var line = lines[i].replace(/[ \t]+$/g, "");
+        if (!line.trim()) {
+          blankRun += 1;
+          if (blankRun <= 2) out.push("");
+          continue;
+        }
+        blankRun = 0;
+        if (line === previous && /(\d+%|⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏|loading|building|running|installing)/i.test(line)) {
+          out[out.length - 1] = line;
+        } else {
+          out.push(line);
+        }
+        previous = line;
       }
-      lines.push(line);
-      return lines.join("\n");
+      return out.join("\n").replace(/\n{4,}/g, "\n\n\n");
     }
 
     function trimReaderBuffer(text) {
@@ -299,6 +434,117 @@
         next = next.slice(next.length - readerMaxChars);
       }
       return next.replace(/\n{4,}/g, "\n\n\n");
+    }
+
+    function escapeHtml(text) {
+      return String(text || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+    }
+
+    function blockTypeFor(lines) {
+      var sample = lines.join("\n");
+      var first = (lines[0] || "").trim();
+      if (/^(\$|>|#)\s+\S+/.test(first) || /^PS [^>]+>\s+/.test(first) || /^[\w.-]+@[\w.-]+:[^$#>]*[$#]\s+/.test(first)) {
+        return "command";
+      }
+      if (/^(diff --git|--- |\+\+\+ |@@ )/m.test(sample) || lines.some(function(line) { return /^[+-](?![+-])/.test(line); })) {
+        return "diff";
+      }
+      if (/```/.test(sample) || /^(\s{2,}|\t)*(function |class |const |let |var |import |export |def |fun |if \(|for \(|while \(|return |<\/?[a-z][^>]*>)/m.test(sample)) {
+        return "code";
+      }
+      if (/(waiting for input|press enter|enter to continue|select an option|y\/n|password|token|验证码|配对码|继续\?|是否继续|任务已完成|build successful|finished|completed|done|error|failed|permission denied)/i.test(sample)) {
+        return "status";
+      }
+      return "text";
+    }
+
+    function splitReaderBlocks(text) {
+      var lines = String(text || "").split("\n");
+      var blocks = [];
+      var current = [];
+      var currentType = "";
+      var fence = false;
+
+      function pushCurrent() {
+        while (current.length && !current[0].trim()) current.shift();
+        while (current.length && !current[current.length - 1].trim()) current.pop();
+        if (!current.length) return;
+        blocks.push({ type: currentType || blockTypeFor(current), lines: current.slice() });
+        current = [];
+        currentType = "";
+      }
+
+      for (var i = 0; i < lines.length; i += 1) {
+        var line = lines[i];
+        var startsFence = /^\s*```/.test(line);
+        if (startsFence) {
+          if (!fence) {
+            pushCurrent();
+            fence = true;
+            currentType = "code";
+            current.push(line);
+          } else {
+            current.push(line);
+            pushCurrent();
+            fence = false;
+          }
+          continue;
+        }
+        if (fence) {
+          current.push(line);
+          continue;
+        }
+        if (!line.trim()) {
+          if (current.length) pushCurrent();
+          continue;
+        }
+        var nextType = blockTypeFor([line]);
+        if (current.length && currentType && nextType !== currentType && (currentType !== "text" || nextType !== "status")) {
+          pushCurrent();
+        }
+        if (!currentType) currentType = nextType;
+        current.push(line);
+      }
+      pushCurrent();
+      return blocks.slice(-180);
+    }
+
+    function renderDiffHtml(lines) {
+      return lines.map(function(line) {
+        var cls = "";
+        if (/^\+/.test(line)) cls = " reader-diff-add";
+        else if (/^-/.test(line)) cls = " reader-diff-del";
+        else if (/^(diff --git|@@|--- |\+\+\+ )/.test(line)) cls = " reader-diff-meta";
+        return "<span class=\"" + cls.trim() + "\">" + escapeHtml(line) + "</span>";
+      }).join("\n");
+    }
+
+    function renderReaderDom(autoScroll) {
+      if (!readerEl) return;
+      var shouldFollow = typeof autoScroll === "boolean" ? autoScroll : isNearBottomEl(readerEl);
+      var blocks = splitReaderBlocks(readerBuffer);
+      var html = blocks.map(function(block) {
+        var body = block.lines.join("\n");
+        if (block.type === "diff") {
+          return "<pre class=\"reader-block reader-diff\">" + renderDiffHtml(block.lines) + "</pre>";
+        }
+        if (block.type === "command") {
+          return "<pre class=\"reader-block reader-command\">" + escapeHtml(body) + "</pre>";
+        }
+        if (block.type === "code") {
+          return "<pre class=\"reader-block reader-code\">" + escapeHtml(body.replace(/^\s*```\w*\n?|\n?\s*```\s*$/g, "")) + "</pre>";
+        }
+        if (block.type === "status") {
+          return "<div class=\"reader-block\"><span class=\"reader-status\">" + escapeHtml(body) + "</span></div>";
+        }
+        return "<div class=\"reader-block\">" + escapeHtml(body) + "</div>";
+      }).join("");
+      readerEl.innerHTML = html || "";
+      if (shouldFollow) readerEl.scrollTop = readerEl.scrollHeight;
+      reportScrollAtBottom(true);
     }
 
     function trimTerminalMirrorBuffer(text) {
@@ -338,19 +584,15 @@
 
     function flushReader(autoScroll) {
       if (!readerEl) return;
-      var shouldFollow = typeof autoScroll === "boolean" ? autoScroll : isNearBottomEl(readerEl);
-      readerEl.textContent = readerBuffer;
-      if (shouldFollow) {
-        readerEl.scrollTop = readerEl.scrollHeight;
-      }
+      renderReaderDom(autoScroll);
     }
 
     function scheduleReaderFlush(autoScroll) {
       if (readerFlushTimer) return;
-      readerFlushTimer = requestAnimationFrame(function() {
+      readerFlushTimer = setTimeout(function() {
         readerFlushTimer = null;
         flushReader(autoScroll);
-      });
+      }, 90);
     }
 
     function writeReader(data, mode, shouldFollowOutput) {
@@ -521,6 +763,16 @@
       }
     }
 
+    function maybeReportTuiDetected(data) {
+      if (tuiDetectedReported || !data) return;
+      if (/\u001b\[\?(47|1047|1048|1049)h|\u001b\[[0-9;?]*[ABCDHf]|\u001b\[\?25[lh]/.test(data)) {
+        tuiDetectedReported = true;
+        if (window.TermsyncAndroid && typeof window.TermsyncAndroid.reportTuiDetected === "function") {
+          window.TermsyncAndroid.reportTuiDetected();
+        }
+      }
+    }
+
     function ensureLayout(reason) {
       if (ensureLayoutTimer) {
         ensureLayoutReason = ensureLayoutReason || reason || "layout";
@@ -571,6 +823,16 @@
 
     function handleViewportScroll() {
       followOutput = isNearBottomEl(viewport());
+      reportScrollAtBottom(false);
+    }
+
+    function reportScrollAtBottom(force) {
+      var atBottom = isNearBottomEl(viewport());
+      if (!force && lastReportedAtBottom === atBottom) return;
+      lastReportedAtBottom = atBottom;
+      if (window.TermsyncAndroid && typeof window.TermsyncAndroid.reportScrollAtBottom === "function") {
+        window.TermsyncAndroid.reportScrollAtBottom(atBottom);
+      }
     }
 
     function bindViewportTracking() {
@@ -582,6 +844,7 @@
       boundViewport = el;
       boundViewport.addEventListener("scroll", handleViewportScroll, { passive: true });
       followOutput = isNearBottomEl(boundViewport);
+      reportScrollAtBottom(true);
     }
 
     function isNearBottom() {
@@ -714,6 +977,7 @@
     }
 
     function writeTerminal(data, mode, shouldFollowOutput) {
+      maybeReportTuiDetected(data);
       rememberTerminalMirror(data, mode);
       if (isReaderMode()) {
         return writeReader(data, mode, shouldFollowOutput);
@@ -884,6 +1148,7 @@
       if (fallbackEl) {
         fallbackEl.scrollTop = fallbackEl.scrollHeight;
       }
+      reportScrollAtBottom(true);
     };
 
     window.termsyncEnsureLayout = function(reason) {

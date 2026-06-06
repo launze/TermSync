@@ -2,6 +2,8 @@ package com.termsync.mobile.ui
 
 import android.annotation.SuppressLint
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Base64
 import android.webkit.ConsoleMessage
 import android.webkit.WebChromeClient
@@ -41,7 +43,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -51,7 +52,6 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
@@ -59,7 +59,6 @@ import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Send
-import androidx.compose.material.icons.filled.South
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.Settings
@@ -233,6 +232,7 @@ fun TTY1App(viewModel: MainViewModel) {
                         terminalStreamStatus = terminalStreamStatus,
                         commandLibrary = commandLibrary,
                         onSubmitCommand = { viewModel.submitCommand(it) },
+                        onSendRawInput = { viewModel.sendInput(it) },
                         onToggleFavoriteCommand = { viewModel.toggleFavoriteCommand(it) },
                         onSendSpecialKey = { viewModel.sendSpecialKey(it) },
                         onRefreshTerminal = { viewModel.refreshSelectedSessionReplay() },
@@ -799,6 +799,7 @@ fun TerminalViewScreen(
     terminalStreamStatus: String,
     commandLibrary: CommandLibraryUiState,
     onSubmitCommand: (String) -> Unit,
+    onSendRawInput: (String) -> Unit,
     onToggleFavoriteCommand: (String) -> Unit,
     onSendSpecialKey: (SpecialKey) -> Unit,
     onRefreshTerminal: () -> Unit,
@@ -807,7 +808,7 @@ fun TerminalViewScreen(
     onDebug: (String) -> Unit,
     onClose: () -> Unit
 ) {
-    var input by remember { mutableStateOf("") }
+    var input by rememberSaveable(session?.sessionId) { mutableStateOf("") }
     var showSpecialKeysDialog by rememberSaveable(session?.sessionId) { mutableStateOf(false) }
     var showCloseSessionDialog by rememberSaveable(session?.sessionId) { mutableStateOf(false) }
     var copyMode by rememberSaveable(session?.sessionId) { mutableStateOf(false) }
@@ -816,22 +817,25 @@ fun TerminalViewScreen(
     var showLayoutControls by rememberSaveable(session?.sessionId) { mutableStateOf(false) }
     var showCommandLibraryDialog by rememberSaveable(session?.sessionId) { mutableStateOf(false) }
     var showMoreMenu by remember { mutableStateOf(false) }
+    var terminalAtBottom by rememberSaveable(session?.sessionId) { mutableStateOf(true) }
+    var tuiHintVisible by rememberSaveable(session?.sessionId) { mutableStateOf(false) }
+    var scrollToBottomRequest by rememberSaveable(session?.sessionId) { mutableStateOf(0L) }
+    var sendRawMode by rememberSaveable(session?.sessionId) { mutableStateOf(false) }
+    var inputHistory by rememberSaveable(session?.sessionId) { mutableStateOf(emptyList<String>()) }
     var selectedCommandSectionKey by rememberSaveable(session?.sessionId) {
         mutableStateOf(CommandPanelSection.Favorites.key)
     }
     val focusManager = LocalFocusManager.current
     val renderMode = remember(renderModeName) { TerminalRenderMode.valueOf(renderModeName) }
-    val normalizedInput = remember(input) {
-        input
-            .replace("\r", "\n")
-            .lines()
-            .map { it.trim() }
-            .filter { it.isNotBlank() }
-            .joinToString(" && ")
-    }
     fun submitCurrentInput() {
         if (input.isNotBlank()) {
-            onSubmitCommand(input)
+            val submitted = input
+            inputHistory = (listOf(submitted) + inputHistory.filterNot { it == submitted }).take(12)
+            if (sendRawMode) {
+                onSendRawInput(submitted)
+            } else {
+                onSubmitCommand(submitted)
+            }
             input = ""
             focusManager.clearFocus()
         }
@@ -1010,12 +1014,12 @@ fun TerminalViewScreen(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .padding(horizontal = 6.dp, vertical = 4.dp)
+                    .padding(horizontal = 0.dp, vertical = 0.dp)
             ) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = Color(0xFF1E1E1E),
-                    shape = RoundedCornerShape(8.dp)
+                    shape = RoundedCornerShape(0.dp)
                 ) {
                     TerminalWebView(
                         sessionId = session?.sessionId,
@@ -1027,7 +1031,10 @@ fun TerminalViewScreen(
                         renderMode = renderMode,
                         fontScale = fontScale,
                         copyMode = copyMode,
+                        scrollToBottomRequest = scrollToBottomRequest,
                         onTerminalResize = onTerminalResize,
+                        onScrollAtBottom = { terminalAtBottom = it },
+                        onTuiDetected = { tuiHintVisible = true },
                         onDebug = onDebug,
                         modifier = Modifier.fillMaxSize()
                     )
@@ -1058,37 +1065,89 @@ fun TerminalViewScreen(
                         )
                     }
                 }
+                if (tuiHintVisible && renderMode == TerminalRenderMode.MobileFit) {
+                    Surface(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(8.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.96f),
+                        tonalElevation = 4.dp
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(start = 10.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "检测到 TUI",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer
+                            )
+                            TextButton(
+                                onClick = {
+                                    renderModeName = TerminalRenderMode.DesktopMirror.name
+                                    tuiHintVisible = false
+                                },
+                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                                modifier = Modifier.height(28.dp)
+                            ) {
+                                Text("镜像")
+                            }
+                            TextButton(
+                                onClick = { tuiHintVisible = false },
+                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                                modifier = Modifier.height(28.dp)
+                            ) {
+                                Text("忽略")
+                            }
+                        }
+                    }
+                }
+                if (!terminalAtBottom) {
+                    Surface(
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(12.dp),
+                        shape = RoundedCornerShape(999.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.96f),
+                        tonalElevation = 5.dp
+                    ) {
+                        IconButton(
+                            onClick = { scrollToBottomRequest += 1 },
+                            modifier = Modifier.size(42.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.KeyboardArrowDown,
+                                contentDescription = "回到底部",
+                                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+                    }
+                }
             }
-            
-            Row(
+
+            MobileTerminalComposer(
+                input = input,
+                onInputChange = { input = it },
+                onSubmit = { submitCurrentInput() },
+                sendRawMode = sendRawMode,
+                inputHistory = inputHistory,
+                onToggleSendRawMode = { sendRawMode = !sendRawMode },
+                onInsertNewline = { input += "\n" },
+                onHistorySelected = { input = it },
+                onOpenCommandLibrary = { showCommandLibraryDialog = true },
+                onToggleFavorite = {
+                    if (input.isNotBlank()) {
+                        onToggleFavoriteCommand(input)
+                    }
+                },
+                onSendSpecialKey = onSendSpecialKey,
                 modifier = Modifier
                     .fillMaxWidth()
                     .imePadding()
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                OutlinedTextField(
-                    value = input,
-                    onValueChange = { input = it },
-                    modifier = Modifier.weight(1f),
-                    placeholder = { Text("命令") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(
-                        keyboardType = KeyboardType.Text,
-                        imeAction = ImeAction.Send
-                    ),
-                    keyboardActions = KeyboardActions(onSend = { submitCurrentInput() })
-                )
-                Button(
-                    onClick = { submitCurrentInput() },
-                    enabled = input.isNotBlank(),
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 0.dp),
-                    modifier = Modifier.height(42.dp)
-                ) {
-                    Icon(Icons.Default.Send, contentDescription = "发送", modifier = Modifier.size(18.dp))
-                }
-            }
+            )
         }
     }
 
@@ -1162,8 +1221,13 @@ fun TerminalViewScreen(
                             selectedSectionKey = selectedCommandSectionKey,
                             expanded = true,
                             showToggle = false,
+                            inputHistory = inputHistory,
                             onToggleExpanded = {},
                             onSectionSelected = { selectedCommandSectionKey = it },
+                            onHistorySelected = { history ->
+                                input = history
+                                showCommandLibraryDialog = false
+                            },
                             onCommandSelected = { shortcut ->
                                 onSubmitCommand(shortcut.command)
                                 input = ""
@@ -1280,6 +1344,156 @@ fun SpecialKeyButton(label: String, onClick: () -> Unit) {
     }
 }
 
+@Composable
+private fun MobileTerminalComposer(
+    input: String,
+    onInputChange: (String) -> Unit,
+    onSubmit: () -> Unit,
+    sendRawMode: Boolean,
+    inputHistory: List<String>,
+    onToggleSendRawMode: () -> Unit,
+    onInsertNewline: () -> Unit,
+    onHistorySelected: (String) -> Unit,
+    onOpenCommandLibrary: () -> Unit,
+    onToggleFavorite: () -> Unit,
+    onSendSpecialKey: (SpecialKey) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val canSubmit = input.isNotBlank()
+
+    Surface(
+        modifier = modifier,
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.98f),
+        tonalElevation = 3.dp
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            LazyRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                contentPadding = PaddingValues(horizontal = 0.dp)
+            ) {
+                item("commands") {
+                    ComposerToolChip(
+                        label = "命令库",
+                        selected = false,
+                        onClick = onOpenCommandLibrary
+                    )
+                }
+                item("favorite") {
+                    ComposerToolChip(
+                        label = "收藏",
+                        selected = canSubmit,
+                        enabled = canSubmit,
+                        onClick = onToggleFavorite
+                    )
+                }
+                item("mode") {
+                    ComposerToolChip(
+                        label = if (sendRawMode) "原始输入" else "回车执行",
+                        selected = sendRawMode,
+                        onClick = onToggleSendRawMode
+                    )
+                }
+                item("newline") {
+                    ComposerToolChip(
+                        label = "换行",
+                        selected = false,
+                        onClick = onInsertNewline
+                    )
+                }
+                items(PRIMARY_SPECIAL_KEYS, key = { it.first }) { (label, key) ->
+                    ComposerToolChip(
+                        label = label,
+                        selected = false,
+                        onClick = { onSendSpecialKey(key) }
+                    )
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.Bottom
+            ) {
+                OutlinedTextField(
+                    value = input,
+                    onValueChange = onInputChange,
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 48.dp, max = 136.dp),
+                    placeholder = { Text("输入命令或 Codex 提示") },
+                    minLines = 1,
+                    maxLines = 5,
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Text,
+                        imeAction = ImeAction.Default
+                    )
+                )
+                Button(
+                    onClick = onSubmit,
+                    enabled = canSubmit,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                    modifier = Modifier.height(48.dp)
+                ) {
+                    Icon(Icons.Default.Send, contentDescription = "发送", modifier = Modifier.size(18.dp))
+                }
+            }
+
+            if (inputHistory.isNotEmpty()) {
+                LazyRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    contentPadding = PaddingValues(horizontal = 0.dp)
+                ) {
+                    items(inputHistory.take(6), key = { it }) { historyItem ->
+                        ComposerToolChip(
+                            label = historyItem.replace("\n", " ").let { if (it.length > 28) it.take(27) + "…" else it },
+                            selected = false,
+                            onClick = { onHistorySelected(historyItem) }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ComposerToolChip(
+    label: String,
+    selected: Boolean,
+    enabled: Boolean = true,
+    onClick: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(999.dp),
+        color = if (selected) {
+            MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+        } else {
+            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f)
+        }
+    ) {
+        TextButton(
+            onClick = onClick,
+            enabled = enabled,
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+            modifier = Modifier.height(32.dp)
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelSmall,
+                color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1
+            )
+        }
+    }
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun CommandLibraryPanel(
@@ -1287,8 +1501,10 @@ private fun CommandLibraryPanel(
     selectedSectionKey: String,
     expanded: Boolean,
     showToggle: Boolean = true,
+    inputHistory: List<String> = emptyList(),
     onToggleExpanded: () -> Unit,
     onSectionSelected: (String) -> Unit,
+    onHistorySelected: (String) -> Unit = {},
     onCommandSelected: (CommandShortcut) -> Unit
 ) {
     val sectionTabs = remember(library.sections) {
@@ -1423,6 +1639,7 @@ private fun CommandLibraryPanel(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+
         }
     }
 }
@@ -1659,8 +1876,11 @@ fun ConnectionDialog(
 
 private class TerminalAndroidBridge(
     private val onResize: (Int, Int, Boolean) -> Unit,
+    private val onScrollAtBottom: (Boolean) -> Unit,
+    private val onTuiDetected: () -> Unit,
     private val onDebug: (String) -> Unit
 ) {
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var lastCols = 0
     private var lastRows = 0
     private var lastResizeAt = 0L
@@ -1680,6 +1900,20 @@ private class TerminalAndroidBridge(
         onDebug("WV_REPORT_SIZE cols=$cols rows=$rows reason=${reason.orEmpty()} force=$force")
         onResize(cols, rows, force)
     }
+
+    @JavascriptInterface
+    fun reportScrollAtBottom(atBottom: Boolean) {
+        mainHandler.post {
+            onScrollAtBottom(atBottom)
+        }
+    }
+
+    @JavascriptInterface
+    fun reportTuiDetected() {
+        mainHandler.post {
+            onTuiDetected()
+        }
+    }
 }
 
 @SuppressLint("SetJavaScriptEnabled")
@@ -1694,7 +1928,10 @@ fun TerminalWebView(
     renderMode: TerminalRenderMode,
     fontScale: Float,
     copyMode: Boolean,
+    scrollToBottomRequest: Long,
     onTerminalResize: (Int, Int, Boolean) -> Unit,
+    onScrollAtBottom: (Boolean) -> Unit,
+    onTuiDetected: () -> Unit,
     onDebug: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -1708,6 +1945,8 @@ fun TerminalWebView(
     val bridge = remember(sessionId) {
         TerminalAndroidBridge(
             onResize = onTerminalResize,
+            onScrollAtBottom = onScrollAtBottom,
+            onTuiDetected = onTuiDetected,
             onDebug = onDebug
         )
     }
@@ -1721,6 +1960,13 @@ fun TerminalWebView(
             webView?.evaluateJavascript("window.termsyncSetSelectionMode(${if (copyMode) "true" else "false"});") { result ->
                 onDebug("WV_COPY_MODE mode=$copyMode result=$result")
             }
+        }
+    }
+
+    LaunchedEffect(scrollToBottomRequest, pageReady, webView) {
+        if (!pageReady || webView == null || scrollToBottomRequest == 0L) return@LaunchedEffect
+        webView?.evaluateJavascript("window.termsyncScrollToBottom && window.termsyncScrollToBottom();") {
+            onDebug("WV_SCROLL_BOTTOM request=$scrollToBottomRequest result=$it")
         }
     }
 

@@ -493,3 +493,47 @@ pub async fn proxy_ai_request(
         body: parsed,
     })
 }
+
+#[command]
+pub async fn proxy_default_ai_request(
+    server_url: String,
+    token: String,
+    body: Value,
+) -> Result<AiProxyResponse, String> {
+    let token = token.trim();
+    if token.is_empty() {
+        return Err("Server device token is required".to_string());
+    }
+
+    let client = api_client::http_client()?;
+    let url = format!("{}/api/ai/chat", api_client::server_base_url(&server_url)?);
+
+    crate::log_debug(&format!("command:proxy_default_ai_request url={url}"));
+
+    let response = client
+        .post(url)
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|err| format!("Default AI request failed: {err}"))?;
+
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .map_err(|err| format!("Failed to read default AI response: {err}"))?;
+    let parsed =
+        serde_json::from_str::<Value>(&text).unwrap_or_else(|_| json!({ "message": text }));
+
+    crate::log_debug(&format!(
+        "command:proxy_default_ai_request:done status={}",
+        status.as_u16()
+    ));
+
+    Ok(AiProxyResponse {
+        ok: status.is_success(),
+        status: status.as_u16(),
+        body: parsed,
+    })
+}

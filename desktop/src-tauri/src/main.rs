@@ -66,6 +66,7 @@ fn main() {
             commands::window_close,
             commands::window_destroy,
             commands::proxy_ai_request,
+            commands::proxy_default_ai_request,
         ])
         .setup(|app| {
             // Initialize app state
