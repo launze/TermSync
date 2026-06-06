@@ -27,6 +27,29 @@
       box-sizing: border-box;
     }
 
+    #reader {
+      position: absolute;
+      inset: 0;
+      margin: 0;
+      padding: 12px 14px 18px;
+      box-sizing: border-box;
+      overflow: auto;
+      background: #1e1e1e;
+      color: #d4d4d4;
+      font: 14px/1.55 'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      display: block;
+      user-select: text;
+      -webkit-user-select: text;
+      -webkit-touch-callout: default;
+    }
+
+    #reader.reader-selecting {
+      background: #202124;
+    }
+
     #fallback {
       position: absolute;
       inset: 0;
@@ -53,6 +76,7 @@
     }
 
     .xterm-viewport,
+    #reader,
     #fallback {
       -webkit-overflow-scrolling: touch;
       overscroll-behavior: contain;
@@ -60,17 +84,20 @@
     }
 
     .xterm-viewport::-webkit-scrollbar,
+    #reader::-webkit-scrollbar,
     #fallback::-webkit-scrollbar {
       width: 10px;
     }
 
     .xterm-viewport::-webkit-scrollbar-thumb,
+    #reader::-webkit-scrollbar-thumb,
     #fallback::-webkit-scrollbar-thumb {
       background: #3c3c3c;
       border-radius: 8px;
     }
 
     .xterm-viewport::-webkit-scrollbar-thumb:hover,
+    #reader::-webkit-scrollbar-thumb:hover,
     #fallback::-webkit-scrollbar-thumb:hover {
       background: #505050;
     }
@@ -78,6 +105,7 @@
 </head>
 <body>
   <div id="terminal"></div>
+  <pre id="reader"></pre>
   <pre id="fallback"></pre>
   <script src="./xterm.js"></script>
   <script src="./addon-fit.js"></script>
@@ -88,11 +116,18 @@
     };
 
     var terminalHost = document.getElementById("terminal");
+    var readerEl = document.getElementById("reader");
     var fallbackEl = document.getElementById("fallback");
     var term = null;
     var fitAddon = null;
     var xtermReady = false;
     var writeCount = 0;
+    var readerBuffer = "";
+    var readerFlushTimer = null;
+    var readerMaxLines = 1200;
+    var readerMaxChars = 500000;
+    var terminalMirrorBuffer = "";
+    var terminalMirrorMaxChars = 500000;
     var fallbackBuffer = "";
     var resizeObserver = null;
     var selectionMode = false;
@@ -107,10 +142,48 @@
     var INITIAL_RENDER_MAX_CHARS = 200000;
     var INITIAL_RENDER_MAX_LINES = 1000;
     var DEFAULT_FONT_SIZE = 13;
+    var LAYOUT_REFIT_DELAYS_MS = [0, 80, 240, 600];
     var renderMode = "mobile-fit";
     var fontScale = 1;
     var targetDesktopCols = 80;
     var targetDesktopRows = 24;
+    var layoutPulseToken = 0;
+    var writeQueue = [];
+    var writeInProgress = false;
+    var writeQueuedBytes = 0;
+    var writeQueueMaxBytes = 1000000;
+    var writeGeneration = 0;
+    var ensureLayoutTimer = null;
+    var ensureLayoutReason = "";
+
+    function isReaderMode() {
+      return renderMode !== "desktop-mirror";
+    }
+
+    function updateRenderSurface() {
+      var readerVisible = isReaderMode();
+      applyReaderFont();
+      if (readerEl) {
+        readerEl.style.display = readerVisible ? "block" : "none";
+        readerEl.style.pointerEvents = readerVisible ? "auto" : "none";
+        readerEl.classList.toggle("reader-selecting", selectionMode);
+      }
+      if (terminalHost) {
+        terminalHost.style.visibility = readerVisible ? "hidden" : "visible";
+        terminalHost.style.pointerEvents = readerVisible ? "none" : "auto";
+      }
+      if (fallbackEl && readerVisible) {
+        fallbackEl.style.display = "none";
+        fallbackEl.style.pointerEvents = "none";
+      }
+    }
+
+    function applyReaderFont() {
+      if (!readerEl) return;
+      var size = Math.max(12, Math.min(22, 14 * fontScale));
+      readerEl.style.fontSize = size + "px";
+      readerEl.style.lineHeight = "1.55";
+    }
 
     function healthSnapshot() {
       var screen = document.querySelector(".xterm-screen");
@@ -161,9 +234,141 @@
     function stripAnsi(text) {
       if (!text) return "";
       return text
+        .replace(/\u001B\][^\u0007]*(\u0007|\u001B\\)/g, "")
         .replace(/\u001B\[[0-9;?]*[ -/]*[@-~]/g, "")
-        .replace(/\u001B[@-_]/g, "")
-        .replace(/\r(?!\n)/g, "\n");
+        .replace(/\u001B[@-_]/g, "");
+    }
+
+    function overlayLine(base, patch) {
+      if (!base) return patch || "";
+      if (!patch) return base;
+      return patch + base.slice(patch.length);
+    }
+
+    function terminalTextToPlain(text, appendTo) {
+      var stripped = stripAnsi(text || "");
+      var lines = String(appendTo || "").split("\n");
+      if (!lines.length) lines = [""];
+      var line = lines.pop() || "";
+      var overlay = false;
+      var overlayText = "";
+      for (var i = 0; i < stripped.length; i += 1) {
+        var ch = stripped.charAt(i);
+        if (ch === "\r") {
+          if (stripped.charAt(i + 1) === "\n") {
+            if (overlay) {
+              line = overlayLine(line, overlayText);
+              overlay = false;
+              overlayText = "";
+            }
+            lines.push(line);
+            line = "";
+            i += 1;
+          } else {
+            overlay = true;
+            overlayText = "";
+          }
+          continue;
+        }
+        if (ch === "\n") {
+          if (overlay) {
+            line = overlayLine(line, overlayText);
+            overlay = false;
+            overlayText = "";
+          }
+          lines.push(line);
+          line = "";
+          continue;
+        }
+        if (overlay) {
+          overlayText += ch;
+        } else {
+          line += ch;
+        }
+      }
+      if (overlay) {
+        line = overlayLine(line, overlayText);
+      }
+      lines.push(line);
+      return lines.join("\n");
+    }
+
+    function trimReaderBuffer(text) {
+      var next = trimToLastLines(text || "", readerMaxLines);
+      if (next.length > readerMaxChars) {
+        next = next.slice(next.length - readerMaxChars);
+      }
+      return next.replace(/\n{4,}/g, "\n\n\n");
+    }
+
+    function trimTerminalMirrorBuffer(text) {
+      var next = trimToLastLines(text || "", INITIAL_RENDER_MAX_LINES);
+      if (next.length > terminalMirrorMaxChars) {
+        next = next.slice(next.length - terminalMirrorMaxChars);
+      }
+      return next;
+    }
+
+    function rememberTerminalMirror(data, mode) {
+      if (mode === "render") {
+        terminalMirrorBuffer = trimTerminalMirrorBuffer(data || "");
+      } else if (data) {
+        terminalMirrorBuffer = trimTerminalMirrorBuffer(terminalMirrorBuffer + data);
+      }
+    }
+
+    function rebuildTerminalMirror() {
+      if (!term || !xtermReady) return;
+      writeGeneration += 1;
+      writeQueue = [];
+      writeQueuedBytes = 0;
+      writeInProgress = false;
+      try {
+        term.reset();
+        if (terminalMirrorBuffer) {
+          term.write(terminalMirrorBuffer, function() {
+            refreshTerminal();
+            term.scrollToBottom();
+          });
+        }
+      } catch (e) {
+        console.error("REBUILD_TERMINAL_ERR: " + e.message);
+      }
+    }
+
+    function flushReader(autoScroll) {
+      if (!readerEl) return;
+      var shouldFollow = typeof autoScroll === "boolean" ? autoScroll : isNearBottomEl(readerEl);
+      readerEl.textContent = readerBuffer;
+      if (shouldFollow) {
+        readerEl.scrollTop = readerEl.scrollHeight;
+      }
+    }
+
+    function scheduleReaderFlush(autoScroll) {
+      if (readerFlushTimer) return;
+      readerFlushTimer = requestAnimationFrame(function() {
+        readerFlushTimer = null;
+        flushReader(autoScroll);
+      });
+    }
+
+    function writeReader(data, mode, shouldFollowOutput) {
+      if (!readerEl) return "ERR:no_reader";
+      var shouldFollow = mode === "render" || !!shouldFollowOutput || isNearBottomEl(readerEl);
+      if (mode === "render") {
+        readerBuffer = terminalTextToPlain(trimInitialRenderText(data || ""), "");
+      } else if (data) {
+        readerBuffer = terminalTextToPlain(data, readerBuffer);
+      }
+      readerBuffer = trimReaderBuffer(readerBuffer);
+      writeCount += 1;
+      scheduleReaderFlush(shouldFollow);
+      updateRenderSurface();
+      if (writeCount <= 5 || writeCount % 20 === 0) {
+        console.log(mode.toUpperCase() + "_READER_OK: data.len=" + (data ? data.length : 0) + " writeCount=" + writeCount + " follow=" + shouldFollow);
+      }
+      return "OK";
     }
 
     function isNearBottomEl(el) {
@@ -241,9 +446,9 @@
       if (!fallbackEl) return;
       var shouldFollow = mode === "render" || isNearBottomEl(fallbackEl);
       if (mode === "render") {
-        fallbackBuffer = stripAnsi(data);
+        fallbackBuffer = terminalTextToPlain(data, "");
       } else if (mode === "append" && data) {
-        fallbackBuffer += stripAnsi(data);
+        fallbackBuffer = terminalTextToPlain(data, fallbackBuffer);
       }
       flushFallback(shouldFollow);
     }
@@ -274,6 +479,12 @@
 
     function updateFallbackVisibility(forceVisible) {
       if (!fallbackEl) return;
+      if (isReaderMode()) {
+        fallbackEl.style.display = "none";
+        fallbackEl.style.pointerEvents = "none";
+        updateRenderSurface();
+        return;
+      }
       var showFallback = selectionMode || (typeof forceVisible === "boolean" ? forceVisible : !isHealthy());
       fallbackEl.style.display = showFallback ? "block" : "none";
       fallbackEl.style.pointerEvents = showFallback ? "auto" : "none";
@@ -286,6 +497,7 @@
     }
 
     function fit() {
+      if (isReaderMode()) return;
       try {
         if (fitAddon) fitAddon.fit();
       } catch (e) {
@@ -300,32 +512,60 @@
       } catch (_) {}
     }
 
+    function reportTerminalSize(reason) {
+      if (!term || !window.TermsyncAndroid || typeof window.TermsyncAndroid.reportSize !== "function") return;
+      try {
+        window.TermsyncAndroid.reportSize(term.cols || 0, term.rows || 0, reason || "");
+      } catch (e) {
+        console.warn("REPORT_SIZE_ERR: " + e.message);
+      }
+    }
+
     function ensureLayout(reason) {
-      bindViewportTracking();
-      fit();
-      requestAnimationFrame(function() {
-        bindViewportTracking();
-        fit();
-        refreshTerminal();
-        setTimeout(function() {
-          bindViewportTracking();
-          fit();
-          refreshTerminal();
-          var health = healthSnapshot();
-          if (!isHealthy()) {
-            console.warn("LAYOUT_UNHEALTHY[" + reason + "]: " + JSON.stringify(health));
-            updateFallbackVisibility(true);
-          } else {
-            if (writeCount <= 5 || writeCount % 20 === 0) {
-              console.log("LAYOUT_OK[" + reason + "]: " + JSON.stringify(health));
-            }
-            updateFallbackVisibility(false);
-          }
-        }, 80);
-      });
+      if (ensureLayoutTimer) {
+        ensureLayoutReason = ensureLayoutReason || reason || "layout";
+        return;
+      }
+      ensureLayoutReason = reason || ensureLayoutReason || "layout";
+      ensureLayoutTimer = setTimeout(function() {
+        var runReason = ensureLayoutReason;
+        ensureLayoutTimer = null;
+        ensureLayoutReason = "";
+        performEnsureLayout(runReason);
+      }, 32);
+    }
+
+    function performEnsureLayout(reason) {
+      if (renderMode === "desktop-mirror" && typeof window.termsyncMatchDesktop === "function") {
+        window.termsyncMatchDesktop(targetDesktopCols, targetDesktopRows);
+        return;
+      }
+      updateRenderSurface();
+      flushReader(isNearBottomEl(readerEl));
+    }
+
+    function runLayout(reason) {
+      if (typeof window.termsyncEnsureLayout === "function") {
+        window.termsyncEnsureLayout(reason);
+      } else {
+        ensureLayout(reason);
+      }
+    }
+
+    function pulseLayout(reason) {
+      var token = ++layoutPulseToken;
+      for (var i = 0; i < LAYOUT_REFIT_DELAYS_MS.length; i += 1) {
+        (function(delayMs) {
+          setTimeout(function() {
+            if (token !== layoutPulseToken) return;
+            runLayout((reason || "pulse") + "." + delayMs);
+          }, delayMs);
+        })(LAYOUT_REFIT_DELAYS_MS[i]);
+      }
     }
 
     function viewport() {
+      if (isReaderMode()) return readerEl;
       return boundViewport || document.querySelector(".xterm-viewport");
     }
 
@@ -395,7 +635,89 @@
       }, 120);
     }
 
+    function afterTerminalWrite(item) {
+      if (item.generation !== writeGeneration) {
+        return;
+      }
+      writeCount += 1;
+      writeQueuedBytes = Math.max(0, writeQueuedBytes - item.data.length);
+      scheduleFallbackSync(item.mode + ".write", item.mode === "render", item.shouldFollowOutput || item.mode === "render");
+      if (item.mode === "render") {
+        bindViewportTracking();
+        ensureLayout(item.mode + ".write");
+      } else {
+        scheduleAppendMaintenance(item.mode + ".write");
+      }
+      if (item.shouldFollowOutput || item.mode === "render") {
+        requestAnimationFrame(function() {
+          term.scrollToBottom();
+          followOutput = true;
+        });
+      }
+      if (writeCount <= 5 || writeCount % 20 === 0) {
+        console.log(item.mode.toUpperCase() + "_OK: data.len=" + item.data.length + " writeCount=" + writeCount + " queue=" + writeQueue.length + " follow=" + !!item.shouldFollowOutput);
+      }
+    }
+
+    function drainWriteQueue() {
+      if (writeInProgress || !term) return;
+      var item = writeQueue.shift();
+      if (!item) return;
+      writeInProgress = true;
+      try {
+        if (item.mode === "render") {
+          term.reset();
+        }
+        term.write(item.data, function() {
+          try {
+            afterTerminalWrite(item);
+          } finally {
+            if (item.generation === writeGeneration) {
+              writeInProgress = false;
+              drainWriteQueue();
+            }
+          }
+        });
+      } catch (e) {
+        writeQueuedBytes = Math.max(0, writeQueuedBytes - item.data.length);
+        if (item.generation === writeGeneration) {
+          writeInProgress = false;
+          drainWriteQueue();
+        }
+        console.error(item.mode.toUpperCase() + "_EXCEPTION: " + e.message);
+        updateFallbackVisibility(true);
+      }
+    }
+
+    function enqueueTerminalWrite(data, mode, shouldFollowOutput) {
+      var generation = writeGeneration;
+      if (mode === "render") {
+        generation = ++writeGeneration;
+        writeQueue = [];
+        writeQueuedBytes = 0;
+      }
+      if (writeQueuedBytes + data.length > writeQueueMaxBytes) {
+        console.warn("WRITE_QUEUE_OVERFLOW: queued=" + writeQueuedBytes + " incoming=" + data.length);
+        while (writeQueue.length && writeQueuedBytes + data.length > writeQueueMaxBytes) {
+          var dropped = writeQueue.shift();
+          writeQueuedBytes = Math.max(0, writeQueuedBytes - dropped.data.length);
+        }
+      }
+      writeQueue.push({
+        data: data,
+        mode: mode,
+        shouldFollowOutput: shouldFollowOutput,
+        generation: generation
+      });
+      writeQueuedBytes += data.length;
+      drainWriteQueue();
+    }
+
     function writeTerminal(data, mode, shouldFollowOutput) {
+      rememberTerminalMirror(data, mode);
+      if (isReaderMode()) {
+        return writeReader(data, mode, shouldFollowOutput);
+      }
       if (!xtermReady || !term) {
         console.error(mode.toUpperCase() + "_ERR: xterm not ready");
         applyRawFallback(mode, data);
@@ -405,7 +727,6 @@
 
       try {
         if (mode === "render") {
-          term.reset();
           data = trimInitialRenderText(data);
         }
 
@@ -415,26 +736,7 @@
           return "OK";
         }
 
-        term.write(data, function() {
-          writeCount += 1;
-          scheduleFallbackSync(mode + ".write", mode === "render", shouldFollowOutput || mode === "render");
-          if (mode === "render") {
-            bindViewportTracking();
-            ensureLayout(mode + ".write");
-          } else {
-            scheduleAppendMaintenance(mode + ".write");
-          }
-          if (shouldFollowOutput || mode === "render") {
-            requestAnimationFrame(function() {
-              term.scrollToBottom();
-              followOutput = true;
-            });
-          }
-          if (writeCount <= 5 || writeCount % 20 === 0) {
-            console.log(mode.toUpperCase() + "_OK: data.len=" + data.length + " writeCount=" + writeCount + " follow=" + !!shouldFollowOutput);
-          }
-        });
-
+        enqueueTerminalWrite(data, mode, shouldFollowOutput);
         return "OK";
       } catch (e) {
         console.error(mode.toUpperCase() + "_EXCEPTION: " + e.message);
@@ -495,7 +797,7 @@
           xtermReady = true;
           bindViewportTracking();
           console.log("XTERM_INIT: Terminal opened OK");
-          ensureLayout("init");
+          pulseLayout("init");
         }
       }
     } catch (e) {
@@ -504,19 +806,44 @@
     }
 
     window.addEventListener("resize", function() {
-      ensureLayout("window.resize");
+      pulseLayout("window.resize");
     });
 
     requestAnimationFrame(function() {
-      ensureLayout("first.raf");
+      pulseLayout("first.raf");
       console.log("XTERM_INIT: first fit done");
     });
 
     if (window.ResizeObserver && terminalHost) {
       resizeObserver = new ResizeObserver(function() {
-        ensureLayout("resize.observer");
+        pulseLayout("resize.observer");
       });
       resizeObserver.observe(terminalHost);
+    }
+
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", function() {
+        pulseLayout("visualViewport.resize");
+      });
+      window.visualViewport.addEventListener("scroll", function() {
+        pulseLayout("visualViewport.scroll");
+      });
+    }
+
+    window.addEventListener("focus", function() {
+      pulseLayout("window.focus");
+    });
+
+    document.addEventListener("visibilitychange", function() {
+      if (!document.hidden) {
+        pulseLayout("visibility.visible");
+      }
+    });
+
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(function() {
+        pulseLayout("fonts.ready");
+      }).catch(function() {});
     }
 
     window.termsyncRender = function(data) {
@@ -548,7 +875,11 @@
     };
 
     window.termsyncScrollToBottom = function() {
-      if (term) term.scrollToBottom();
+      if (isReaderMode() && readerEl) {
+        readerEl.scrollTop = readerEl.scrollHeight;
+      } else if (term) {
+        term.scrollToBottom();
+      }
       followOutput = true;
       if (fallbackEl) {
         fallbackEl.scrollTop = fallbackEl.scrollHeight;
@@ -556,7 +887,11 @@
     };
 
     window.termsyncEnsureLayout = function(reason) {
-      ensureLayout(reason || "manual");
+      if (renderMode === "desktop-mirror" && typeof window.termsyncMatchDesktop === "function") {
+        return window.termsyncMatchDesktop(targetDesktopCols, targetDesktopRows);
+      }
+      updateRenderSurface();
+      flushReader(isNearBottomEl(readerEl));
       return "OK";
     };
 
@@ -566,22 +901,22 @@
       targetDesktopCols = desktopCols > 0 ? desktopCols : targetDesktopCols;
       targetDesktopRows = desktopRows > 0 ? desktopRows : targetDesktopRows;
 
+      updateRenderSurface();
       if (renderMode === "desktop-mirror") {
-        return window.termsyncMatchDesktop(targetDesktopCols, targetDesktopRows);
+        var desktopResult = window.termsyncMatchDesktop(targetDesktopCols, targetDesktopRows);
+        rebuildTerminalMirror();
+        pulseLayout("setRenderMode.desktop");
+        return desktopResult;
       }
 
       try {
-        applyMobileFitFont();
-        fit();
-        refreshTerminal();
-        ensureLayout("setRenderMode.mobile");
+        flushReader(isNearBottomEl(readerEl));
         return JSON.stringify({
           ok: true,
           mode: renderMode,
           fontScale: fontScale,
-          fontSize: term ? term.options.fontSize : 0,
-          cols: term ? term.cols : 0,
-          rows: term ? term.rows : 0
+          reader: true,
+          length: readerBuffer.length
         });
       } catch (e) {
         console.error("SET_RENDER_MODE_ERR: " + e.message);
@@ -591,6 +926,16 @@
 
     window.termsyncSetSelectionMode = function(enabled) {
       selectionMode = !!enabled;
+      updateRenderSurface();
+      if (isReaderMode()) {
+        return JSON.stringify({
+          selectionMode: selectionMode,
+          reader: true,
+          readerLength: readerBuffer.length,
+          readerMaxLines: readerMaxLines,
+          readerMaxChars: readerMaxChars
+        });
+      }
       if (selectionMode) {
         scheduleFallbackSync("selection.on", true, true);
       } else if (fallbackSyncTimer) {
@@ -610,6 +955,9 @@
 
     window.termsyncHealthCheck = function() {
       var health = healthSnapshot();
+      health.readerVisible = !!readerEl && readerEl.style.display !== "none";
+      health.readerLength = readerBuffer.length;
+      health.readerMode = isReaderMode();
       health.fallbackVisible = !!fallbackEl && fallbackEl.style.display !== "none";
       health.fallbackLength = fallbackBuffer.length;
       health.selectionMode = selectionMode;
@@ -669,7 +1017,16 @@
             }
           }
           refreshTerminal();
-          ensureLayout("matchDesktop");
+          setTimeout(function() {
+            var health = healthSnapshot();
+            if (!isHealthy()) {
+              console.warn("MATCH_DESKTOP_UNHEALTHY: " + JSON.stringify(health));
+              updateFallbackVisibility(true);
+            } else {
+              reportTerminalSize("matchDesktop");
+              updateFallbackVisibility(false);
+            }
+          }, 80);
         });
 
         return JSON.stringify({

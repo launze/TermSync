@@ -24,6 +24,7 @@ desktop.ini
 
 # Environment
 .env
+.ssh/
 
 # Node modules (if any frontend uses npm)
 node_modules/
@@ -39,6 +40,7 @@ mobile-android/termsync.keystore
 # Runtime / release assets
 **/release-assets/
 artifacts/
+server/termsync-server-*
 
 # Certificates (uncomment to exclude from git)
 # server/certs/

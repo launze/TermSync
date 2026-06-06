@@ -1,7 +1,11 @@
 use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use arboard::Clipboard;
+use chrono::Local;
+use image::{ColorType, ImageFormat};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -66,7 +70,7 @@ pub async fn create_session(
     title: Option<String>,
     shell: Option<String>,
     cwd: Option<String>,
-) -> Result<String, String> {
+) -> Result<SessionDescriptor, String> {
     let session_id = session_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let title = title.unwrap_or_else(|| "Terminal".to_string());
     crate::log_debug(&format!(
@@ -74,7 +78,7 @@ pub async fn create_session(
         session_id, title, shell, cwd
     ));
 
-    let session_id = pty_manager.create_session(
+    let session = pty_manager.create_session(
         &app,
         session_id,
         cols,
@@ -86,16 +90,18 @@ pub async fn create_session(
     // 检查WebSocket连接状态，如果已连接则发送会话创建消息
     if wss_state.is_connected() {
         let result = wss_state
-            .send_session_create(&session_id, &title, cols, rows)
+            .send_session_create(&session.session_id, &session.title, cols, rows)
             .await;
         if let Err(e) = result {
             log::warn!("Failed to send session create: {}", e);
         }
     } else {
-        log::info!("WebSocket not connected, will send session create after connection is established");
+        log::info!(
+            "WebSocket not connected, will send session create after connection is established"
+        );
     }
 
-    Ok(session_id)
+    Ok(session)
 }
 
 #[command]
@@ -317,8 +323,7 @@ pub fn debug_log(message: String) -> Result<String, String> {
 
 #[command]
 pub fn write_clipboard_text(text: String) -> Result<String, String> {
-    let mut clipboard = Clipboard::new()
-        .map_err(|error| format!("无法访问系统剪贴板: {error}"))?;
+    let mut clipboard = Clipboard::new().map_err(|error| format!("无法访问系统剪贴板: {error}"))?;
     clipboard
         .set_text(text)
         .map_err(|error| format!("写入系统剪贴板失败: {error}"))?;
@@ -327,11 +332,54 @@ pub fn write_clipboard_text(text: String) -> Result<String, String> {
 
 #[command]
 pub fn read_clipboard_text() -> Result<String, String> {
-    let mut clipboard = Clipboard::new()
-        .map_err(|error| format!("无法访问系统剪贴板: {error}"))?;
+    let mut clipboard = Clipboard::new().map_err(|error| format!("无法访问系统剪贴板: {error}"))?;
     clipboard
         .get_text()
         .map_err(|error| format!("读取系统剪贴板失败: {error}"))
+}
+
+fn screenshots_dir() -> Result<PathBuf, String> {
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .ok_or_else(|| "无法定位用户主目录".to_string())?;
+    Ok(PathBuf::from(home).join("Pictures").join("Screenshots"))
+}
+
+#[command]
+pub fn save_clipboard_image_to_screenshots() -> Result<String, String> {
+    let mut clipboard = Clipboard::new().map_err(|error| format!("无法访问系统剪贴板: {error}"))?;
+    let image = clipboard
+        .get_image()
+        .map_err(|error| format!("剪贴板中没有可保存的图片: {error}"))?;
+
+    let dir = screenshots_dir()?;
+    fs::create_dir_all(&dir).map_err(|error| {
+        format!(
+            "创建截图目录失败 {}: {error}",
+            dir.to_string_lossy()
+        )
+    })?;
+
+    let file_name = format!(
+        "tty1_clipboard_{}.png",
+        Local::now().format("%Y%m%d_%H%M%S_%3f")
+    );
+    let path = dir.join(file_name);
+    image::save_buffer_with_format(
+        &path,
+        image.bytes.as_ref(),
+        image.width as u32,
+        image.height as u32,
+        ColorType::Rgba8,
+        ImageFormat::Png,
+    )
+    .map_err(|error| format!("保存剪贴板图片失败: {error}"))?;
+
+    path.canonicalize()
+        .unwrap_or(path)
+        .to_str()
+        .map(|value| value.to_string())
+        .ok_or_else(|| "图片路径包含无法处理的字符".to_string())
 }
 
 #[command]
@@ -340,6 +388,22 @@ pub fn window_minimize(window: tauri::WebviewWindow) -> Result<String, String> {
         .minimize()
         .map_err(|error| format!("窗口最小化失败: {error}"))?;
     Ok("Window minimized".to_string())
+}
+
+#[command]
+pub fn window_start_dragging(window: tauri::WebviewWindow) -> Result<String, String> {
+    if window
+        .is_maximized()
+        .map_err(|error| format!("读取窗口状态失败: {error}"))?
+    {
+        window
+            .unmaximize()
+            .map_err(|error| format!("窗口还原失败: {error}"))?;
+    }
+    window
+        .start_dragging()
+        .map_err(|error| format!("开始拖动窗口失败: {error}"))?;
+    Ok("Window drag started".to_string())
 }
 
 #[command]
@@ -373,6 +437,14 @@ pub fn window_close(window: tauri::WebviewWindow) -> Result<String, String> {
         .close()
         .map_err(|error| format!("关闭窗口失败: {error}"))?;
     Ok("Window closed".to_string())
+}
+
+#[command]
+pub fn window_destroy(window: tauri::WebviewWindow) -> Result<String, String> {
+    window
+        .destroy()
+        .map_err(|error| format!("关闭窗口失败: {error}"))?;
+    Ok("Window destroyed".to_string())
 }
 
 #[command]
@@ -423,8 +495,8 @@ pub async fn proxy_ai_request(
         .text()
         .await
         .map_err(|err| format!("Failed to read AI response: {err}"))?;
-    let parsed = serde_json::from_str::<Value>(&text)
-        .unwrap_or_else(|_| json!({ "message": text }));
+    let parsed =
+        serde_json::from_str::<Value>(&text).unwrap_or_else(|_| json!({ "message": text }));
 
     crate::log_debug(&format!(
         "command:proxy_ai_request:done status={}",

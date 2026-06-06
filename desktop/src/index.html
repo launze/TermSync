@@ -37,15 +37,15 @@
         .tab-strip {
             display: flex;
             align-items: center;
-            flex: 1;
+            flex: 1 1 auto;
             min-width: 0;
             overflow-x: auto;
         }
         .titlebar-drag-region {
             display: none;
             align-self: stretch;
-            flex: 0 1 72px;
-            min-width: 32px;
+            flex: 1 1 96px;
+            min-width: 48px;
         }
         body.windows-custom-frame .titlebar-drag-region {
             display: block;
@@ -830,6 +830,7 @@
             box-shadow: 2px 2px 8px rgba(0,0,0,0.5);
             z-index: 2000; display: none;
             border-radius: 4px; overflow: hidden; min-width: 160px;
+            max-width: min(360px, calc(100vw - 16px));
         }
         .context-menu.visible { display: block; }
         .context-menu-item {
@@ -837,6 +838,23 @@
             display: flex; align-items: center; gap: 8px;
         }
         .context-menu-item:hover { background-color: #094771; }
+        .context-menu-item.disabled {
+            color: #777;
+            cursor: default;
+        }
+        .context-menu-item.disabled:hover { background-color: transparent; }
+        .context-menu-item .menu-text {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .context-menu-item .menu-meta {
+            margin-left: auto;
+            color: #8a8a8a;
+            font-size: 11px;
+            white-space: nowrap;
+        }
         .context-menu-separator {
             height: 1px; background-color: #3c3c3c; margin: 4px 0;
         }
@@ -871,6 +889,7 @@
         <div class="titlebar-drag-region" id="titlebarDragRegion" data-tauri-drag-region aria-hidden="true" hidden></div>
         <div class="tab-bar-actions">
             <button class="tab-icon-btn connection-status status-local" id="connStatus" onclick="window.app.toggleConnection()" title="本地模式" aria-label="连接状态"></button>
+            <button class="tab-icon-btn" onclick="window.app.pasteClipboardImagePath()" title="保存剪贴板图片并粘贴路径" aria-label="保存剪贴板图片并粘贴路径">▧</button>
             <button class="tab-icon-btn" onclick="window.app.toggleAiPanel()" title="AI 助手" aria-label="AI 助手">AI</button>
             <button class="tab-icon-btn" id="commandLibraryBtn" onclick="window.app.toggleCommandLibrary(event)" title="命令库" aria-label="命令库">⌘</button>
             <button class="tab-icon-btn" onclick="window.app.showSettings()" title="设置" aria-label="设置">⚙</button>
@@ -934,6 +953,9 @@
         <div class="context-menu-item" onclick="window.app.closeCurrentPane()">❌ 关闭面板</div>
     </div>
 
+    <!-- Tab Context Menu -->
+    <div class="context-menu" id="tabContextMenu"></div>
+
     <!-- Settings Modal -->
     <div class="modal-overlay" id="settingsModal">
         <div class="modal">
@@ -965,7 +987,7 @@
             </div>
             <div class="form-group">
                 <label>服务器地址 (自动保存)</label>
-                <input type="text" id="settingServerUrl" placeholder="wss://nas.smarthome2020.top:7373/ws" />
+                <input type="text" id="settingServerUrl" placeholder="wss://8.153.163.104:7373/ws" />
             </div>
             <div class="form-group">
                 <label>桌面设备名称</label>
@@ -1131,6 +1153,7 @@
 
         const invoke = window.__TAURI__?.core?.invoke;
         const listen = window.__TAURI__?.event?.listen;
+        const getCurrentWindow = window.__TAURI__?.window?.getCurrentWindow;
         const XtermTerminal = window.Terminal;
         const XtermFitAddon = window.FitAddon?.FitAddon;
         const XtermWebLinksAddon = window.WebLinksAddon?.WebLinksAddon;
@@ -1181,6 +1204,30 @@
             throw new Error('当前环境不支持直接读取系统剪贴板');
         }
 
+        async function saveClipboardImageToScreenshots(options = {}) {
+            if (typeof invoke === 'undefined') {
+                if (options.silentNoImage) return null;
+                throw new Error('当前环境不支持直接读取剪贴板图片');
+            }
+
+            try {
+                return await invoke('save_clipboard_image_to_screenshots');
+            } catch (err) {
+                const message = String(err || '');
+                if (options.silentNoImage && message.includes('剪贴板中没有可保存的图片')) {
+                    return null;
+                }
+                throw err;
+            }
+        }
+
+        function formatTerminalPath(path) {
+            const value = String(path || '').trim();
+            if (!value) return '';
+            if (!/[\s"'`]/.test(value)) return value;
+            return '"' + value.replace(/"/g, '\\"') + '"';
+        }
+
         function escapeHtml(value) {
             return String(value || '')
                 .replace(/&/g, '&amp;')
@@ -1208,6 +1255,8 @@
         }
 
         const COMMAND_LIBRARY_STORAGE_KEY = 'TermSync-command-library';
+        const SAVED_TABS_STORAGE_KEY = 'TermSync-saved-tabs';
+        const SAVED_TABS_LIMIT = 30;
         const COMMAND_CATEGORY_LABELS = {
             ai: 'AI 助手',
             git: 'Git',
@@ -1682,7 +1731,8 @@
             }
         };
 
-        const DEFAULT_SERVER_URL = 'wss://nas.smarthome2020.top:7373/ws';
+        const DEFAULT_SERVER_URL = 'wss://8.153.163.104:7373/ws';
+        const LEGACY_DEFAULT_SERVER_URL = 'wss://nas.smarthome2020.top:7373/ws';
         const TERMINAL_FONT_SIZE_DEFAULT = 14;
         const TERMINAL_FONT_SIZE_MIN = 10;
         const TERMINAL_FONT_SIZE_MAX = 24;
@@ -1728,6 +1778,24 @@
             return 'Terminal ' + paneId;
         }
 
+        function pathBaseName(path) {
+            const normalized = String(path || '').trim().replace(/[\\/]+$/, '');
+            if (!normalized) return '';
+            const parts = normalized.split(/[\\/]+/).filter(Boolean);
+            return parts.length > 0 ? parts[parts.length - 1] : normalized;
+        }
+
+        function deriveAutoPanelTitle(program, cwd, paneId) {
+            const runningProgram = String(program || '').trim();
+            if (runningProgram) return runningProgram;
+            const directoryName = pathBaseName(cwd);
+            return directoryName || defaultPaneTitle(paneId);
+        }
+
+        function normalizeTitleMode(value, fallback = 'auto') {
+            return value === 'manual' || value === 'auto' ? value : fallback;
+        }
+
         function normalizeEditableTitle(value, fallback) {
             const trimmed = String(value || '').trim();
             return trimmed || fallback;
@@ -1757,6 +1825,9 @@
                 try {
                     const saved = localStorage.getItem('TermSync-settings');
                     if (saved) this.settings = { ...this.defaults, ...JSON.parse(saved) };
+                    if (this.settings.serverUrl === LEGACY_DEFAULT_SERVER_URL) {
+                        this.settings.serverUrl = DEFAULT_SERVER_URL;
+                    }
                     this.settings.fontSize = normalizeTerminalFontSize(this.settings.fontSize);
                 } catch (e) { console.warn('Load settings failed:', e); }
             }
@@ -2083,12 +2154,7 @@
                 this.term.open(el);
 
                 this.term.onData((data) => {
-                    if (!this.backendReady || typeof invoke === 'undefined') return;
-                    invoke('send_input', { sessionId: 'local-' + this.paneId, input: data })
-                        .catch((e) => {
-                            this.backendReady = false;
-                            this.appendOutput('发送到本地终端失败: ' + e, true);
-                        });
+                    this.sendInput(data);
                 });
 
                 this.term.attachCustomKeyEventHandler((event) => this.handleKeyEvent(event));
@@ -2098,6 +2164,7 @@
                     if (!text || !this.term) return;
                     event.preventDefault();
                     this.term.paste(text);
+                    this.focusSoon();
                 });
 
                 this.resizeObserver = new ResizeObserver(() => this.queueResize());
@@ -2156,6 +2223,10 @@
             focus() {
                 this.term?.focus();
             }
+            focusSoon() {
+                this.focus();
+                setTimeout(() => this.focus(), 0);
+            }
             async copySelection() {
                 if (!this.term || !this.term.hasSelection()) return;
                 const text = this.term.getSelection();
@@ -2169,12 +2240,45 @@
             }
             async pasteFromClipboard() {
                 if (!this.term) return;
+                const pastedImage = await this.pasteClipboardImagePath({ silentNoImage: true });
+                if (pastedImage) return;
+
                 try {
+                    this.focus();
                     const text = await readClipboardText();
-                    if (!text) return;
+                    if (!text) {
+                        this.focusSoon();
+                        return;
+                    }
                     this.term.paste(text);
+                    this.focusSoon();
                 } catch (err) {
                     this.appendOutput('粘贴失败: ' + err, true);
+                    this.focusSoon();
+                }
+            }
+            async pasteClipboardImagePath(options = {}) {
+                if (!this.term) return false;
+                try {
+                    this.focus();
+                    const path = await saveClipboardImageToScreenshots({
+                        silentNoImage: !!options.silentNoImage
+                    });
+                    if (!path) {
+                        this.focusSoon();
+                        return false;
+                    }
+                    this.term.paste(formatTerminalPath(path));
+                    this.focusSoon();
+                    window.app?.showToast('已保存剪贴板图片并粘贴路径', 'success');
+                    return true;
+                } catch (err) {
+                    if (!options.silentNoImage) {
+                        this.appendOutput('保存剪贴板图片失败: ' + err, true);
+                        window.app?.showToast('保存剪贴板图片失败', 'error');
+                    }
+                    this.focusSoon();
+                    return false;
                 }
             }
             getSelectionText() {
@@ -2203,13 +2307,49 @@
                 return text;
             }
             async sendText(text) {
-                if (!text || !this.backendReady || typeof invoke === 'undefined') return false;
+                if (!text || typeof invoke === 'undefined') return false;
+                if (!this.backendReady) {
+                    const restored = await window.app?.ensureTerminalBackendReady(this.paneId);
+                    if (!restored) return false;
+                }
                 try {
                     await invoke('send_input', {
                         sessionId: 'local-' + this.paneId,
                         input: text
                     });
                     this.focus();
+                    return true;
+                } catch (err) {
+                    this.backendReady = false;
+                    const restored = await window.app?.recoverTerminalBackend(this.paneId, err);
+                    if (restored) {
+                        try {
+                            await invoke('send_input', {
+                                sessionId: 'local-' + this.paneId,
+                                input: text
+                            });
+                            this.focus();
+                            return true;
+                        } catch (retryErr) {
+                            this.appendOutput('发送到本地终端失败: ' + retryErr, true);
+                            return false;
+                        }
+                    }
+                    this.appendOutput('发送到本地终端失败: ' + err, true);
+                    return false;
+                }
+            }
+            async sendInput(data) {
+                if (!data || typeof invoke === 'undefined') return false;
+                if (!this.backendReady) {
+                    const restored = await window.app?.ensureTerminalBackendReady(this.paneId);
+                    if (!restored) return false;
+                }
+                try {
+                    await invoke('send_input', {
+                        sessionId: 'local-' + this.paneId,
+                        input: data
+                    });
                     return true;
                 } catch (err) {
                     this.appendOutput('发送到本地终端失败: ' + err, true);
@@ -2281,6 +2421,7 @@
                 this.reconnectTimer = null;
                 this.reconnectAttempts = 0;
                 this.contextMenuTarget = null;
+                this.tabContextMenuTarget = null;
                 this.splitMenuTarget = null;
                 this.manualDisconnect = false;
                 this.connectionPending = false;
@@ -2292,6 +2433,7 @@
                 this.replayBuffers = new Map();
                 this.commandCatalog = this.loadCommandCatalog();
                 this.commandLibrary = buildCommandLibraryUiState(this.commandCatalog);
+                this.savedTabs = this.loadSavedTabs();
                 this.commandInput = '';
                 this.commandLibraryOpen = false;
                 this.selectedCommandSectionKey = COMMAND_PANEL_DEFAULT_SECTION_KEY;
@@ -2302,6 +2444,8 @@
                 this.aiInputsBound = false;
                 this.windowControlsEnabled = IS_WINDOWS_DESKTOP;
                 this.windowStateSyncTimer = null;
+                this.windowCloseInProgress = false;
+                this.backendRecoveryPromises = new Map();
             }
 
             debug(message, payload) {
@@ -2354,11 +2498,11 @@
             openOnboardingIfNeeded() {
                 if (this.hasDesktopToken()) return;
                 this.showSettings();
-                this.showToast('请先注册本机，生成桌面设备 Token 后再连接服务器', 'warning');
+                this.showToast('首次连接会自动注册本机，也可以在设置里手动注册。', 'warning');
             }
 
             shouldConnectOnStartup() {
-                return this.hasDesktopToken() && !!normalizeServerUrl(this.settings.get('serverUrl'));
+                return !!normalizeServerUrl(this.settings.get('serverUrl'));
             }
 
             handleTerminalFontSizeShortcut(event) {
@@ -2646,7 +2790,8 @@
                 }
                 this.recordCommandUsage(normalized);
                 this.commandInput = '';
-                this.renderCommandLibrary();
+                this.closeCommandLibrary();
+                terminal.focusSoon();
             }
 
             toggleCommandLibrary(event) {
@@ -3451,7 +3596,14 @@
                 this.sessionSyncTimer = setInterval(() => {
                     this.syncLocalSessionMetadata();
                 }, 5000);
-                window.addEventListener('beforeunload', () => this.saveWorkspace());
+                window.addEventListener('beforeunload', () => {
+                    if (this.workspaceSaveTimer) {
+                        clearTimeout(this.workspaceSaveTimer);
+                        this.workspaceSaveTimer = null;
+                    }
+                    this.saveWorkspace();
+                });
+                window.addEventListener('pagehide', () => this.saveWorkspace());
             }
 
             scheduleWorkspaceSave() {
@@ -3475,11 +3627,13 @@
                         tabs: Array.from(this.tabs.values()).map((tab) => ({
                             id: tab.id,
                             title: tab.title,
+                            titleMode: normalizeTitleMode(tab.titleMode),
                             root: this.splitTree.cloneNode(tab.root),
                             panes: Array.from(tab.panes).map((paneId) => ({
                                 paneId,
                                 cwd: this.terminals.get(paneId)?.cwd || null,
-                                title: this.getPaneTitle(paneId, tab)
+                                title: this.getPaneTitle(paneId, tab),
+                                titleMode: this.getPaneTitleMode(paneId, tab)
                             }))
                         }))
                     };
@@ -3487,6 +3641,15 @@
                 } catch (err) {
                     console.warn('Save workspace failed:', err);
                 }
+            }
+
+            async saveWorkspaceWithLatestSessionMetadata() {
+                if (this.workspaceSaveTimer) {
+                    clearTimeout(this.workspaceSaveTimer);
+                    this.workspaceSaveTimer = null;
+                }
+                await this.syncLocalSessionMetadata({ persist: false });
+                this.saveWorkspace();
             }
 
             loadWorkspace() {
@@ -3500,6 +3663,259 @@
                     console.warn('Load workspace failed:', err);
                     return null;
                 }
+            }
+
+            normalizeSavedTabEntry(entry) {
+                if (!entry || typeof entry !== 'object' || !entry.root || !Array.isArray(entry.panes)) {
+                    return null;
+                }
+                const id = String(entry.id || '').trim() || ('saved-tab-' + Date.now());
+                const paneIds = this.splitTree.collectPaneIds(entry.root).map(Number);
+                if (paneIds.length === 0) return null;
+                const paneIdSet = new Set(paneIds);
+                const panes = entry.panes
+                    .map((pane) => ({
+                        paneId: Number(pane?.paneId),
+                        title: String(pane?.title || '').trim(),
+                        titleMode: normalizeTitleMode(pane?.titleMode, 'manual'),
+                        cwd: typeof pane?.cwd === 'string' && pane.cwd.trim() ? pane.cwd.trim() : null
+                    }))
+                    .filter((pane) => paneIdSet.has(pane.paneId));
+                if (panes.length === 0) return null;
+
+                const createdAt = Number(entry.createdAt) || Date.now();
+                const updatedAt = Number(entry.updatedAt) || createdAt;
+                return {
+                    id,
+                    version: 1,
+                    title: normalizeEditableTitle(entry.title, '已保存标签页'),
+                    titleMode: normalizeTitleMode(entry.titleMode, 'manual'),
+                    root: this.splitTree.cloneNode(entry.root),
+                    panes,
+                    activePaneId: paneIdSet.has(Number(entry.activePaneId)) ? Number(entry.activePaneId) : panes[0].paneId,
+                    createdAt,
+                    updatedAt
+                };
+            }
+
+            loadSavedTabs() {
+                try {
+                    const raw = localStorage.getItem(SAVED_TABS_STORAGE_KEY);
+                    if (!raw) return [];
+                    const parsed = JSON.parse(raw);
+                    if (!Array.isArray(parsed)) return [];
+                    return parsed
+                        .map((entry) => this.normalizeSavedTabEntry(entry))
+                        .filter(Boolean)
+                        .sort((left, right) => right.updatedAt - left.updatedAt)
+                        .slice(0, SAVED_TABS_LIMIT);
+                } catch (err) {
+                    console.warn('Load saved tabs failed:', err);
+                    return [];
+                }
+            }
+
+            persistSavedTabs() {
+                try {
+                    localStorage.setItem(
+                        SAVED_TABS_STORAGE_KEY,
+                        JSON.stringify(this.savedTabs.slice(0, SAVED_TABS_LIMIT))
+                    );
+                } catch (err) {
+                    console.warn('Persist saved tabs failed:', err);
+                }
+            }
+
+            captureTabSnapshot(tabId) {
+                const tab = this.tabs.get(tabId);
+                if (!tab || !tab.root) return null;
+                const paneIds = this.splitTree.collectPaneIds(tab.root);
+                if (paneIds.length === 0) return null;
+                const now = Date.now();
+                return {
+                    id: 'saved-tab-' + now + '-' + Math.random().toString(36).slice(2, 8),
+                    version: 1,
+                    title: normalizeEditableTitle(tab.title, defaultTabTitle(tab.id)),
+                    titleMode: normalizeTitleMode(tab.titleMode),
+                    root: this.splitTree.cloneNode(tab.root),
+                    panes: paneIds.map((paneId) => ({
+                        paneId,
+                        cwd: this.terminals.get(paneId)?.cwd || null,
+                        title: this.getPaneTitle(paneId, tab),
+                        titleMode: this.getPaneTitleMode(paneId, tab)
+                    })),
+                    activePaneId: tab.panes.has(this.activePaneId) ? this.activePaneId : paneIds[0],
+                    createdAt: now,
+                    updatedAt: now
+                };
+            }
+
+            async saveTabToHistory(tabId = this.tabContextMenuTarget || this.activeTabId) {
+                document.getElementById('tabContextMenu')?.classList.remove('visible');
+                await this.syncLocalSessionMetadata();
+                const snapshot = this.captureTabSnapshot(tabId);
+                if (!snapshot) {
+                    this.showToast('当前标签页无法保存', 'warning');
+                    return;
+                }
+                const existingIndex = this.savedTabs.findIndex((entry) => entry.title === snapshot.title);
+                if (existingIndex >= 0) {
+                    snapshot.createdAt = this.savedTabs[existingIndex].createdAt || snapshot.createdAt;
+                    this.savedTabs.splice(existingIndex, 1);
+                }
+                this.savedTabs.unshift(snapshot);
+                this.savedTabs = this.savedTabs.slice(0, SAVED_TABS_LIMIT);
+                this.persistSavedTabs();
+                this.showToast('已保存标签页: ' + snapshot.title, 'success');
+            }
+
+            cloneSavedTabNode(node, idMap) {
+                if (!node) return null;
+                if (node.type === 'leaf') {
+                    const leaf = this.splitTree.createLeaf();
+                    leaf.size = typeof node.size === 'number' ? node.size : 1;
+                    idMap.set(Number(node.paneId), leaf.paneId);
+                    return leaf;
+                }
+                const children = (node.children || [])
+                    .map((child) => this.cloneSavedTabNode(child, idMap))
+                    .filter(Boolean);
+                if (children.length === 0) return null;
+                if (children.length === 1) return children[0];
+                return {
+                    type: node.type === 'vertical' ? 'vertical' : 'horizontal',
+                    size: typeof node.size === 'number' ? node.size : 1,
+                    children
+                };
+            }
+
+            openSavedTab(savedTabId) {
+                document.getElementById('tabContextMenu')?.classList.remove('visible');
+                const saved = this.savedTabs.find((entry) => entry.id === savedTabId);
+                if (!saved) {
+                    this.showToast('找不到已保存的标签页', 'warning');
+                    return;
+                }
+
+                const idMap = new Map();
+                const root = this.cloneSavedTabNode(saved.root, idMap);
+                if (!root) {
+                    this.showToast('已保存标签页布局无效', 'error');
+                    return;
+                }
+
+                const tabId = ++this.nextTabId;
+                const paneIds = this.splitTree.collectPaneIds(root);
+                const paneMeta = new Map(
+                    saved.panes.map((pane) => [idMap.get(Number(pane.paneId)), pane]).filter(([paneId]) => !!paneId)
+                );
+                const tab = {
+                    id: tabId,
+                    title: normalizeEditableTitle(saved.title, defaultTabTitle(tabId)),
+                    root,
+                    panes: new Set(paneIds),
+                    paneTitles: new Map()
+                };
+
+                for (const paneId of paneIds) {
+                    const meta = paneMeta.get(paneId) || {};
+                    tab.paneTitles.set(paneId, normalizeEditableTitle(meta.title, defaultPaneTitle(paneId)));
+                    this.terminals.set(paneId, new LocalTerminal(paneId, this.settings.get('shell'), {
+                        cwd: meta.cwd || null
+                    }));
+                }
+
+                this.tabs.set(tabId, tab);
+                this.activeTabId = tabId;
+                this.renderTabs();
+                this.renderActiveTab();
+
+                const mappedActivePaneId = idMap.get(Number(saved.activePaneId));
+                const focusPaneId = tab.panes.has(mappedActivePaneId) ? mappedActivePaneId : paneIds[0];
+                this.focusPane(focusPaneId);
+                for (const paneId of paneIds) {
+                    this.ensureBackendSession(
+                        paneId,
+                        this.getSessionTitleForPane(paneId, tab),
+                        this.terminals.get(paneId)?.cwd || null
+                    );
+                }
+
+                this.updateStatusBar();
+                this.scheduleWorkspaceSave();
+                this.showToast('已打开保存的标签页: ' + tab.title, 'success');
+            }
+
+            deleteSavedTab(savedTabId) {
+                const saved = this.savedTabs.find((entry) => entry.id === savedTabId);
+                this.savedTabs = this.savedTabs.filter((entry) => entry.id !== savedTabId);
+                this.persistSavedTabs();
+                document.getElementById('tabContextMenu')?.classList.remove('visible');
+                this.showToast(saved ? '已删除保存记录: ' + saved.title : '保存记录已删除', 'success');
+            }
+
+            formatSavedTabMeta(saved) {
+                const paneCount = Array.isArray(saved?.panes) ? saved.panes.length : 0;
+                const date = new Date(Number(saved?.updatedAt) || Date.now());
+                const time = date.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' });
+                return paneCount + ' 面板 · ' + time;
+            }
+
+            updatePaneWorkingDirectory(paneId, cwd) {
+                const terminal = this.terminals.get(paneId);
+                const normalized = typeof cwd === 'string' ? cwd.trim() : '';
+                if (!terminal || !normalized || terminal.cwd === normalized) return false;
+                terminal.setWorkingDirectory(normalized);
+                return true;
+            }
+
+            updatePaneAutoMetadata(paneId, metadata = {}) {
+                const tab = this.findTabByPaneId(paneId);
+                const terminal = this.terminals.get(paneId);
+                if (!tab || !terminal) return false;
+
+                let changed = false;
+                const hasCwd = typeof metadata.cwd === 'string' && metadata.cwd.trim();
+                const hasRunningProgram = typeof metadata.runningProgram === 'string' && metadata.runningProgram.trim();
+                if (hasCwd && this.updatePaneWorkingDirectory(paneId, metadata.cwd)) {
+                    changed = true;
+                }
+                if (!hasCwd && !hasRunningProgram) return changed;
+
+                const nextTitle = deriveAutoPanelTitle(
+                    metadata.runningProgram,
+                    terminal.cwd || metadata.cwd,
+                    paneId
+                );
+                let titleChanged = false;
+                if (this.getPaneTitleMode(paneId, tab) === 'auto') {
+                    const previousTitle = this.getPaneTitle(paneId, tab);
+                    this.setPaneTitleValue(tab, paneId, nextTitle, 'auto');
+                    titleChanged = previousTitle !== nextTitle;
+                    this.updatePaneTitleElement(paneId, tab);
+                    changed = changed || titleChanged;
+                }
+
+                if (tab.panes.size <= 1 && normalizeTitleMode(tab.titleMode) === 'auto' && tab.title !== nextTitle) {
+                    tab.title = nextTitle;
+                    this.renderTabs();
+                    changed = true;
+                    titleChanged = true;
+                }
+
+                if (titleChanged) {
+                    if (this.aiPanelOpen) this.updateAiContextPreview();
+                }
+
+                if (titleChanged) {
+                    const sessionId = this.sessionIdForPane(paneId);
+                    const state = this.ensureSessionActivity(paneId, this.getSessionTitleForPane(paneId, tab));
+                    state.title = this.getSessionTitleForPane(paneId, tab);
+                    state.titleMode = 'auto';
+                    this.syncSessionTitleForPane(paneId, tab);
+                }
+
+                return changed;
             }
 
             restoreWorkspace() {
@@ -3526,6 +3942,10 @@
                     const tab = {
                         id: Number(tabState.id),
                         title: normalizeEditableTitle(tabState.title, defaultTabTitle(tabState.id)),
+                        titleMode: normalizeTitleMode(
+                            tabState.titleMode,
+                            normalizeEditableTitle(tabState.title, defaultTabTitle(tabState.id)) === defaultTabTitle(tabState.id) ? 'auto' : 'manual'
+                        ),
                         root,
                         panes: new Set(paneIds),
                         paneTitles: new Map(
@@ -3534,6 +3954,15 @@
                                 normalizeEditableTitle(
                                     paneMeta.get(paneId)?.title,
                                     defaultPaneTitle(paneId)
+                                )
+                            ])
+                        ),
+                        paneTitleModes: new Map(
+                            paneIds.map((paneId) => [
+                                paneId,
+                                normalizeTitleMode(
+                                    paneMeta.get(paneId)?.titleMode,
+                                    normalizeEditableTitle(paneMeta.get(paneId)?.title, defaultPaneTitle(paneId)) === defaultPaneTitle(paneId) ? 'auto' : 'manual'
                                 )
                             ])
                         )
@@ -3605,22 +4034,37 @@
                 return fallback;
             }
 
-            setPaneTitleValue(tab, paneId, title) {
+            getPaneTitleMode(paneId, tab = this.findTabByPaneId(paneId)) {
+                if (!tab) return 'auto';
+                if (!(tab.paneTitleModes instanceof Map)) {
+                    tab.paneTitleModes = new Map();
+                }
+                const stored = tab.paneTitleModes.get(paneId);
+                if (stored) return normalizeTitleMode(stored);
+                const fallback = this.getPaneTitle(paneId, tab) === defaultPaneTitle(paneId) ? 'auto' : 'manual';
+                tab.paneTitleModes.set(paneId, fallback);
+                return fallback;
+            }
+
+            setPaneTitleValue(tab, paneId, title, mode = 'manual') {
                 if (!tab) return defaultPaneTitle(paneId);
                 if (!(tab.paneTitles instanceof Map)) {
                     tab.paneTitles = new Map();
                 }
+                if (!(tab.paneTitleModes instanceof Map)) {
+                    tab.paneTitleModes = new Map();
+                }
                 const normalized = normalizeEditableTitle(title, defaultPaneTitle(paneId));
                 tab.paneTitles.set(paneId, normalized);
+                tab.paneTitleModes.set(paneId, normalizeTitleMode(mode));
                 return normalized;
             }
 
             getSessionTitleForPane(paneId, tab = this.findTabByPaneId(paneId)) {
                 if (!tab) return defaultPaneTitle(paneId);
                 const paneTitle = this.getPaneTitle(paneId, tab);
-                const hasCustomPaneTitle = paneTitle !== defaultPaneTitle(paneId);
                 if (tab.panes.size <= 1) {
-                    return hasCustomPaneTitle ? paneTitle : tab.title;
+                    return tab.title;
                 }
                 return tab.title + ' / ' + paneTitle;
             }
@@ -3755,10 +4199,12 @@
                 if (!tab) return;
                 const normalized = normalizeEditableTitle(title, defaultTabTitle(tabId));
                 if (tab.title === normalized) {
+                    tab.titleMode = 'manual';
                     this.renderTabs();
                     return;
                 }
                 tab.title = normalized;
+                tab.titleMode = 'manual';
                 this.renderTabs();
                 if (this.aiPanelOpen) this.updateAiContextPreview();
                 this.scheduleWorkspaceSave();
@@ -3808,25 +4254,24 @@
                 }
             }
 
-            async syncLocalSessionMetadata() {
-                if (typeof invoke === 'undefined' || this.terminals.size === 0) return;
+            async syncLocalSessionMetadata(options = {}) {
+                if (typeof invoke === 'undefined' || this.terminals.size === 0) return false;
                 try {
                     const sessions = await invoke('list_local_sessions');
                     let changed = false;
                     for (const session of sessions || []) {
                         const paneId = this.paneIdFromSession(session.session_id);
                         if (paneId === null) continue;
-                        const terminal = this.terminals.get(paneId);
-                        if (!terminal) continue;
-                        const cwd = (session.cwd || '').trim();
-                        if (cwd && terminal.cwd !== cwd) {
-                            terminal.setWorkingDirectory(cwd);
-                            changed = true;
-                        }
+                        if (this.updatePaneAutoMetadata(paneId, {
+                            cwd: session.cwd,
+                            runningProgram: session.running_program
+                        })) changed = true;
                     }
-                    if (changed) this.scheduleWorkspaceSave();
+                    if (changed && options.persist !== false) this.scheduleWorkspaceSave();
+                    return changed;
                 } catch (err) {
                     console.warn('Sync local session metadata failed:', err);
+                    return false;
                 }
             }
 
@@ -3840,6 +4285,11 @@
                 return Number.isFinite(paneId) ? paneId : null;
             }
 
+            sessionTitleForRecovery(paneId) {
+                const tab = this.findTabByPaneId(paneId);
+                return this.getSessionTitleForPane(paneId, tab);
+            }
+
             ensureSessionActivity(paneId, title) {
                 const sessionId = this.sessionIdForPane(paneId);
                 let state = this.sessionActivity.get(sessionId);
@@ -3848,6 +4298,7 @@
                         sessionId: sessionId,
                         paneId: paneId,
                         title: title || defaultPaneTitle(paneId),
+                        titleMode: 'auto',
                         activity: '终端已就绪',
                         preview: '',
                         taskState: 'idle',
@@ -4040,6 +4491,12 @@
                     const payload = event.payload || {};
                     const paneId = this.paneIdFromSession(payload.session_id);
                     if (paneId === null) return;
+                    if (this.updatePaneAutoMetadata(paneId, {
+                        cwd: payload.cwd,
+                        runningProgram: payload.running_program
+                    })) {
+                        this.scheduleWorkspaceSave();
+                    }
                     const terminal = this.terminals.get(paneId);
                     if (terminal) terminal.appendChunk(payload.data || '');
                     if (payload.session_id && payload.data) {
@@ -4229,17 +4686,7 @@
                 const deviceName = document.getElementById('settingDeviceName').value.trim() || '我的桌面电脑';
                 if (!serverUrl) { this.showToast('请先填写服务器地址', 'warning'); return; }
                 try {
-                    const result = await invoke('register_device', {
-                        serverUrl: serverUrl,
-                        name: deviceName,
-                        deviceType: 'desktop'
-                    });
-                    this.settings.set('serverUrl', serverUrl);
-                    this.settings.set('deviceName', result.device.name);
-                    this.settings.set('serverToken', result.device.token);
-                    document.getElementById('settingDeviceName').value = result.device.name;
-                    document.getElementById('settingDeviceToken').value = result.device.token;
-                    this.refreshConnectionInputs();
+                    const result = await this.registerDesktopDeviceFor(serverUrl, deviceName);
                     this.showToast('桌面设备已注册: ' + result.device.name, 'success');
                 } catch (err) {
                     console.error('Register device failed:', err);
@@ -4247,15 +4694,39 @@
                 }
             }
 
+            async registerDesktopDeviceFor(serverUrl, deviceName) {
+                const result = await invoke('register_device', {
+                    serverUrl: serverUrl,
+                    name: deviceName || '我的桌面电脑',
+                    deviceType: 'desktop'
+                });
+                this.settings.set('serverUrl', serverUrl);
+                this.settings.set('deviceName', result.device.name);
+                this.settings.set('serverToken', result.device.token);
+                const nameInput = document.getElementById('settingDeviceName');
+                const tokenInput = document.getElementById('settingDeviceToken');
+                if (nameInput) nameInput.value = result.device.name;
+                if (tokenInput) tokenInput.value = result.device.token;
+                this.refreshConnectionInputs();
+                return result;
+            }
+
             async generatePairingCode() {
                 const serverUrl = document.getElementById('settingServerUrl').value.trim() || this.settings.get('serverUrl');
                 const tokenInput = document.getElementById('settingDeviceToken');
-                const token = tokenInput.value.trim() || this.settings.get('serverToken');
+                let token = tokenInput.value.trim() || this.settings.get('serverToken');
                 if (!serverUrl) { this.showToast('请先填写服务器地址', 'warning'); return; }
                 if (!token) {
-                    this.showToast('请先点击“注册本机”获取桌面设备 Token', 'warning');
-                    this.showSettings();
-                    return;
+                    try {
+                        this.showToast('正在自动注册本机...', 'warning');
+                        const deviceName = document.getElementById('settingDeviceName').value.trim() || this.settings.get('deviceName') || '我的桌面电脑';
+                        const result = await this.registerDesktopDeviceFor(serverUrl, deviceName);
+                        token = result.device.token;
+                    } catch (err) {
+                        console.error('Auto register before pairing failed:', err);
+                        this.showToast('自动注册失败: ' + err, 'error');
+                        return;
+                    }
                 }
                 try {
                     const result = await invoke('generate_pairing_code', {
@@ -4272,6 +4743,57 @@
                 }
             }
 
+            async ensureTerminalBackendReady(paneId) {
+                const terminal = this.terminals.get(paneId);
+                if (!terminal) return false;
+                if (terminal.backendReady) return true;
+                return this.recoverTerminalBackend(paneId);
+            }
+
+            async recoverTerminalBackend(paneId, cause) {
+                const terminal = this.terminals.get(paneId);
+                if (!terminal || typeof invoke === 'undefined') return false;
+                const existing = this.backendRecoveryPromises.get(paneId);
+                if (existing) return existing;
+
+                const promise = (async () => {
+                    this.debug('session:recover:start', {
+                        paneId: paneId,
+                        cause: cause ? String(cause) : null
+                    });
+                    terminal.setBackendReady(false);
+                    try {
+                        await this.ensureBackendSession(
+                            paneId,
+                            this.sessionTitleForRecovery(paneId),
+                            terminal.cwd || null
+                        );
+                        const recovered = !!terminal.backendReady;
+                        if (recovered) {
+                            document.getElementById('indicator-' + paneId)?.classList.remove('disconnected');
+                            terminal.focusSoon();
+                        }
+                        this.debug('session:recover:done', {
+                            paneId: paneId,
+                            recovered: recovered
+                        });
+                        return recovered;
+                    } catch (err) {
+                        this.debug('session:recover:failed', {
+                            paneId: paneId,
+                            error: String(err)
+                        });
+                        this.showToast('恢复本地终端失败: ' + err, 'error');
+                        return false;
+                    } finally {
+                        this.backendRecoveryPromises.delete(paneId);
+                    }
+                })();
+
+                this.backendRecoveryPromises.set(paneId, promise);
+                return promise;
+            }
+
             async ensureBackendSession(paneId, title, cwd) {
                 const terminal = this.terminals.get(paneId);
                 if (typeof invoke === 'undefined') {
@@ -4283,7 +4805,7 @@
                     const sessionTitle = title || this.getSessionTitleForPane(paneId) || defaultPaneTitle(paneId);
                     this.debug('session:create', { paneId, title: sessionTitle, shell, cwd });
                     this.ensureSessionActivity(paneId, sessionTitle);
-                    await invoke('create_session', {
+                    const session = await invoke('create_session', {
                         sessionId: this.sessionIdForPane(paneId),
                         cols: 80,
                         rows: 24,
@@ -4291,12 +4813,24 @@
                         shell: shell,
                         cwd: cwd || null
                     });
+                    const nextCwd = (typeof session?.cwd === 'string' && session.cwd.trim())
+                        || cwd
+                        || terminal?.cwd
+                        || null;
+                    const cwdChanged = this.updatePaneAutoMetadata(paneId, {
+                        cwd: nextCwd,
+                        runningProgram: session?.running_program
+                    });
                     if (terminal) {
                         terminal.shell = this.settings.get('shell');
-                        terminal.setWorkingDirectory(cwd || terminal.cwd || null);
+                        if (!cwdChanged) {
+                            terminal.setWorkingDirectory(nextCwd);
+                        }
                         terminal.setBackendReady(true);
+                        document.getElementById('indicator-' + paneId)?.classList.remove('disconnected');
                         terminal.queueResize();
                     }
+                    if (cwdChanged) this.scheduleWorkspaceSave();
                     const sessionId = this.sessionIdForPane(paneId);
                     const state = this.ensureSessionActivity(paneId, sessionTitle);
                     if (!state.preview) {
@@ -4333,6 +4867,7 @@
                     }
                     document.getElementById('splitMenu').classList.remove('visible');
                     document.getElementById('contextMenu').classList.remove('visible');
+                    document.getElementById('tabContextMenu').classList.remove('visible');
                     if (!event.target.closest('.command-library-popover, #commandLibraryBtn') && this.commandLibraryOpen) {
                         this.closeCommandLibrary();
                     }
@@ -4380,16 +4915,18 @@
                 this.nextTabId = Math.max(this.nextTabId, tabId);
                 const rootNode = initPaneId ? this.splitTree.getNode(initPaneId) : this.splitTree.createLeaf();
                 const paneId = rootNode.paneId;
-                const cwd = options.cwd !== undefined
-                    ? options.cwd
-                    : (this.terminals.get(this.activePaneId)?.cwd || null);
+                const cwd = options.cwd !== undefined ? options.cwd : null;
+                const defaultTitle = defaultTabTitle(tabId);
+                const defaultPane = defaultPaneTitle(paneId);
                 this.debug('tab:create', { tabId, paneId, reusedPane: !!initPaneId, cwd });
                 const tab = {
                     id: tabId,
-                    title: normalizeEditableTitle(options.title, defaultTabTitle(tabId)),
+                    title: normalizeEditableTitle(options.title, defaultTitle),
+                    titleMode: 'manual',
                     root: rootNode,
                     panes: new Set([paneId]),
-                    paneTitles: new Map([[paneId, normalizeEditableTitle(options.paneTitle, defaultPaneTitle(paneId))]])
+                    paneTitles: new Map([[paneId, normalizeEditableTitle(options.paneTitle, defaultPane)]]),
+                    paneTitleModes: new Map([[paneId, options.paneTitle ? 'manual' : 'auto']])
                 };
                 this.tabs.set(tabId, tab);
                 this.activeTabId = tabId;
@@ -4489,6 +5026,11 @@
                     el.appendChild(titleEl);
                     el.appendChild(closeEl);
                     el.addEventListener('click', () => this.switchTab(tab.id));
+                    el.addEventListener('contextmenu', (event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        this.showTabContextMenu(event, tab.id);
+                    });
                     tabBar.insertBefore(el, addBtn);
                 }
             }
@@ -4530,6 +5072,7 @@
                 if (tab) {
                     tab.panes.delete(paneId);
                     tab.paneTitles?.delete(paneId);
+                    tab.paneTitleModes?.delete(paneId);
                     tab.root = this.splitTree.root;
                     this.mountTabTerminals(tab);
                     this.syncSessionTitlesForTab(tab);
@@ -4629,7 +5172,12 @@
                 if (newPaneId !== null) {
                     tab.root = this.splitTree.root;
                     tab.panes = new Set(this.splitTree.collectPaneIds(tab.root));
-                    this.setPaneTitleValue(tab, newPaneId, defaultPaneTitle(newPaneId));
+                    this.setPaneTitleValue(
+                        tab,
+                        newPaneId,
+                        deriveAutoPanelTitle(null, sourceTerminal?.cwd, newPaneId),
+                        'auto'
+                    );
                     const terminal = new LocalTerminal(newPaneId, this.settings.get('shell'), {
                         cwd: sourceTerminal?.cwd || null
                     });
@@ -4674,6 +5222,7 @@
                 tab.root = keepNode;
                 tab.panes = new Set([keepPaneId]);
                 tab.paneTitles = new Map([[keepPaneId, this.getPaneTitle(keepPaneId, tab)]]);
+                tab.paneTitleModes = new Map([[keepPaneId, this.getPaneTitleMode(keepPaneId, tab)]]);
                 this.splitTree.setRoot(keepNode);
                 this.splitTree.render();
                 this.mountTabTerminals(tab);
@@ -4688,9 +5237,75 @@
             showContextMenu(event, paneId) {
                 this.contextMenuTarget = paneId;
                 const menu = document.getElementById('contextMenu');
-                menu.style.left = event.clientX + 'px';
-                menu.style.top = event.clientY + 'px';
-                menu.classList.add('visible');
+                document.getElementById('tabContextMenu').classList.remove('visible');
+                this.placeFloatingMenu(menu, event.clientX, event.clientY);
+            }
+
+            createContextMenuItem(label, onClick, options = {}) {
+                const item = document.createElement('div');
+                item.className = 'context-menu-item' + (options.disabled ? ' disabled' : '');
+                const text = document.createElement('span');
+                text.className = 'menu-text';
+                text.textContent = label;
+                item.appendChild(text);
+                if (options.meta) {
+                    const meta = document.createElement('span');
+                    meta.className = 'menu-meta';
+                    meta.textContent = options.meta;
+                    item.appendChild(meta);
+                }
+                if (!options.disabled && onClick) {
+                    item.addEventListener('click', (event) => {
+                        event.stopPropagation();
+                        onClick();
+                    });
+                }
+                return item;
+            }
+
+            createContextMenuSeparator() {
+                const separator = document.createElement('div');
+                separator.className = 'context-menu-separator';
+                return separator;
+            }
+
+            showTabContextMenu(event, tabId) {
+                this.tabContextMenuTarget = tabId;
+                const menu = document.getElementById('tabContextMenu');
+                const tab = this.tabs.get(tabId);
+                if (!menu || !tab) return;
+
+                menu.innerHTML = '';
+                menu.appendChild(this.createContextMenuItem('保存此标签页', () => this.saveTabToHistory(tabId)));
+                menu.appendChild(this.createContextMenuItem('重命名标签页', () => {
+                    menu.classList.remove('visible');
+                    this.startTabTitleEdit(tabId);
+                }));
+                menu.appendChild(this.createContextMenuItem('关闭标签页', () => {
+                    menu.classList.remove('visible');
+                    this.closeTab(tabId);
+                }, { disabled: this.tabs.size <= 1 }));
+                menu.appendChild(this.createContextMenuSeparator());
+
+                const recent = this.savedTabs.slice(0, 8);
+                menu.appendChild(this.createContextMenuItem('从历史记录打开', null, { disabled: true }));
+                if (recent.length === 0) {
+                    menu.appendChild(this.createContextMenuItem('暂无保存记录', null, { disabled: true }));
+                } else {
+                    for (const saved of recent) {
+                        menu.appendChild(this.createContextMenuItem(saved.title, () => this.openSavedTab(saved.id), {
+                            meta: this.formatSavedTabMeta(saved)
+                        }));
+                    }
+                    menu.appendChild(this.createContextMenuSeparator());
+                    menu.appendChild(this.createContextMenuItem('删除最近一条保存记录', () => this.deleteSavedTab(recent[0].id), {
+                        meta: recent[0].title
+                    }));
+                }
+
+                document.getElementById('contextMenu').classList.remove('visible');
+                document.getElementById('splitMenu').classList.remove('visible');
+                this.placeFloatingMenu(menu, event.clientX, event.clientY);
             }
 
             async executeCommand(paneId, command) {
@@ -4710,7 +5325,7 @@
 
             async connect() {
                 const url = (this.settings.get('serverUrl') || '').trim();
-                const token = (this.settings.get('serverToken') || '').trim();
+                let token = (this.settings.get('serverToken') || '').trim();
                 if (this.connectionPending) {
                     this.debug('connection:skip-pending', { url: url });
                     this.showToast('连接请求已经发出，请等待服务器响应', 'warning');
@@ -4719,9 +5334,34 @@
                 this.debug('connection:request', { url, tokenLength: token.length });
                 if (!url) { this.showToast('请输入服务器地址', 'warning'); return; }
                 if (!token) {
-                    this.showToast('请先到设置里注册本机，获取桌面设备 Token 后再连接', 'warning');
-                    this.showSettings();
-                    return;
+                    if (typeof invoke === 'undefined') {
+                        this.showToast('Tauri API 未注入，当前页面不是桌面应用上下文', 'error');
+                        this.debug('connection:invoke-missing');
+                        return;
+                    }
+                    try {
+                        this.updateConnectionStatus('connecting');
+                        this.showToast('首次连接正在自动注册本机...', 'warning');
+                        const result = await this.registerDesktopDeviceFor(
+                            url,
+                            this.settings.get('deviceName') || '我的桌面电脑'
+                        );
+                        token = result.device.token;
+                        this.debug('connection:auto-register-ok', {
+                            url,
+                            deviceId: result.device.id,
+                            tokenLength: token.length
+                        });
+                    } catch (err) {
+                        console.error('Auto register before connect failed:', err);
+                        this.updateConnectionStatus('disconnected');
+                        this.debug('connection:auto-register-failed', {
+                            url,
+                            error: String(err)
+                        });
+                        this.showToast('首次连接自动注册失败: ' + err, 'error');
+                        return;
+                    }
                 }
                 if (typeof invoke === 'undefined') {
                     this.showToast('Tauri API 未注入，当前页面不是桌面应用上下文', 'error');
@@ -4833,11 +5473,29 @@
             setupWindowChrome() {
                 document.body.classList.toggle('windows-custom-frame', this.windowControlsEnabled);
                 const dragRegion = document.getElementById('titlebarDragRegion');
+                const tabBar = document.querySelector('.tab-bar');
                 const controls = document.getElementById('windowControls');
+                this.setupNativeWindowCloseHandler();
                 if (dragRegion) dragRegion.hidden = !this.windowControlsEnabled;
                 if (controls) controls.hidden = !this.windowControlsEnabled;
                 if (!this.windowControlsEnabled) return;
 
+                const beginWindowDrag = (event) => {
+                    if (event.button !== 0 || event.detail > 1) return;
+                    event.preventDefault();
+                    this.invokeWindowCommand('window_start_dragging');
+                };
+                const isInteractiveChromeTarget = (target) => {
+                    if (!(target instanceof Element)) return false;
+                    return !!target.closest(
+                        'button, input, select, textarea, .tab, .tab-bar-actions, .window-controls, .command-library-popover'
+                    );
+                };
+                dragRegion?.addEventListener('mousedown', beginWindowDrag);
+                tabBar?.addEventListener('mousedown', (event) => {
+                    if (event.target !== tabBar && isInteractiveChromeTarget(event.target)) return;
+                    beginWindowDrag(event);
+                });
                 dragRegion?.addEventListener('dblclick', () => {
                     this.toggleWindowMaximize();
                 });
@@ -4861,8 +5519,20 @@
                 this.syncWindowMaximizedState();
             }
 
+            setupNativeWindowCloseHandler() {
+                const currentWindow = typeof getCurrentWindow === 'function' ? getCurrentWindow() : null;
+                if (!currentWindow?.onCloseRequested) return;
+                currentWindow.onCloseRequested(async (event) => {
+                    event.preventDefault();
+                    if (this.windowCloseInProgress) return;
+                    await this.closeWindow();
+                }).catch((error) => {
+                    this.debug('window:close-handler:failed', { error: String(error) });
+                });
+            }
+
             async invokeWindowCommand(command) {
-                if (!this.windowControlsEnabled || typeof invoke === 'undefined') return null;
+                if (typeof invoke === 'undefined') return null;
                 try {
                     return await invoke(command);
                 } catch (error) {
@@ -4904,7 +5574,10 @@
             }
 
             async closeWindow() {
-                await this.invokeWindowCommand('window_close');
+                if (this.windowCloseInProgress) return;
+                this.windowCloseInProgress = true;
+                await this.saveWorkspaceWithLatestSessionMetadata();
+                await this.invokeWindowCommand('window_destroy');
             }
 
             showSettings() {
@@ -4970,6 +5643,16 @@
                 document.getElementById('contextMenu').classList.remove('visible');
                 if (!terminal) return;
                 await terminal.pasteFromClipboard();
+            }
+
+            async pasteClipboardImagePath() {
+                const terminal = this.terminals.get(this.contextMenuTarget || this.activePaneId);
+                document.getElementById('contextMenu')?.classList.remove('visible');
+                if (!terminal) {
+                    this.showToast('没有可粘贴的活动终端', 'warning');
+                    return;
+                }
+                await terminal.pasteClipboardImagePath();
             }
 
             selectAllActiveTerminal() {

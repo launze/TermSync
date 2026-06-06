@@ -8,6 +8,7 @@ import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.JavascriptInterface
 import android.view.ViewGroup
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -29,12 +30,12 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.requiredHeightIn
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -51,12 +52,16 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.South
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Smartphone
 import androidx.compose.material.icons.filled.Terminal
@@ -65,6 +70,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -87,7 +94,6 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -100,12 +106,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
 import com.termsync.mobile.viewmodel.TerminalSession
 import com.termsync.mobile.viewmodel.TerminalDeltaBatch
 import com.termsync.mobile.viewmodel.ConnectionState
@@ -113,10 +123,11 @@ import com.termsync.mobile.viewmodel.CommandLibraryUiState
 import com.termsync.mobile.viewmodel.CommandShortcut
 import com.termsync.mobile.viewmodel.MainViewModel
 import com.termsync.mobile.viewmodel.SpecialKey
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.platform.LocalFocusManager
 
-private const val DEFAULT_SERVER_URL = "wss://nas.smarthome2020.top:7373/ws"
+private const val DEFAULT_SERVER_URL = "wss://8.153.163.104:7373/ws"
 enum class TerminalRenderMode {
     MobileFit,
     DesktopMirror
@@ -224,7 +235,9 @@ fun TTY1App(viewModel: MainViewModel) {
                         onSubmitCommand = { viewModel.submitCommand(it) },
                         onToggleFavoriteCommand = { viewModel.toggleFavoriteCommand(it) },
                         onSendSpecialKey = { viewModel.sendSpecialKey(it) },
+                        onRefreshTerminal = { viewModel.refreshSelectedSessionReplay() },
                         onRequestCloseSession = { viewModel.requestRemoteSessionClose(it) },
+                        onTerminalResize = { cols, rows, force -> viewModel.requestSelectedSessionResize(cols, rows, force) },
                         onDebug = { msg -> viewModel.addDebugLine(msg) },
                         onClose = { viewModel.selectSession(null) }
                     )
@@ -484,35 +497,31 @@ fun QuickStartCard(
         detail = detail,
         containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.52f)
     ) {
+        val primaryIcon = when {
+            !hasToken -> Icons.Default.Smartphone
+            isConnected -> Icons.Default.Refresh
+            else -> Icons.Default.Link
+        }
+        SummaryActionButton(
+            icon = primaryIcon,
+            contentDescription = when {
+                !hasToken -> "注册"
+                isConnected -> "刷新"
+                isConnecting -> "连接中"
+                else -> "连接服务器"
+            },
+            onClick = when {
+                !hasToken -> onRegister
+                isConnected -> onRefresh
+                else -> onConnect
+            },
+            enabled = !isConnecting
+        )
         SummaryActionButton(
             icon = Icons.Default.Settings,
             contentDescription = "设置",
             onClick = onOpenSettings
         )
-        SummaryActionButton(
-            icon = Icons.Default.Smartphone,
-            contentDescription = if (hasToken) "重新注册" else "注册",
-            onClick = onRegister
-        )
-        if (isConnected) {
-            SummaryActionButton(
-                icon = Icons.Default.Refresh,
-                contentDescription = "刷新",
-                onClick = onRefresh
-            )
-            SummaryActionButton(
-                icon = Icons.Default.Close,
-                contentDescription = "断开",
-                onClick = onDisconnect
-            )
-        } else {
-            SummaryActionButton(
-                icon = Icons.Default.Link,
-                contentDescription = if (isConnecting) "连接中" else "连接服务器",
-                onClick = onConnect,
-                enabled = hasToken && !isConnecting
-            )
-        }
     }
 }
 
@@ -537,21 +546,11 @@ fun ConnectedDesktopCard(
         detail = "$connectionLabel · $deviceName",
         containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.44f)
     ) {
-        SummaryActionButton(
-            icon = Icons.Default.Settings,
-            contentDescription = "设置",
-            onClick = onOpenSettings
-        )
         if (isConnected) {
             SummaryActionButton(
                 icon = Icons.Default.Refresh,
                 contentDescription = "刷新",
                 onClick = onRefresh
-            )
-            SummaryActionButton(
-                icon = Icons.Default.Close,
-                contentDescription = "断开",
-                onClick = onDisconnect
             )
         } else {
             SummaryActionButton(
@@ -561,6 +560,11 @@ fun ConnectedDesktopCard(
                 enabled = !isConnecting
             )
         }
+        SummaryActionButton(
+            icon = Icons.Default.Settings,
+            contentDescription = "设置",
+            onClick = onOpenSettings
+        )
     }
 }
 
@@ -575,18 +579,18 @@ private fun HomeSummaryBar(
 ) {
     ElevatedCard(
         colors = CardDefaults.elevatedCardColors(containerColor = containerColor),
-        shape = RoundedCornerShape(14.dp)
+        shape = RoundedCornerShape(8.dp)
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 10.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                .padding(horizontal = 10.dp, vertical = 7.dp),
+            horizontalArrangement = Arrangement.spacedBy(7.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Surface(
-                modifier = Modifier.size(34.dp),
-                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.size(28.dp),
+                shape = RoundedCornerShape(8.dp),
                 color = iconTint.copy(alpha = 0.14f)
             ) {
                 Box(contentAlignment = Alignment.Center) {
@@ -594,7 +598,7 @@ private fun HomeSummaryBar(
                         imageVector = icon,
                         contentDescription = null,
                         tint = iconTint,
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(16.dp)
                     )
                 }
             }
@@ -636,12 +640,12 @@ private fun SummaryActionButton(
     IconButton(
         onClick = onClick,
         enabled = enabled,
-        modifier = Modifier.size(32.dp)
+        modifier = Modifier.size(30.dp)
     ) {
         Icon(
             imageVector = icon,
             contentDescription = contentDescription,
-            modifier = Modifier.size(18.dp)
+            modifier = Modifier.size(17.dp)
         )
     }
 }
@@ -797,18 +801,21 @@ fun TerminalViewScreen(
     onSubmitCommand: (String) -> Unit,
     onToggleFavoriteCommand: (String) -> Unit,
     onSendSpecialKey: (SpecialKey) -> Unit,
+    onRefreshTerminal: () -> Unit,
     onRequestCloseSession: (String) -> Unit,
+    onTerminalResize: (Int, Int, Boolean) -> Unit,
     onDebug: (String) -> Unit,
     onClose: () -> Unit
 ) {
     var input by remember { mutableStateOf("") }
-    var specialKeysExpanded by rememberSaveable(session?.sessionId) { mutableStateOf(false) }
+    var showSpecialKeysDialog by rememberSaveable(session?.sessionId) { mutableStateOf(false) }
     var showCloseSessionDialog by rememberSaveable(session?.sessionId) { mutableStateOf(false) }
     var copyMode by rememberSaveable(session?.sessionId) { mutableStateOf(false) }
     var renderModeName by rememberSaveable(session?.sessionId) { mutableStateOf(TerminalRenderMode.MobileFit.name) }
     var fontScale by rememberSaveable(session?.sessionId) { mutableStateOf(1.0f) }
     var showLayoutControls by rememberSaveable(session?.sessionId) { mutableStateOf(false) }
-    var showCommandLibrary by rememberSaveable(session?.sessionId) { mutableStateOf(true) }
+    var showCommandLibraryDialog by rememberSaveable(session?.sessionId) { mutableStateOf(false) }
+    var showMoreMenu by remember { mutableStateOf(false) }
     var selectedCommandSectionKey by rememberSaveable(session?.sessionId) {
         mutableStateOf(CommandPanelSection.Favorites.key)
     }
@@ -822,54 +829,149 @@ fun TerminalViewScreen(
             .filter { it.isNotBlank() }
             .joinToString(" && ")
     }
-    val currentInputFavorited = remember(normalizedInput, commandLibrary.favorites) {
-        normalizedInput.isNotBlank() && commandLibrary.favorites.any { it.command == normalizedInput }
+    fun submitCurrentInput() {
+        if (input.isNotBlank()) {
+            onSubmitCommand(input)
+            input = ""
+            focusManager.clearFocus()
+        }
     }
-    
+
     val stateVisual = sessionTaskVisual(session, false)
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-        val terminalMinHeight = if (maxHeight > 0.dp) {
-            (maxHeight * 0.42f).coerceAtLeast(220.dp)
-        } else {
-            220.dp
+        val activityText = session?.activity?.ifBlank {
+            session.preview.ifBlank {
+                when (stateVisual.state) {
+                    "completed" -> "任务已完成"
+                    "waiting_input" -> "等待输入"
+                    "running" -> "正在处理终端任务"
+                    "error" -> "终端任务出错"
+                    else -> "等待新的输出"
+                }
+            }
+        }.orEmpty()
+        val overlayStatus = when {
+            terminalStreamStatus.isNotBlank() && terminalStreamStatus != "实时同步中" -> terminalStreamStatus
+            copyMode -> "复制模式已开启，可在终端区域长按后框选复制"
+            else -> ""
         }
-        LaunchedEffect(maxWidth, maxHeight, terminalMinHeight, specialKeysExpanded, copyMode, renderModeName, fontScale, showLayoutControls) {
+        LaunchedEffect(maxWidth, maxHeight, showSpecialKeysDialog, copyMode, renderModeName, fontScale, showLayoutControls, showCommandLibraryDialog) {
             onDebug(
-                "TV_LAYOUT max=${maxWidth.value}x${maxHeight.value}dp termMin=${terminalMinHeight.value}dp keysExpanded=$specialKeysExpanded copyMode=$copyMode mode=$renderModeName fontScale=$fontScale layoutExpanded=$showLayoutControls"
+                "TV_LAYOUT max=${maxWidth.value}x${maxHeight.value}dp keysDialog=$showSpecialKeysDialog copyMode=$copyMode mode=$renderModeName fontScale=$fontScale layoutExpanded=$showLayoutControls commandDialog=$showCommandLibraryDialog"
             )
         }
         Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .imePadding()
+            modifier = Modifier.fillMaxSize()
         ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Row(
-                modifier = Modifier.weight(1f),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f)
             ) {
-                IconButton(onClick = onClose, modifier = Modifier.size(30.dp)) {
-                    Icon(Icons.Default.ArrowBack, contentDescription = "返回", modifier = Modifier.size(18.dp))
-                }
                 Column(
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp)
                 ) {
-                    Text(
-                        text = session?.title ?: "远程终端",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
                     Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            IconButton(onClick = onClose, modifier = Modifier.size(32.dp)) {
+                                Icon(Icons.Default.ArrowBack, contentDescription = "返回", modifier = Modifier.size(20.dp))
+                            }
+                            Text(
+                                text = session?.title ?: "远程终端",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(1.dp)) {
+                            IconButton(onClick = { copyMode = !copyMode }, modifier = Modifier.size(32.dp)) {
+                                Icon(
+                                    Icons.Default.ContentCopy,
+                                    contentDescription = if (copyMode) "退出复制模式" else "进入复制模式",
+                                    modifier = Modifier.size(19.dp),
+                                    tint = if (copyMode) Color(0xFF4CAF50) else MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                            Box {
+                                IconButton(onClick = { showMoreMenu = true }, modifier = Modifier.size(32.dp)) {
+                                    Icon(Icons.Default.MoreVert, contentDescription = "更多", modifier = Modifier.size(20.dp))
+                                }
+                                DropdownMenu(
+                                    expanded = showMoreMenu,
+                                    onDismissRequest = { showMoreMenu = false }
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text(if (replayLoading) "正在刷新" else "刷新输出") },
+                                        leadingIcon = {
+                                            Icon(Icons.Default.Refresh, contentDescription = null)
+                                        },
+                                        onClick = {
+                                            showMoreMenu = false
+                                            onRefreshTerminal()
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("特殊键") },
+                                        leadingIcon = {
+                                            Icon(Icons.Default.Keyboard, contentDescription = null)
+                                        },
+                                        onClick = {
+                                            showMoreMenu = false
+                                            showSpecialKeysDialog = true
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("命令库") },
+                                        leadingIcon = {
+                                            Icon(Icons.Default.Terminal, contentDescription = null)
+                                        },
+                                        onClick = {
+                                            showMoreMenu = false
+                                            showCommandLibraryDialog = true
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("布局与字号") },
+                                        leadingIcon = {
+                                            Icon(Icons.Default.Settings, contentDescription = null)
+                                        },
+                                        onClick = {
+                                            showMoreMenu = false
+                                            showLayoutControls = true
+                                        }
+                                    )
+                                    if (session != null) {
+                                        DropdownMenuItem(
+                                            text = { Text("关闭终端") },
+                                            leadingIcon = {
+                                                Icon(Icons.Default.Delete, contentDescription = null)
+                                            },
+                                            onClick = {
+                                                showMoreMenu = false
+                                                showCloseSessionDialog = true
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 38.dp),
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -882,122 +984,226 @@ fun TerminalViewScreen(
                         Text(
                             text = connLabel,
                             color = connColor,
-                            style = MaterialTheme.typography.labelSmall
+                            style = MaterialTheme.typography.labelSmall,
+                            maxLines = 1
                         )
                         Text(
                             text = stateVisual.label,
                             color = stateVisual.color,
-                            style = MaterialTheme.typography.labelSmall
+                            style = MaterialTheme.typography.labelSmall,
+                            maxLines = 1
+                        )
+                        if (activityText.isNotBlank()) {
+                            Text(
+                                text = activityText,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                style = MaterialTheme.typography.labelSmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
+            }
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .padding(horizontal = 6.dp, vertical = 4.dp)
+            ) {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = Color(0xFF1E1E1E),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    TerminalWebView(
+                        sessionId = session?.sessionId,
+                        output = output,
+                        outputVersion = outputVersion,
+                        terminalDelta = terminalDelta,
+                        desktopCols = session?.cols ?: 80,
+                        desktopRows = session?.rows ?: 24,
+                        renderMode = renderMode,
+                        fontScale = fontScale,
+                        copyMode = copyMode,
+                        onTerminalResize = onTerminalResize,
+                        onDebug = onDebug,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+                if (overlayStatus.isNotBlank()) {
+                    Surface(
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .padding(8.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        color = when {
+                            copyMode -> MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.94f)
+                            replayLoading -> MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.94f)
+                            else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.88f)
+                        }
+                    ) {
+                        Text(
+                            text = overlayStatus,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = when {
+                                copyMode -> MaterialTheme.colorScheme.onTertiaryContainer
+                                replayLoading -> MaterialTheme.colorScheme.onSecondaryContainer
+                                else -> MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                if (session != null) {
-                    IconButton(
-                        onClick = { showCloseSessionDialog = true },
-                        modifier = Modifier.size(30.dp)
-                    ) {
-                        Icon(Icons.Default.Delete, contentDescription = "关闭终端", modifier = Modifier.size(18.dp))
-                    }
-                }
-                IconButton(onClick = { copyMode = !copyMode }, modifier = Modifier.size(30.dp)) {
-                    Icon(
-                        Icons.Default.ContentCopy,
-                        contentDescription = if (copyMode) "退出复制模式" else "进入复制模式",
-                        modifier = Modifier.size(18.dp),
-                        tint = if (copyMode) Color(0xFF4CAF50) else MaterialTheme.colorScheme.onSurface
-                    )
-                }
-                IconButton(onClick = { showLayoutControls = !showLayoutControls }, modifier = Modifier.size(30.dp)) {
-                    Icon(Icons.Default.Settings, contentDescription = "布局与字号", modifier = Modifier.size(18.dp),
-                        tint = if (showLayoutControls) Color(0xFFFF9800) else MaterialTheme.colorScheme.onSurface)
+            
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .imePadding()
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedTextField(
+                    value = input,
+                    onValueChange = { input = it },
+                    modifier = Modifier.weight(1f),
+                    placeholder = { Text("命令") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Text,
+                        imeAction = ImeAction.Send
+                    ),
+                    keyboardActions = KeyboardActions(onSend = { submitCurrentInput() })
+                )
+                Button(
+                    onClick = { submitCurrentInput() },
+                    enabled = input.isNotBlank(),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 0.dp),
+                    modifier = Modifier.height(42.dp)
+                ) {
+                    Icon(Icons.Default.Send, contentDescription = "发送", modifier = Modifier.size(18.dp))
                 }
             }
         }
-        if (session != null) {
-            Text(
-                text = session.activity.ifBlank {
-                    session.preview.ifBlank {
-                        when (stateVisual.state) {
-                            "completed" -> "任务已完成"
-                            "waiting_input" -> "等待输入"
-                            "running" -> "正在处理终端任务"
-                            "error" -> "终端任务出错"
-                            else -> "等待新的输出"
+    }
+
+    if (showSpecialKeysDialog) {
+        AlertDialog(
+            onDismissRequest = { showSpecialKeysDialog = false },
+            title = { Text("特殊键") },
+            text = {
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    maxItemsInEachRow = 4,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    ALL_SPECIAL_KEYS.forEach { (label, key) ->
+                        SpecialKeyButton(label) {
+                            onSendSpecialKey(key)
+                            showSpecialKeysDialog = false
                         }
                     }
-                },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 2.dp),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-        if (terminalStreamStatus.isNotBlank() && terminalStreamStatus != "实时同步中") {
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 2.dp),
-                shape = RoundedCornerShape(10.dp),
-                color = if (replayLoading) {
-                    MaterialTheme.colorScheme.secondaryContainer
-                } else {
-                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
                 }
-            ) {
-                Text(
-                    text = terminalStreamStatus,
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (replayLoading) {
-                        MaterialTheme.colorScheme.onSecondaryContainer
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    }
-                )
+            },
+            confirmButton = {
+                TextButton(onClick = { showSpecialKeysDialog = false }) {
+                    Text("关闭")
+                }
             }
-        }
-        if (showLayoutControls) {
+        )
+    }
+
+    if (showCommandLibraryDialog) {
+        Dialog(
+            onDismissRequest = { showCommandLibraryDialog = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
             Surface(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 2.dp)
-                    .animateContentSize(),
-                shape = RoundedCornerShape(10.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+                    .fillMaxWidth(0.94f)
+                    .fillMaxHeight(0.82f),
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = 6.dp
             ) {
-                Row(
+                Column(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 10.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                        .fillMaxSize()
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Row(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "命令库",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        TextButton(onClick = { showCommandLibraryDialog = false }) {
+                            Text("关闭")
+                        }
+                    }
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(androidx.compose.foundation.rememberScrollState())
+                    ) {
+                        CommandLibraryPanel(
+                            library = commandLibrary,
+                            selectedSectionKey = selectedCommandSectionKey,
+                            expanded = true,
+                            showToggle = false,
+                            onToggleExpanded = {},
+                            onSectionSelected = { selectedCommandSectionKey = it },
+                            onCommandSelected = { shortcut ->
+                                onSubmitCommand(shortcut.command)
+                                input = ""
+                                focusManager.clearFocus()
+                                showCommandLibraryDialog = false
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    if (showLayoutControls) {
+        AlertDialog(
+            onDismissRequest = { showLayoutControls = false },
+            title = { Text("布局与字号") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         TextButton(
                             onClick = { renderModeName = TerminalRenderMode.MobileFit.name },
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                            modifier = Modifier.weight(1f)
                         ) {
                             Text(
-                                text = "手机适配",
+                                text = "阅读流",
                                 color = if (renderMode == TerminalRenderMode.MobileFit) {
                                     MaterialTheme.colorScheme.primary
                                 } else {
                                     MaterialTheme.colorScheme.onSurfaceVariant
-                                },
-                                style = MaterialTheme.typography.labelSmall
+                                }
                             )
                         }
                         TextButton(
                             onClick = { renderModeName = TerminalRenderMode.DesktopMirror.name },
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                            modifier = Modifier.weight(1f)
                         ) {
                             Text(
                                 text = "桌面镜像",
@@ -1005,191 +1211,39 @@ fun TerminalViewScreen(
                                     MaterialTheme.colorScheme.primary
                                 } else {
                                     MaterialTheme.colorScheme.onSurfaceVariant
-                                },
-                                style = MaterialTheme.typography.labelSmall
+                                }
                             )
                         }
                     }
                     Row(
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         TextButton(
-                            onClick = { fontScale = (fontScale - 0.1f).coerceIn(0.7f, 1.6f) },
-                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)
+                            onClick = { fontScale = (fontScale - 0.1f).coerceIn(0.7f, 1.6f) }
                         ) {
-                            Text("A-", style = MaterialTheme.typography.labelSmall)
+                            Text("A-")
                         }
                         Text(
                             text = "${(fontScale * 100).toInt()}%",
-                            style = MaterialTheme.typography.labelSmall,
+                            style = MaterialTheme.typography.titleSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         TextButton(
-                            onClick = { fontScale = (fontScale + 0.1f).coerceIn(0.7f, 1.6f) },
-                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)
+                            onClick = { fontScale = (fontScale + 0.1f).coerceIn(0.7f, 1.6f) }
                         ) {
-                            Text("A+", style = MaterialTheme.typography.labelSmall)
+                            Text("A+")
                         }
                     }
                 }
-            }
-        }
-        if (copyMode) {
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 2.dp),
-                shape = RoundedCornerShape(10.dp),
-                color = MaterialTheme.colorScheme.tertiaryContainer
-            ) {
-                Text(
-                    text = "复制模式已开启，可在终端区域长按后框选复制",
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onTertiaryContainer
-                )
-            }
-        }
-            Surface(
-                modifier = Modifier
-                    .weight(1f)
-                    .requiredHeightIn(min = terminalMinHeight)
-                    .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
-                color = Color(0xFF1E1E1E),
-                shape = RoundedCornerShape(8.dp)
-            ) {
-                TerminalWebView(
-                    sessionId = session?.sessionId,
-                    output = output,
-                    outputVersion = outputVersion,
-                    terminalDelta = terminalDelta,
-                    desktopCols = session?.cols ?: 80,
-                    desktopRows = session?.rows ?: 24,
-                    renderMode = renderMode,
-                    fontScale = fontScale,
-                    copyMode = copyMode,
-                    onDebug = onDebug,
-                    modifier = Modifier.fillMaxSize()
-                )
-            }
-        
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 150.dp)
-                    .padding(horizontal = 8.dp, vertical = 2.dp)
-                    .animateContentSize(),
-                shape = RoundedCornerShape(12.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 6.dp, vertical = 4.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = if (specialKeysExpanded) "特殊键 (${ALL_SPECIAL_KEYS.size})" else "常用特殊键",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    TextButton(
-                        onClick = { specialKeysExpanded = !specialKeysExpanded },
-                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)
-                    ) {
-                        Text(if (specialKeysExpanded) "收起" else "更多")
-                        Icon(
-                            imageVector = if (specialKeysExpanded) {
-                                Icons.Default.KeyboardArrowUp
-                            } else {
-                                Icons.Default.KeyboardArrowDown
-                            },
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
-                }
-                    if (specialKeysExpanded) {
-                        FlowRow(
-                            modifier = Modifier.fillMaxWidth(),
-                            maxItemsInEachRow = 4,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            ALL_SPECIAL_KEYS.forEach { (label, key) ->
-                                SpecialKeyButton(label) { onSendSpecialKey(key) }
-                            }
-                        }
-                    } else {
-                        LazyRow(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            contentPadding = PaddingValues(horizontal = 2.dp)
-                        ) {
-                            items(PRIMARY_SPECIAL_KEYS) { (label, key) ->
-                                SpecialKeyButton(label) { onSendSpecialKey(key) }
-                            }
-                        }
-                    }
+            },
+            confirmButton = {
+                TextButton(onClick = { showLayoutControls = false }) {
+                    Text("完成")
                 }
             }
-
-            CommandLibraryPanel(
-                library = commandLibrary,
-                selectedSectionKey = selectedCommandSectionKey,
-                expanded = showCommandLibrary,
-                onToggleExpanded = { showCommandLibrary = !showCommandLibrary },
-                onSectionSelected = { selectedCommandSectionKey = it },
-                onCommandSelected = { shortcut -> input = shortcut.command }
-            )
-            
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                OutlinedTextField(
-                    value = input,
-                    onValueChange = { input = it },
-                    modifier = Modifier.weight(1f),
-                    placeholder = { Text("输入命令，或点上方预设") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
-                    keyboardActions = KeyboardActions(onDone = {
-                        if (input.isNotBlank()) {
-                            onSubmitCommand(input)
-                            input = ""
-                            focusManager.clearFocus()
-                        }
-                    })
-                )
-                TextButton(
-                    onClick = {
-                        if (normalizedInput.isNotBlank()) {
-                            onToggleFavoriteCommand(normalizedInput)
-                        }
-                    },
-                    enabled = normalizedInput.isNotBlank()
-                ) {
-                    Text(if (currentInputFavorited) "已收藏" else "收藏")
-                }
-                Button(onClick = {
-                    onSubmitCommand(input)
-                    input = ""
-                    focusManager.clearFocus()
-                }, enabled = input.isNotBlank()) {
-                    Icon(Icons.Default.Send, contentDescription = "发送", modifier = Modifier.size(18.dp))
-                }
-            }
-        }
+        )
     }
 
     if (showCloseSessionDialog && session != null) {
@@ -1232,6 +1286,7 @@ private fun CommandLibraryPanel(
     library: CommandLibraryUiState,
     selectedSectionKey: String,
     expanded: Boolean,
+    showToggle: Boolean = true,
     onToggleExpanded: () -> Unit,
     onSectionSelected: (String) -> Unit,
     onCommandSelected: (CommandShortcut) -> Unit
@@ -1278,15 +1333,23 @@ private fun CommandLibraryPanel(
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                TextButton(
-                    onClick = onToggleExpanded,
-                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)
-                ) {
-                    Text(if (expanded) "收起" else "展开")
-                    Icon(
-                        imageVector = if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp)
+                if (showToggle) {
+                    TextButton(
+                        onClick = onToggleExpanded,
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)
+                    ) {
+                        Text(if (expanded) "收起" else "展开")
+                        Icon(
+                            imageVector = if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                } else {
+                    Text(
+                        text = "点一下立即发送执行",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
@@ -1355,7 +1418,7 @@ private fun CommandLibraryPanel(
                 }
 
                 Text(
-                    text = "点一下把命令填入输入框，再点发送",
+                    text = if (showToggle) "点一下把命令填入输入框，再点发送" else "命令会直接发送到当前终端",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -1594,6 +1657,31 @@ fun ConnectionDialog(
     )
 }
 
+private class TerminalAndroidBridge(
+    private val onResize: (Int, Int, Boolean) -> Unit,
+    private val onDebug: (String) -> Unit
+) {
+    private var lastCols = 0
+    private var lastRows = 0
+    private var lastResizeAt = 0L
+
+    @JavascriptInterface
+    fun reportSize(cols: Int, rows: Int, reason: String?) {
+        if (cols < 10 || rows < 4) return
+        val now = System.currentTimeMillis()
+        val changed = cols != lastCols || rows != lastRows
+        val force = reason?.contains("init", ignoreCase = true) == true ||
+            reason?.contains("setRenderMode", ignoreCase = true) == true
+        if (!changed && !force) return
+        if (!force && now - lastResizeAt < 350L) return
+        lastCols = cols
+        lastRows = rows
+        lastResizeAt = now
+        onDebug("WV_REPORT_SIZE cols=$cols rows=$rows reason=${reason.orEmpty()} force=$force")
+        onResize(cols, rows, force)
+    }
+}
+
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun TerminalWebView(
@@ -1606,6 +1694,7 @@ fun TerminalWebView(
     renderMode: TerminalRenderMode,
     fontScale: Float,
     copyMode: Boolean,
+    onTerminalResize: (Int, Int, Boolean) -> Unit,
     onDebug: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -1614,7 +1703,14 @@ fun TerminalWebView(
     // Track the output that was last fully rendered (for session switch / replay detection)
     var lastFullRendered by remember(sessionId) { mutableStateOf("") }
     var lastFullRenderedVersion by remember(sessionId) { mutableStateOf(0L) }
-    val scope = rememberCoroutineScope()
+    var lastAppliedDeltaVersion by remember(sessionId) { mutableStateOf(0L) }
+    var pendingFullRender by remember(sessionId) { mutableStateOf<Pair<String, Long>?>(null) }
+    val bridge = remember(sessionId) {
+        TerminalAndroidBridge(
+            onResize = onTerminalResize,
+            onDebug = onDebug
+        )
+    }
 
     LaunchedEffect(sessionId) {
         onDebug("WV_INIT sid=${sessionId?.take(8)}")
@@ -1636,6 +1732,12 @@ fun TerminalWebView(
         ) { result ->
             onDebug("WV_RENDER_MODE mode=$modeJs fontScale=$fontScale result=$result")
         }
+        listOf(0L, 120L, 400L).forEach { delayMs ->
+            launch {
+                delay(delayMs)
+                webView?.evaluateJavascript("window.termsyncEnsureLayout && window.termsyncEnsureLayout(\"nativeRenderMode.$delayMs\")", null)
+            }
+        }
     }
 
     // Delta streaming: collect batched deltas and push directly to WebView
@@ -1647,13 +1749,40 @@ fun TerminalWebView(
         terminalDelta.collect { batchedDelta ->
             val wv = webView ?: return@collect
             if (batchedDelta.sessionId != activeSessionId) return@collect
-            if (batchedDelta.version <= lastFullRenderedVersion) return@collect
+            if (batchedDelta.version <= lastAppliedDeltaVersion) return@collect
             val b64 = batchedDelta.data.toJsBase64()
-            wv.evaluateJavascript(
-                "window.termsyncAppendBase64(\"$b64\");",
-                null
-            )
+            val result = wv.evaluateJavascriptAwait("window.termsyncAppendBase64(\"$b64\");")
+            if (result.contains("OK")) {
+                lastAppliedDeltaVersion = batchedDelta.version
+            }
+            onDebug("WV_APPEND_RESULT version=${batchedDelta.version} result=$result")
         }
+    }
+
+    LaunchedEffect(output, outputVersion, pageReady, webView) {
+        if (!pageReady || webView == null) return@LaunchedEffect
+        if (output.isEmpty()) return@LaunchedEffect
+        if (output == lastFullRendered && outputVersion == lastFullRenderedVersion) return@LaunchedEffect
+        delay(220)
+        if (outputVersion <= lastAppliedDeltaVersion) return@LaunchedEffect
+        pendingFullRender = output to outputVersion
+    }
+
+    LaunchedEffect(sessionId, pageReady, webView, pendingFullRender) {
+        if (!pageReady || webView == null) return@LaunchedEffect
+        val pending = pendingFullRender ?: return@LaunchedEffect
+        val (pendingOutput, pendingVersion) = pending
+        onDebug("WV_FULL_RENDER out.len=${pendingOutput.length} version=$pendingVersion reason=${if (lastFullRendered.isEmpty()) "initial" else "replay"}")
+        val result = webView?.evaluateJavascriptAwait(
+            "window.termsyncRenderBase64(\"${pendingOutput.toJsBase64()}\");"
+        )
+        lastFullRendered = pendingOutput
+        lastFullRenderedVersion = pendingVersion
+        lastAppliedDeltaVersion = maxOf(lastAppliedDeltaVersion, pendingVersion)
+        if (pendingFullRender == pending) {
+            pendingFullRender = null
+        }
+        onDebug("WV_RENDER_RESULT version=$pendingVersion result=$result")
     }
 
     key(sessionId) {
@@ -1686,6 +1815,7 @@ fun TerminalWebView(
                     webViewClient = object : WebViewClient() {
                         override fun onPageFinished(view: WebView?, url: String?) {
                             onDebug("WV_PAGE_READY sid=${sessionId?.take(8)} desktopCols=$desktopCols desktopRows=$desktopRows mode=${renderMode.name} fontScale=$fontScale")
+                            view?.addJavascriptInterface(bridge, "TermsyncAndroid")
                             view?.evaluateJavascript("window.termsyncHealthCheck ? window.termsyncHealthCheck() : 'NO_HEALTH_CHECK'") { result ->
                                 onDebug("WV_HEALTH: $result")
                             }
@@ -1700,6 +1830,7 @@ fun TerminalWebView(
                     settings.builtInZoomControls = false
                     settings.displayZoomControls = false
                     settings.loadsImagesAutomatically = true
+                    addJavascriptInterface(bridge, "TermsyncAndroid")
                     isVerticalScrollBarEnabled = false
                     isHorizontalScrollBarEnabled = false
                     loadUrl("file:///android_asset/terminal/terminal.html")
@@ -1708,30 +1839,14 @@ fun TerminalWebView(
             },
             update = { view ->
                 webView = view
-                if (!pageReady) return@AndroidView
-                // Full render only when output changes (session switch / replay load).
-                // During streaming, _terminalOutput is NOT updated — all data goes through delta flow.
-                // So this block only fires on infrequent, "big" changes.
-                if (output.isNotEmpty() && (output != lastFullRendered || outputVersion != lastFullRenderedVersion)) {
-                    onDebug("WV_FULL_RENDER out.len=${output.length} version=$outputVersion reason=${if (lastFullRendered.isEmpty()) "initial" else "replay"}")
-                    lastFullRendered = output
-                    lastFullRenderedVersion = outputVersion
-                    view.evaluateJavascript(
-                        "window.termsyncRenderBase64(\"${output.toJsBase64()}\");"
-                    ) { result ->
-                        onDebug("WV_RENDER_RESULT: $result")
-                    }
-                }
             }
         )
     }
 
     LaunchedEffect(sessionId) {
         if (webView != null && pageReady) {
-            scope.launch {
-                delay(16)
-                webView?.evaluateJavascript("window.termsyncFocus();", null)
-            }
+            delay(16)
+            webView?.evaluateJavascript("window.termsyncFocus();", null)
         }
     }
 
@@ -1742,6 +1857,7 @@ fun TerminalWebView(
             pageReady = false
             lastFullRendered = ""
             lastFullRenderedVersion = 0L
+            lastAppliedDeltaVersion = 0L
         }
     }
 }
@@ -1749,6 +1865,15 @@ fun TerminalWebView(
 private fun String.toJsBase64(): String {
     return Base64.encodeToString(toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
 }
+
+private suspend fun WebView.evaluateJavascriptAwait(script: String): String =
+    suspendCancellableCoroutine { continuation ->
+        evaluateJavascript(script) { result ->
+            if (continuation.isActive) {
+                continuation.resume(result ?: "null")
+            }
+        }
+    }
 
 private data class SessionTaskVisual(
     val state: String,

@@ -38,6 +38,8 @@ func GenerateSelfSignedCert(certPath, keyPath string) error {
 		IPAddresses: []net.IP{
 			net.ParseIP("127.0.0.1"),
 			net.ParseIP("0.0.0.0"),
+			net.ParseIP("8.153.163.104"),
+			net.ParseIP("172.23.158.79"),
 		},
 		DNSNames: []string{
 			"localhost",

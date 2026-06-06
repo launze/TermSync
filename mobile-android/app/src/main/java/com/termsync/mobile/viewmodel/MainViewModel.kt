@@ -107,7 +107,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _statusMessage = MutableStateFlow<String>("")
     private val _replayLoading = MutableStateFlow(false)
     private val _terminalStreamStatus = MutableStateFlow("等待进入终端")
-    private val _serverUrl = MutableStateFlow(prefs.getString(KEY_SERVER_URL, "wss://nas.smarthome2020.top:7373/ws") ?: "wss://nas.smarthome2020.top:7373/ws")
+    private val _serverUrl = MutableStateFlow(normalizeSavedServerUrl(prefs.getString(KEY_SERVER_URL, DEFAULT_SERVER_URL)))
     private val _deviceToken = MutableStateFlow(prefs.getString(KEY_DEVICE_TOKEN, "") ?: "")
     private val _deviceName = MutableStateFlow(prefs.getString(KEY_DEVICE_NAME, "我的手机") ?: "我的手机")
     private val _pairedDesktopId = MutableStateFlow(prefs.getString(KEY_PAIRED_DESKTOP_ID, "") ?: "")
@@ -135,10 +135,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val KEY_PAIRED_DESKTOP_NAME = "paired_desktop_name"
         private const val KEY_SESSION_OUTPUT_CACHE = "session_output_cache"
         private const val KEY_COMMAND_LIBRARY = "command_library"
+        private const val DEFAULT_SERVER_URL = "wss://8.153.163.104:7373/ws"
+        private const val LEGACY_DEFAULT_SERVER_URL = "wss://nas.smarthome2020.top:7373/ws"
         private const val RECONNECT_DELAY_MS = 3_000L
         private const val MAX_RECONNECT_DELAY_MS = 60_000L
         /** Batched delta flush interval in ms — controls max render rate (~20fps) */
         private const val DELTA_BATCH_MS = 50L
+
+        private fun normalizeSavedServerUrl(value: String?): String {
+            val normalized = value?.trim().orEmpty()
+            return if (normalized.isBlank() || normalized == LEGACY_DEFAULT_SERVER_URL) {
+                DEFAULT_SERVER_URL
+            } else {
+                normalized
+            }
+        }
     }
 
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
@@ -291,6 +302,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         val version = nextSessionOutputVersion(msg.sessionId)
                         scheduleSessionOutputCacheSave()
                         if (matches) {
+                            _terminalOutput.value = sessionOutputCache[msg.sessionId].orEmpty()
+                            _terminalOutputVersion.value = version
                             // Send raw delta to batching channel — NOT directly to UI
                             _rawDeltaChannel.trySend(
                                 PendingTerminalDelta(
@@ -978,10 +991,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun trimReplay(text: String): String {
         val maxLines = 1_000
         val maxLength = 400_000
+        val normalized = collapseCarriageReturnFrames(text)
         var start = 0
         var lineCount = 0
-        for (index in text.length - 1 downTo 0) {
-            if (text[index] == '\n') {
+        for (index in normalized.length - 1 downTo 0) {
+            if (normalized[index] == '\n') {
                 lineCount += 1
                 if (lineCount >= maxLines) {
                     start = index + 1
@@ -989,8 +1003,55 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
-        val byLines = if (start > 0) text.substring(start) else text
+        val byLines = if (start > 0) normalized.substring(start) else normalized
         return if (byLines.length <= maxLength) byLines else byLines.takeLast(maxLength)
+    }
+
+    private fun collapseCarriageReturnFrames(text: String): String {
+        if (text.indexOf('\r') < 0) return text
+        val lines = mutableListOf<String>()
+        var line = StringBuilder()
+        var overlay = StringBuilder()
+        var overlayMode = false
+        var index = 0
+
+        fun applyOverlay() {
+            if (!overlayMode) return
+            val replacement = overlay.toString()
+            val existing = line.toString()
+            line = StringBuilder(replacement + existing.drop(replacement.length))
+            overlay = StringBuilder()
+            overlayMode = false
+        }
+
+        while (index < text.length) {
+            val ch = text[index]
+            when (ch) {
+                '\r' -> {
+                    if (index + 1 < text.length && text[index + 1] == '\n') {
+                        applyOverlay()
+                        lines.add(line.toString())
+                        line = StringBuilder()
+                        index += 1
+                    } else {
+                        overlayMode = true
+                        overlay = StringBuilder()
+                    }
+                }
+                '\n' -> {
+                    applyOverlay()
+                    lines.add(line.toString())
+                    line = StringBuilder()
+                }
+                else -> {
+                    if (overlayMode) overlay.append(ch) else line.append(ch)
+                }
+            }
+            index += 1
+        }
+        applyOverlay()
+        lines.add(line.toString())
+        return lines.joinToString("\n")
     }
 
     private fun mergeReplayWithLive(replay: String, live: String): String {

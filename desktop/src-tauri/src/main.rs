@@ -59,10 +59,13 @@ fn main() {
             commands::debug_log,
             commands::write_clipboard_text,
             commands::read_clipboard_text,
+            commands::save_clipboard_image_to_screenshots,
             commands::window_minimize,
+            commands::window_start_dragging,
             commands::window_toggle_maximize,
             commands::window_is_maximized,
             commands::window_close,
+            commands::window_destroy,
             commands::proxy_ai_request,
         ])
         .setup(|app| {
@@ -75,10 +78,7 @@ fn main() {
                 #[cfg(target_os = "windows")]
                 {
                     if let Err(err) = window.set_decorations(false) {
-                        log_debug(&format!(
-                            "setup:window-undecorated-failed error={}",
-                            err
-                        ));
+                        log_debug(&format!("setup:window-undecorated-failed error={}", err));
                     } else {
                         log_debug("setup:window-undecorated");
                     }

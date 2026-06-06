@@ -4698,6 +4698,7 @@ dependencies = [
  "base64 0.21.7",
  "chrono",
  "futures",
+ "image",
  "log",
  "parking_lot",
  "portable-pty",
