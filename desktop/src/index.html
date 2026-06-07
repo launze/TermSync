@@ -6,9 +6,13 @@
     <title>TTY1 Terminal</title>
     <link rel="stylesheet" href="./vendor/xterm/xterm.css">
     <style>
+        :root {
+            --ui-font: "Segoe UI Variable", "Microsoft YaHei UI", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+            --terminal-font: "Cascadia Mono", "Cascadia Code", "JetBrains Mono", "Maple Mono", "Sarasa Mono SC", "Microsoft YaHei Mono", "Consolas", "Courier New", monospace;
+        }
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-family: var(--ui-font);
             background-color: #1e1e1e;
             color: #cccccc;
             height: 100vh;
@@ -709,7 +713,7 @@
         .readonly-output {
             background-color: #252526 !important;
             color: #ffffff;
-            font-family: 'Cascadia Code', 'Consolas', monospace;
+            font-family: var(--terminal-font);
         }
         .pairing-code {
             font-size: 20px !important;
@@ -817,7 +821,7 @@
         .ai-panel textarea {
             min-height: 92px;
             resize: vertical;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-family: var(--ui-font);
         }
         .ai-panel textarea:focus,
         .ai-panel select:focus,
@@ -901,7 +905,7 @@
             line-height: 1.55;
             color: #f5f5f5;
             background: #161616;
-            font-family: 'Cascadia Code', 'Consolas', monospace;
+            font-family: var(--terminal-font);
         }
         .ai-empty {
             border: 1px dashed #3c3c3c;
@@ -1342,6 +1346,7 @@
         const XtermFitAddon = window.FitAddon?.FitAddon;
         const XtermWebLinksAddon = window.WebLinksAddon?.WebLinksAddon;
         const IS_WINDOWS_DESKTOP = typeof invoke !== 'undefined' && /\bWindows\b/i.test(navigator.userAgent);
+        const TERMINAL_FONT_FAMILY = '"Cascadia Mono", "Cascadia Code", "JetBrains Mono", "Maple Mono", "Sarasa Mono SC", "Microsoft YaHei Mono", "Consolas", "Courier New", monospace';
         const CONNECTION_STEP_LABELS = {
             address: '服务器',
             identity: '身份',
@@ -2400,7 +2405,7 @@
                     allowTransparency: false,
                     cursorBlink: true,
                     fontSize: normalizeTerminalFontSize(window.app?.settings?.get('fontSize')),
-                    fontFamily: "'Cascadia Code', 'Consolas', 'Courier New', monospace",
+                    fontFamily: TERMINAL_FONT_FAMILY,
                     scrollback: 5000,
                     theme: {
                         background: '#1e1e1e',
