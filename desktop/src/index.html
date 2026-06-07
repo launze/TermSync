@@ -41,19 +41,23 @@
         .tab-strip {
             display: flex;
             align-items: center;
-            flex: 1 1 auto;
+            flex: 0 1 auto;
             min-width: 0;
+            max-width: 100%;
             overflow-x: auto;
         }
         .titlebar-drag-region {
             display: none;
             align-self: stretch;
-            flex: 1 1 96px;
-            min-width: 48px;
+            flex: 1 1 64px;
+            min-width: 24px;
         }
         body.windows-custom-frame .titlebar-drag-region {
             display: block;
             cursor: move;
+        }
+        body.windows-custom-frame .titlebar-drag-region.collapsed {
+            display: none;
         }
         .tab {
             display: flex;
@@ -6129,6 +6133,22 @@
                 if (tabBar) {
                     tabBar.classList.toggle('single-tab', this.tabs.size <= 1);
                 }
+                this.syncTitlebarDragRegion();
+            }
+
+            syncTitlebarDragRegion() {
+                if (!this.windowControlsEnabled) return;
+                const dragRegion = document.getElementById('titlebarDragRegion');
+                const tabBar = document.querySelector('.tab-bar');
+                const tabStrip = document.getElementById('tabBar');
+                const actions = document.querySelector('.tab-bar-actions');
+                const controls = document.getElementById('windowControls');
+                if (!dragRegion || !tabBar || !tabStrip) return;
+
+                const reserved = (actions?.offsetWidth || 0) + (controls?.offsetWidth || 0) + 32;
+                const availableForTabs = Math.max(0, tabBar.clientWidth - reserved);
+                const tabsNeed = tabStrip.scrollWidth;
+                dragRegion.classList.toggle('collapsed', tabsNeed + 40 >= availableForTabs);
             }
 
             setupWindowChrome() {
@@ -6147,7 +6167,6 @@
                     this.toggleWindowMaximize();
                 };
                 dragRegion?.addEventListener('dblclick', handleTitlebarDoubleClick);
-                tabBar?.addEventListener('dblclick', handleTitlebarDoubleClick);
                 document.getElementById('windowMinimizeBtn')?.addEventListener('click', () => {
                     this.minimizeWindow();
                 });
@@ -6163,11 +6182,16 @@
                     }
                     this.windowStateSyncTimer = setTimeout(() => {
                         this.syncWindowMaximizedState();
+                        this.syncTitlebarDragRegion();
                     }, 60);
                 });
                 document.addEventListener('visibilitychange', () => {
-                    if (!document.hidden) this.syncWindowMaximizedState();
+                    if (!document.hidden) {
+                        this.syncWindowMaximizedState();
+                        this.syncTitlebarDragRegion();
+                    }
                 });
+                requestAnimationFrame(() => this.syncTitlebarDragRegion());
                 this.syncWindowMaximizedState();
             }
 
