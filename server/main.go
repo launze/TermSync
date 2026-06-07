@@ -299,6 +299,25 @@ func hostWithoutPort(host string) string {
 }
 
 func platformLabel(name string) string {
+	lower := strings.ToLower(name)
+	if strings.Contains(lower, "linux") {
+		if strings.HasSuffix(lower, ".appimage") {
+			return "Linux AppImage"
+		}
+		if strings.HasSuffix(lower, ".deb") {
+			return "Linux DEB"
+		}
+		return "Linux"
+	}
+	if strings.Contains(lower, "macos") {
+		if strings.Contains(lower, "applesilicon") || strings.Contains(lower, "arm64") {
+			return "macOS Apple Silicon"
+		}
+		if strings.Contains(lower, "intel") || strings.Contains(lower, "x64") {
+			return "macOS Intel"
+		}
+		return "macOS"
+	}
 	ext := filepath.Ext(name)
 	switch ext {
 	case ".apk":
