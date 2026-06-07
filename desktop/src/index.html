@@ -59,6 +59,31 @@
         body.windows-custom-frame .titlebar-drag-region.collapsed {
             display: none;
         }
+        .titlebar-drag-handle {
+            display: none;
+            align-self: stretch;
+            width: 36px;
+            flex: 0 0 36px;
+            align-items: center;
+            justify-content: center;
+            cursor: move;
+            color: #8f8f8f;
+        }
+        body.windows-custom-frame .titlebar-drag-handle {
+            display: inline-flex;
+        }
+        .titlebar-drag-handle:hover {
+            color: #ffffff;
+            background-color: #3c3c3c;
+        }
+        .titlebar-drag-grip {
+            width: 14px;
+            height: 12px;
+            opacity: 0.85;
+            background:
+                radial-gradient(currentColor 1px, transparent 2px) 0 0 / 7px 6px,
+                radial-gradient(currentColor 1px, transparent 2px) 3px 3px / 7px 6px;
+        }
         .tab {
             display: flex;
             align-items: center;
@@ -1078,6 +1103,9 @@
             <button class="tab-icon-btn" onclick="window.app.toggleAiPanel()" title="AI 助手" aria-label="AI 助手">AI</button>
             <button class="tab-icon-btn" id="commandLibraryBtn" onclick="window.app.toggleCommandLibrary(event)" title="命令库" aria-label="命令库">⌘</button>
             <button class="tab-icon-btn" onclick="window.app.showSettings()" title="设置" aria-label="设置">⚙</button>
+        </div>
+        <div class="titlebar-drag-handle" id="titlebarDragHandle" data-tauri-drag-region title="按住拖动窗口，双击最大化/还原" aria-label="拖动窗口" hidden>
+            <span class="titlebar-drag-grip" aria-hidden="true"></span>
         </div>
         <div class="window-controls" id="windowControls" aria-label="窗口控制" hidden>
             <button class="window-control-btn minimize" id="windowMinimizeBtn" title="最小化" aria-label="最小化">
@@ -5147,6 +5175,34 @@
                 this.manualDisconnect = false;
             }
 
+            async refreshServerStatusFromBackend(reason) {
+                if (typeof invoke === 'undefined') return null;
+                try {
+                    const snapshot = await invoke('get_server_status');
+                    this.debug('server:status-snapshot', {
+                        reason: reason || '',
+                        connected: !!snapshot?.connected,
+                        serverUrl: snapshot?.server_url || null,
+                        deviceId: snapshot?.device_id || null
+                    });
+                    if (snapshot?.connected && !this.serverConnected) {
+                        await this.handleServerStatus({
+                            state: 'connected',
+                            server_url: snapshot.server_url || this.settings.get('serverUrl'),
+                            device_id: snapshot.device_id || null,
+                            message: ''
+                        });
+                    }
+                    return snapshot;
+                } catch (err) {
+                    this.debug('server:status-snapshot:failed', {
+                        reason: reason || '',
+                        error: String(err)
+                    });
+                    return null;
+                }
+            }
+
             handleServerMessage(payload) {
                 this.debug('server:message', {
                     type: payload.type,
@@ -6020,12 +6076,21 @@
                     });
                     await invoke('connect_server', { url: url, token: token });
                     this.debug('connection:invoke-sent');
+                    const snapshot = await this.refreshServerStatusFromBackend('connect-invoke-sent');
+                    if (snapshot?.connected || this.serverConnected) {
+                        return;
+                    }
                     this.setConnectionGuide({
                         phase: 'warning',
                         title: '等待服务器认证',
                         detail: '连接请求已发送，正在等待服务器返回认证结果。',
                         steps: { address: 'done', identity: 'done', socket: 'done', auth: 'active' }
                     });
+                    setTimeout(() => {
+                        if (this.connectionPending && !this.serverConnected) {
+                            this.refreshServerStatusFromBackend('connect-auth-wait-timeout');
+                        }
+                    }, 900);
                 } catch (err) {
                     console.error('Connection failed:', err);
                     this.connectionPending = false;
@@ -6154,10 +6219,12 @@
             setupWindowChrome() {
                 document.body.classList.toggle('windows-custom-frame', this.windowControlsEnabled);
                 const dragRegion = document.getElementById('titlebarDragRegion');
+                const dragHandle = document.getElementById('titlebarDragHandle');
                 const tabBar = document.querySelector('.tab-bar');
                 const controls = document.getElementById('windowControls');
                 this.setupNativeWindowCloseHandler();
                 if (dragRegion) dragRegion.hidden = !this.windowControlsEnabled;
+                if (dragHandle) dragHandle.hidden = !this.windowControlsEnabled;
                 if (controls) controls.hidden = !this.windowControlsEnabled;
                 if (!this.windowControlsEnabled) return;
 
@@ -6173,14 +6240,22 @@
                     if (!currentWindow?.startDragging) return;
                     event.preventDefault();
                     try {
+                        if (currentWindow.isMaximized && currentWindow.unmaximize) {
+                            const maximized = await currentWindow.isMaximized();
+                            if (maximized) {
+                                await currentWindow.unmaximize();
+                                this.applyWindowMaximizedState(false);
+                            }
+                        }
                         await currentWindow.startDragging();
                     } catch (error) {
                         this.debug('window:start-dragging:failed', { error: String(error) });
                     }
                 };
                 dragRegion?.addEventListener('dblclick', handleTitlebarDoubleClick);
-                dragRegion?.addEventListener('pointerdown', handleTitlebarDragStart);
                 dragRegion?.addEventListener('mousedown', handleTitlebarDragStart);
+                dragHandle?.addEventListener('dblclick', handleTitlebarDoubleClick);
+                dragHandle?.addEventListener('mousedown', handleTitlebarDragStart);
                 document.getElementById('windowMinimizeBtn')?.addEventListener('click', () => {
                     this.minimizeWindow();
                 });
