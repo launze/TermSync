@@ -6166,7 +6166,21 @@
                     event.preventDefault();
                     this.toggleWindowMaximize();
                 };
+                const handleTitlebarDragStart = async (event) => {
+                    if (event.button !== 0 || event.detail > 1) return;
+                    if (event.target.closest('button, input, select, textarea, .tab, .tab-bar-actions, .window-controls')) return;
+                    const currentWindow = typeof getCurrentWindow === 'function' ? getCurrentWindow() : null;
+                    if (!currentWindow?.startDragging) return;
+                    event.preventDefault();
+                    try {
+                        await currentWindow.startDragging();
+                    } catch (error) {
+                        this.debug('window:start-dragging:failed', { error: String(error) });
+                    }
+                };
                 dragRegion?.addEventListener('dblclick', handleTitlebarDoubleClick);
+                dragRegion?.addEventListener('pointerdown', handleTitlebarDragStart);
+                dragRegion?.addEventListener('mousedown', handleTitlebarDragStart);
                 document.getElementById('windowMinimizeBtn')?.addEventListener('click', () => {
                     this.minimizeWindow();
                 });
