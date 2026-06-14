@@ -261,7 +261,7 @@ func serveLatestRelease(downloadsDir, httpPort string) http.HandlerFunc {
 }
 
 func writeLatestRelease(w http.ResponseWriter, r *http.Request, downloadsDir, httpPort, platform string) {
-	items := listDownloads(downloadsDir, mobileDownloadBaseURL(r, httpPort))
+	items := listDownloads(downloadsDir, releaseDownloadBaseURL(r, httpPort, platform))
 	var latest *downloadItem
 	var latestVersion string
 	for i := range items {
@@ -314,9 +314,18 @@ func matchesReleasePlatform(name, platform string) bool {
 	}
 }
 
-func mobileDownloadBaseURL(r *http.Request, httpPort string) string {
+func releaseDownloadBaseURL(r *http.Request, httpPort, platform string) string {
 	host := hostWithoutPort(r.Host)
-	if host == "" || httpPort == "" {
+	if host == "" {
+		return ""
+	}
+	if platform == "android" || platform == "mobile" {
+		if r.TLS != nil {
+			return "https://" + r.Host
+		}
+		return "http://" + r.Host
+	}
+	if httpPort == "" {
 		return ""
 	}
 	return "http://" + host + ":" + httpPort
