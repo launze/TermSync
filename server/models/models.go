@@ -124,6 +124,7 @@ type SessionSnapshot struct {
 	TaskState string `json:"task_state,omitempty"`
 	Preview   string `json:"preview,omitempty"`
 	Activity  string `json:"activity,omitempty"`
+	Layout    map[string]interface{} `json:"layout,omitempty"`
 }
 
 // SessionListPayload is the payload for session list responses.

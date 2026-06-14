@@ -6,6 +6,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
+import java.io.File
 import java.io.IOException
 import javax.net.ssl.SSLException
 import java.util.concurrent.TimeUnit
@@ -20,6 +21,15 @@ data class RegisteredDevice(
 data class PairingResult(
     val desktopId: String,
     val desktopName: String
+)
+
+data class AppUpdateInfo(
+    val available: Boolean,
+    val versionName: String,
+    val fileName: String,
+    val downloadUrl: String,
+    val size: String,
+    val updatedAt: String
 )
 
 class ApiClient {
@@ -63,6 +73,71 @@ class ApiClient {
             desktopId = pairing.getString("desktop_id"),
             desktopName = pairing.getString("desktop_name")
         )
+    }
+
+    fun getLatestAndroidRelease(serverUrl: String): AppUpdateInfo {
+        val response = getJson(normalizeBaseUrl(serverUrl) + "/api/releases/latest?platform=android")
+        val json = JSONObject(response)
+        return AppUpdateInfo(
+            available = json.optBoolean("available", false),
+            versionName = json.optString("version_name", ""),
+            fileName = json.optString("file_name", ""),
+            downloadUrl = json.optString("download_url", ""),
+            size = json.optString("size", ""),
+            updatedAt = json.optString("updated_at", "")
+        )
+    }
+
+    fun downloadFile(url: String, target: File): Long {
+        val request = Request.Builder()
+            .url(url)
+            .get()
+            .build()
+
+        try {
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    val payload = response.body?.string().orEmpty()
+                    throw IllegalStateException(payload.ifBlank { "HTTP ${response.code}" })
+                }
+                val body = response.body ?: throw IllegalStateException("响应为空")
+                target.parentFile?.mkdirs()
+                target.outputStream().use { output ->
+                    body.byteStream().use { input ->
+                        return input.copyTo(output)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            throw IllegalStateException(
+                "下载失败: ${describeException(e)}",
+                e
+            )
+        }
+    }
+
+    private fun getJson(url: String): String {
+        val request = Request.Builder()
+            .url(url)
+            .get()
+            .build()
+
+        try {
+            httpClient.newCall(request).execute().use { response ->
+                val payload = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    throw IllegalStateException(
+                        payload.ifBlank { "HTTP ${response.code}" }
+                    )
+                }
+                return payload
+            }
+        } catch (e: Exception) {
+            throw IllegalStateException(
+                "请求失败: ${describeException(e)}",
+                e
+            )
+        }
     }
 
     private fun postJson(url: String, body: JSONObject): String {

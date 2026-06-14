@@ -320,11 +320,13 @@ func TestUnsubscribe(t *testing.T) {
 	}
 }
 
-func TestOwnerDisconnectClosesSessions(t *testing.T) {
+func TestOwnerDisconnectKeepsSessionsOfflineAndReactivates(t *testing.T) {
 	sm, cleanup := newTestManager(t)
 	defer cleanup()
 
 	ownerID := "desktop-1"
+	conn := &websocket.Conn{}
+	sm.RegisterConnection(ownerID, "desktop", conn)
 
 	// Create session
 	createMsg := models.Message{
@@ -342,14 +344,38 @@ func TestOwnerDisconnectClosesSessions(t *testing.T) {
 		t.Fatal("Session should exist")
 	}
 
-	// Disconnect owner
-	conn := &websocket.Conn{}
-	sm.RegisterConnection(ownerID, "desktop", conn)
+	// Disconnect owner. The session should remain visible as offline so
+	// transient websocket drops do not clear mobile lists.
 	sm.UnregisterConnection(ownerID, conn)
 
-	// Session should be cleaned up
-	_, ok = sm.GetSessionInfo("sess-disconnect")
-	if ok {
-		t.Error("Session should be cleaned up after owner disconnect")
+	si, ok := sm.GetSessionInfo("sess-disconnect")
+	if !ok {
+		t.Fatal("Session should remain after owner disconnect")
+	}
+	if si.Status != "offline" {
+		t.Fatalf("Expected offline status after disconnect, got %q", si.Status)
+	}
+
+	reconnectConn := &websocket.Conn{}
+	sm.RegisterConnection(ownerID, "desktop", reconnectConn)
+
+	// Re-registering the same session ID after reconnect should reactivate it.
+	createMsg.Payload = map[string]interface{}{
+		"cols":  100.0,
+		"rows":  30.0,
+		"title": "Recovered",
+	}
+	data, _ = json.Marshal(createMsg)
+	_ = sm.HandleMessage(ownerID, data)
+
+	si, ok = sm.GetSessionInfo("sess-disconnect")
+	if !ok {
+		t.Fatal("Session should remain after re-register")
+	}
+	if si.Status != "active" {
+		t.Fatalf("Expected active status after re-register, got %q", si.Status)
+	}
+	if si.Title != "Recovered" || si.Cols != 100 || si.Rows != 30 {
+		t.Fatalf("Expected refreshed metadata, got title=%q size=%dx%d", si.Title, si.Cols, si.Rows)
 	}
 }

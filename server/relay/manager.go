@@ -20,10 +20,11 @@ type SessionInfo struct {
 	Title     string
 	Cols      int
 	Rows      int
-	Status    string // "active" | "closing"
+	Status    string // "active" | "offline" | "closing"
 	TaskState string
 	Preview   string
 	Activity  string
+	Layout    map[string]interface{}
 	Viewers   map[string]bool // deviceID -> true
 	CreatedAt time.Time
 }
@@ -79,14 +80,37 @@ func (sm *SessionManager) RegisterConnection(deviceID, deviceType string, conn *
 		sm.deviceSessions[deviceID] = make(map[string]bool)
 	}
 
+	reactivatedSessions := make([]models.Message, 0)
+	for sessionID := range sm.deviceSessions[deviceID] {
+		if si, ok := sm.sessions[sessionID]; ok && si.OwnerID == deviceID && si.Status == "offline" {
+			si.Status = "active"
+			si.Viewers[deviceID] = true
+			reactivatedSessions = append(reactivatedSessions, models.Message{
+				Type:      string(models.MsgSessionState),
+				SessionID: sessionID,
+				Timestamp: time.Now().Unix(),
+				Payload: map[string]interface{}{
+					"snapshot": sessionSnapshot(sessionID, si),
+				},
+			})
+		}
+	}
+
 	// Update online status in database
 	ctx := context.Background()
 	sm.store.SetOnline(ctx, deviceID)
 
 	log.Printf("[conn] Device %s (%s) connected (total: %d)", deviceID, deviceType, len(sm.deviceConnections))
+
+	go func() {
+		for _, msg := range reactivatedSessions {
+			sm.notifyPairedMobiles(deviceID, msg)
+		}
+	}()
 }
 
-// UnregisterConnection removes a WebSocket connection and cleans up all owned sessions.
+// UnregisterConnection removes a WebSocket connection. Owned sessions are kept
+// in memory as offline so a short network drop does not look like terminal loss.
 func (sm *SessionManager) UnregisterConnection(deviceID string, conn *websocket.Conn) {
 	sm.mu.Lock()
 
@@ -99,27 +123,14 @@ func (sm *SessionManager) UnregisterConnection(deviceID string, conn *websocket.
 	delete(sm.deviceConnections, deviceID)
 	delete(sm.deviceTypes, deviceID)
 
-	// Collect sessions to close and remove them from the map atomically
-	sessionsToClose := make([]string, 0)
-	viewerSnapshots := make(map[string][]string) // sessionID -> viewer list for notification
+	// Mark owned sessions offline instead of closing them. The desktop can
+	// reactivate the same session IDs after a reconnect.
 	for sessionID := range sm.deviceSessions[deviceID] {
 		if si, ok := sm.sessions[sessionID]; ok {
-			si.Status = "closed"
-			sessionsToClose = append(sessionsToClose, sessionID)
-			// Snapshot the viewer set before deleting
-			viewers := make([]string, 0, len(si.Viewers))
-			for vid := range si.Viewers {
-				if vid != deviceID {
-					viewers = append(viewers, vid)
-				}
-			}
-			viewerSnapshots[sessionID] = viewers
-			delete(sm.sessions, sessionID)
+			si.Status = "offline"
+			delete(si.Viewers, deviceID)
 		}
 	}
-
-	// Close all sessions owned by this device
-	delete(sm.deviceSessions, deviceID)
 
 	// Remove this device from all viewer sets of sessions it didn't own
 	for _, si := range sm.sessions {
@@ -135,22 +146,6 @@ func (sm *SessionManager) UnregisterConnection(deviceID string, conn *websocket.
 
 	// Release lock before broadcasting to avoid deadlock
 	sm.mu.Unlock()
-
-	// Notify remaining viewers and persist status (outside lock, using snapshots)
-	for _, sessionID := range sessionsToClose {
-		sm.store.UpdateSessionStatus(context.Background(), sessionID, "closed")
-		closeMsg := models.Message{
-			Type:      string(models.MsgSessionClose),
-			SessionID: sessionID,
-			Timestamp: time.Now().Unix(),
-			Payload: map[string]interface{}{
-				"reason": "owner_disconnected",
-			},
-		}
-		for _, vid := range viewerSnapshots[sessionID] {
-			sm.sendToDevice(vid, closeMsg)
-		}
-	}
 
 	log.Printf("[conn] Device %s disconnected (remaining: %d)", deviceID, remaining)
 }
@@ -240,8 +235,33 @@ func (sm *SessionManager) handleSessionCreate(deviceID string, msg models.Messag
 	if existing, exists := sm.sessions[msg.SessionID]; exists {
 		// If the same owner re-creates, treat as idempotent (reconnect scenario)
 		if existing.OwnerID == deviceID {
+			cols := existing.Cols
+			rows := existing.Rows
+			if c, ok := numField(msg.Payload, "cols"); ok {
+				cols = int(c)
+			}
+			if r, ok := numField(msg.Payload, "rows"); ok {
+				rows = int(r)
+			}
+			existing.Title = strField(msg.Payload, "title", existing.Title)
+			existing.Cols = cols
+			existing.Rows = rows
+			existing.Status = "active"
+			existing.Viewers[deviceID] = true
+			if layout := objectField(msg.Payload, "layout"); layout != nil {
+				existing.Layout = layout
+			}
+			snapshot := sessionSnapshot(msg.SessionID, existing)
 			sm.mu.Unlock()
-			log.Printf("[session] %s re-registered by same owner %s (idempotent)", msg.SessionID, deviceID)
+			sm.notifyPairedMobiles(deviceID, models.Message{
+				Type:      string(models.MsgSessionState),
+				SessionID: msg.SessionID,
+				Timestamp: time.Now().Unix(),
+				Payload: map[string]interface{}{
+					"snapshot": snapshot,
+				},
+			})
+			log.Printf("[session] %s re-registered by same owner %s (reactivated)", msg.SessionID, deviceID)
 			return nil
 		}
 		sm.mu.Unlock()
@@ -258,6 +278,7 @@ func (sm *SessionManager) handleSessionCreate(deviceID string, msg models.Messag
 		rows = int(r)
 	}
 	title := strField(msg.Payload, "title", "Terminal")
+	layout := objectField(msg.Payload, "layout")
 
 	si := &SessionInfo{
 		OwnerID:   deviceID,
@@ -267,6 +288,7 @@ func (sm *SessionManager) handleSessionCreate(deviceID string, msg models.Messag
 		Status:    "active",
 		TaskState: "idle",
 		Activity:  "终端已就绪",
+		Layout:    layout,
 		Viewers:   make(map[string]bool),
 		CreatedAt: time.Now(),
 	}
@@ -337,6 +359,9 @@ func (sm *SessionManager) handleSessionUpdate(deviceID string, msg models.Messag
 	}
 	if taskState, ok := optionalStrField(msg.Payload, "task_state"); ok {
 		si.TaskState = taskState
+	}
+	if layout, ok := optionalObjectField(msg.Payload, "layout"); ok {
+		si.Layout = layout
 	}
 
 	snapshot := sessionSnapshot(msg.SessionID, si)
@@ -973,9 +998,6 @@ func (sm *SessionManager) listSessionSnapshotsForDevice(deviceID string) ([]mode
 
 	snapshots := make([]models.SessionSnapshot, 0, len(sm.sessions))
 	for sid, si := range sm.sessions {
-		if si.Status != "active" {
-			continue
-		}
 		if deviceType == "mobile" && !allowedOwners[si.OwnerID] {
 			continue
 		}
@@ -1024,6 +1046,31 @@ func optionalStrField(payload map[string]interface{}, key string) (string, bool)
 	return str, true
 }
 
+func objectField(payload map[string]interface{}, key string) map[string]interface{} {
+	if value, ok := optionalObjectField(payload, key); ok {
+		return value
+	}
+	return nil
+}
+
+func optionalObjectField(payload map[string]interface{}, key string) (map[string]interface{}, bool) {
+	if payload == nil {
+		return nil, false
+	}
+	value, exists := payload[key]
+	if !exists {
+		return nil, false
+	}
+	if value == nil {
+		return nil, true
+	}
+	obj, ok := value.(map[string]interface{})
+	if !ok {
+		return nil, false
+	}
+	return obj, true
+}
+
 func sessionSnapshot(sessionID string, si *SessionInfo) models.SessionSnapshot {
 	return models.SessionSnapshot{
 		SessionID: sessionID,
@@ -1035,5 +1082,6 @@ func sessionSnapshot(sessionID string, si *SessionInfo) models.SessionSnapshot {
 		TaskState: si.TaskState,
 		Preview:   si.Preview,
 		Activity:  si.Activity,
+		Layout:    si.Layout,
 	}
 }

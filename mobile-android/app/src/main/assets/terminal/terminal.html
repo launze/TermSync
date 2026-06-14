@@ -31,11 +31,11 @@
       position: absolute;
       inset: 0;
       margin: 0;
-      padding: 12px 14px 18px;
+      padding: 10px 10px 18px;
       box-sizing: border-box;
       overflow: auto;
-      background: #1e1e1e;
-      color: #d4d4d4;
+      background: #111315;
+      color: #d8dee9;
       font: 14px/1.55 'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
       overflow-wrap: anywhere;
       word-break: break-word;
@@ -46,8 +46,29 @@
     }
 
     .reader-block {
-      margin: 0 0 10px;
+      margin: 0 0 8px;
       white-space: pre-wrap;
+    }
+
+    .reader-head {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin: -10px -10px 8px;
+      padding: 7px 10px;
+      border-bottom: 1px solid #252b31;
+      background: rgba(17, 19, 21, 0.96);
+      color: #9aa4af;
+      font: 12px/1.2 'Segoe UI', system-ui, sans-serif;
+      backdrop-filter: blur(8px);
+    }
+
+    .reader-head strong {
+      color: #e5e7eb;
+      font-weight: 650;
     }
 
     .reader-block:last-child {
@@ -57,10 +78,10 @@
     .reader-command,
     .reader-code,
     .reader-diff {
-      border: 1px solid #3c3c3c;
+      border: 1px solid #343b43;
       border-radius: 8px;
-      background: #151515;
-      padding: 9px 10px;
+      background: #171a1f;
+      padding: 8px 9px;
       font-family: 'Cascadia Code', 'Consolas', 'Courier New', monospace;
       font-size: 0.92em;
       line-height: 1.45;
@@ -72,33 +93,41 @@
     }
 
     .reader-command {
-      border-color: #315f58;
-      background: #12211f;
+      border-color: #2f6259;
+      background: #10201e;
       color: #b9efe3;
     }
 
     .reader-status {
-      display: inline-block;
+      display: block;
       border: 1px solid #4a4634;
-      border-radius: 999px;
-      background: #232115;
+      border-radius: 8px;
+      background: #211f14;
       color: #ffdc8a;
-      padding: 4px 9px;
+      padding: 8px 10px;
       font-size: 0.9em;
       white-space: normal;
     }
 
     .reader-tool {
-      border: 1px solid #38475f;
+      border: 1px solid #34455f;
       border-radius: 8px;
-      background: #151b25;
-      padding: 9px 10px;
+      background: #131923;
+      padding: 8px 9px;
     }
 
     .reader-tool-title {
       color: #9cdcfe;
       font-weight: 600;
       margin-bottom: 5px;
+      font-size: 0.9em;
+    }
+
+    .reader-md {
+      border: 1px solid #2b3138;
+      border-radius: 8px;
+      background: #171a1f;
+      padding: 8px 10px;
     }
 
     .reader-md h3 {
@@ -128,18 +157,24 @@
       display: flex;
       justify-content: flex-end;
       gap: 6px;
-      margin-bottom: 6px;
+      margin-bottom: 5px;
       user-select: none;
       -webkit-user-select: none;
     }
 
     .reader-action {
-      border: 1px solid #4b5565;
+      border: 1px solid #46515f;
       border-radius: 999px;
-      background: #222834;
-      color: #d8dee9;
+      background: #202732;
+      color: #e5e7eb;
       font: 12px/1.2 'Segoe UI', system-ui, sans-serif;
-      padding: 4px 8px;
+      padding: 5px 9px;
+    }
+
+    .reader-action.primary {
+      border-color: #2f6259;
+      background: #14332e;
+      color: #b9efe3;
     }
 
     .reader-diff-add { color: #7ee787; }
@@ -224,8 +259,8 @@
     var writeCount = 0;
     var readerBuffer = "";
     var readerFlushTimer = null;
-    var readerMaxLines = 1200;
-    var readerMaxChars = 500000;
+    var readerMaxLines = 1600;
+    var readerMaxChars = 240000;
     var terminalMirrorBuffer = "";
     var terminalMirrorMaxChars = 500000;
     var fallbackBuffer = "";
@@ -238,9 +273,9 @@
     var boundViewport = null;
     var followOutput = true;
     var FALLBACK_SYNC_DEBOUNCE_MS = 280;
-    var FALLBACK_MAX_LINES = 1000;
-    var INITIAL_RENDER_MAX_CHARS = 200000;
-    var INITIAL_RENDER_MAX_LINES = 1000;
+    var FALLBACK_MAX_LINES = 2400;
+    var INITIAL_RENDER_MAX_CHARS = 800000;
+    var INITIAL_RENDER_MAX_LINES = 3000;
     var DEFAULT_FONT_SIZE = 13;
     var LAYOUT_REFIT_DELAYS_MS = [0, 80, 240, 600];
     var renderMode = "mobile-fit";
@@ -283,6 +318,13 @@
         fallbackEl.style.pointerEvents = "none";
       }
       reportScrollAtBottom(true);
+    }
+
+    function resetReaderFlush() {
+      if (readerFlushTimer) {
+        clearTimeout(readerFlushTimer);
+        readerFlushTimer = null;
+      }
     }
 
     function applyReaderFont() {
@@ -507,7 +549,7 @@
       var sendPayload = attrPayload(sendText || "");
       return "<div class=\"reader-toolbar\">" +
         "<button class=\"reader-action\" data-action=\"copy\" data-payload=\"" + copyPayload + "\">复制</button>" +
-        (sendText ? "<button class=\"reader-action\" data-action=\"send\" data-payload=\"" + sendPayload + "\">发送</button>" : "") +
+        (sendText ? "<button class=\"reader-action primary\" data-action=\"send\" data-payload=\"" + sendPayload + "\">再次发送</button>" : "") +
         "</div>";
     }
 
@@ -559,7 +601,7 @@
     function blockTypeFor(lines) {
       var sample = lines.join("\n");
       var first = (lines[0] || "").trim();
-      if (/(apply_patch|shell_command|tool_use|cargo check|gradlew|assembleDebug|npm |pnpm |pytest|vitest|playwright|git diff|git status)/i.test(sample)) {
+      if (/(apply_patch|shell_command|tool_use|cargo check|cargo test|go test|gradlew|assembleDebug|assembleRelease|npm |pnpm |pytest|vitest|playwright|git diff|git status|rg |ripgrep|powershell|cmd\.exe)/i.test(sample)) {
         return "tool";
       }
       if (/^(\$|>|#)\s+\S+/.test(first) || /^PS [^>]+>\s+/.test(first) || /^[\w.-]+@[\w.-]+:[^$#>]*[$#]\s+/.test(first)) {
@@ -571,7 +613,7 @@
       if (/```/.test(sample) || /^(\s{2,}|\t)*(function |class |const |let |var |import |export |def |fun |if \(|for \(|while \(|return |<\/?[a-z][^>]*>)/m.test(sample)) {
         return "code";
       }
-      if (/(waiting for input|press enter|enter to continue|select an option|y\/n|password|token|验证码|配对码|继续\?|是否继续|任务已完成|build successful|finished|completed|done|error|failed|permission denied)/i.test(sample)) {
+      if (/(waiting for input|press enter|enter to continue|select an option|y\/n|password|token|验证码|配对码|继续\?|是否继续|需要确认|等待确认|任务已完成|build successful|build failed|tests? passed|tests? failed|finished|completed|done|error|failed|permission denied|blocked)/i.test(sample)) {
         return "status";
       }
       return "text";
@@ -642,6 +684,7 @@
       if (!readerEl) return;
       var shouldFollow = typeof autoScroll === "boolean" ? autoScroll : isNearBottomEl(readerEl);
       var blocks = splitReaderBlocks(readerBuffer);
+      var header = "<div class=\"reader-head\"><strong>Codex 阅读流</strong><span>" + blocks.length + " 段输出</span></div>";
       var html = blocks.map(function(block) {
         var body = block.lines.join("\n");
         if (block.type === "diff") {
@@ -663,7 +706,7 @@
         }
         return "<div class=\"reader-block reader-md\">" + readerToolbar(body, false) + renderMarkdownHtml(block.lines) + "</div>";
       }).join("");
-      readerEl.innerHTML = html || "";
+      readerEl.innerHTML = header + (html || "");
       if (shouldFollow) readerEl.scrollTop = readerEl.scrollHeight;
       reportScrollAtBottom(true);
     }
@@ -722,11 +765,25 @@
         if (terminalMirrorBuffer) {
           term.write(terminalMirrorBuffer, function() {
             refreshTerminal();
-            term.scrollToBottom();
+            if (followOutput || isNearBottomEl(boundViewport || document.querySelector(".xterm-viewport"))) {
+              term.scrollToBottom();
+              followOutput = true;
+            }
           });
         }
       } catch (e) {
         console.error("REBUILD_TERMINAL_ERR: " + e.message);
+      }
+    }
+
+    function rebuildReaderFromMirror(autoScroll) {
+      resetReaderFlush();
+      try {
+        readerBuffer = terminalTextToPlain(trimInitialRenderText(terminalMirrorBuffer || ""), "");
+        readerBuffer = trimReaderBuffer(readerBuffer);
+        flushReader(typeof autoScroll === "boolean" ? autoScroll : true);
+      } catch (e) {
+        console.error("REBUILD_READER_ERR: " + e.message);
       }
     }
 
@@ -736,16 +793,19 @@
     }
 
     function scheduleReaderFlush(autoScroll) {
+      if (!isReaderMode()) return;
       if (readerFlushTimer) return;
       readerFlushTimer = setTimeout(function() {
         readerFlushTimer = null;
+        if (!isReaderMode()) return;
         flushReader(autoScroll);
       }, 90);
     }
 
     function writeReader(data, mode, shouldFollowOutput) {
       if (!readerEl) return "ERR:no_reader";
-      var shouldFollow = mode === "render" || !!shouldFollowOutput || isNearBottomEl(readerEl);
+      var wasAtBottom = isNearBottomEl(readerEl);
+      var shouldFollow = mode === "render" || !!shouldFollowOutput || wasAtBottom;
       if (mode === "render") {
         readerBuffer = terminalTextToPlain(trimInitialRenderText(data || ""), "");
       } else if (data) {
@@ -1169,7 +1229,7 @@
           cursorBlink: true,
           fontSize: DEFAULT_FONT_SIZE,
           fontFamily: "'Cascadia Code', 'Consolas', 'Courier New', monospace",
-          scrollback: 5000,
+          scrollback: 10000,
           theme: {
             background: "#1e1e1e",
             foreground: "#cccccc",
@@ -1265,7 +1325,7 @@
     window.termsyncAppend = function(data) {
       if (!data) return "OK:empty";
       bindViewportTracking();
-      return writeTerminal(data, "append", isNearBottom());
+      return writeTerminal(data, "append", followOutput && isNearBottom());
     };
 
     window.termsyncRenderBase64 = function(base64) {
@@ -1309,6 +1369,7 @@
     };
 
     window.termsyncSetRenderMode = function(mode, scale, desktopCols, desktopRows) {
+      var previousMode = renderMode;
       renderMode = mode === "desktop-mirror" ? "desktop-mirror" : "mobile-fit";
       fontScale = clampFontScale(scale);
       targetDesktopCols = desktopCols > 0 ? desktopCols : targetDesktopCols;
@@ -1323,6 +1384,9 @@
       }
 
       try {
+        if (previousMode !== "mobile-fit") {
+          rebuildReaderFromMirror(true);
+        }
         flushReader(isNearBottomEl(readerEl));
         return JSON.stringify({
           ok: true,

@@ -315,9 +315,7 @@ impl PtyManager {
             .collect();
 
         let mut system = System::new();
-        system.refresh_processes_specifics(
-            ProcessRefreshKind::new().with_cwd(UpdateKind::Always),
-        );
+        system.refresh_processes_specifics(ProcessRefreshKind::new().with_cwd(UpdateKind::Always));
 
         sessions
             .into_iter()
@@ -397,7 +395,9 @@ impl PtyManager {
     fn is_descendant_process(system: &System, pid: Pid, ancestor_pid: Pid) -> bool {
         let mut current_pid = pid;
         for _ in 0..32 {
-            let Some(parent_pid) = system.process(current_pid).and_then(|process| process.parent())
+            let Some(parent_pid) = system
+                .process(current_pid)
+                .and_then(|process| process.parent())
             else {
                 return false;
             };
@@ -653,7 +653,10 @@ mod tests {
             Some("E:\\Work\\Code\\tty1\\desktop\\src-tauri".to_string()),
         );
 
-        assert_eq!(cwd.as_deref(), Some("E:\\Work\\Code\\tty1\\desktop\\src-tauri"));
+        assert_eq!(
+            cwd.as_deref(),
+            Some("E:\\Work\\Code\\tty1\\desktop\\src-tauri")
+        );
     }
 
     #[test]

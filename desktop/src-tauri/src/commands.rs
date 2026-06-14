@@ -10,10 +10,10 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Serialize;
 use serde_json::{json, Value};
 use sysinfo::System;
-use tauri::{command, AppHandle, State};
+use tauri::{command, AppHandle, Manager, State};
 use uuid::Uuid;
 
-use crate::api_client::{self, PairingCodeResponse, RegisterDeviceResponse};
+use crate::api_client::{self, PairingCodeResponse, RegisterDeviceResponse, ReleaseInfo};
 use crate::pty_manager::{PtyManager, SessionDescriptor};
 use crate::wss_client::{ServerStatusSnapshot, WssClientState};
 
@@ -71,6 +71,7 @@ pub async fn create_session(
     title: Option<String>,
     shell: Option<String>,
     cwd: Option<String>,
+    layout: Option<Value>,
 ) -> Result<SessionDescriptor, String> {
     let session_id = session_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let title = title.unwrap_or_else(|| "Terminal".to_string());
@@ -91,7 +92,7 @@ pub async fn create_session(
     // 检查WebSocket连接状态，如果已连接则发送会话创建消息
     if wss_state.is_connected() {
         let result = wss_state
-            .send_session_create(&session.session_id, &session.title, cols, rows)
+            .send_session_create(&session.session_id, &session.title, cols, rows, layout.clone())
             .await;
         if let Err(e) = result {
             log::warn!("Failed to send session create: {}", e);
@@ -231,6 +232,7 @@ pub async fn update_session_meta(
     activity: Option<String>,
     preview: Option<String>,
     task_state: Option<String>,
+    layout: Option<Value>,
     state: State<'_, WssClientState>,
     pty_manager: State<'_, PtyManager>,
 ) -> Result<String, String> {
@@ -260,6 +262,7 @@ pub async fn update_session_meta(
                 activity.as_deref(),
                 preview.as_deref(),
                 task_state.as_deref(),
+                layout,
             )
             .await?;
     }
@@ -279,6 +282,7 @@ pub async fn sync_active_sessions(
                 &session.title,
                 session.cols,
                 session.rows,
+                None,
             )
             .await?;
     }
@@ -334,6 +338,129 @@ pub async fn generate_pairing_code(
     api_client::generate_pairing_code(server_url, token).await
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct DesktopUpdateResponse {
+    pub current_version: String,
+    pub latest: ReleaseInfo,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DownloadedUpdate {
+    pub file_path: String,
+    pub file_name: String,
+    pub size_bytes: u64,
+}
+
+#[command]
+pub async fn check_desktop_update(server_url: String) -> Result<DesktopUpdateResponse, String> {
+    let latest = api_client::fetch_latest_release(server_url, "desktop").await?;
+    Ok(DesktopUpdateResponse {
+        current_version: env!("CARGO_PKG_VERSION").to_string(),
+        latest,
+    })
+}
+
+#[command]
+pub async fn download_desktop_update(
+    app: AppHandle,
+    url: String,
+    file_name: String,
+) -> Result<DownloadedUpdate, String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Err("download url is required".to_string());
+    }
+    let safe_file_name = safe_download_file_name(&file_name);
+    let updates_dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|error| format!("无法定位缓存目录: {error}"))?
+        .join("updates");
+    fs::create_dir_all(&updates_dir)
+        .map_err(|error| format!("创建更新目录失败 {}: {error}", updates_dir.display()))?;
+    let target = updates_dir.join(&safe_file_name);
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(300))
+        .build()
+        .map_err(|error| format!("创建下载客户端失败: {error}"))?;
+    let bytes = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| format!("下载更新失败: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("下载更新失败: {error}"))?
+        .bytes()
+        .await
+        .map_err(|error| format!("读取更新文件失败: {error}"))?;
+    fs::write(&target, &bytes)
+        .map_err(|error| format!("保存更新文件失败 {}: {error}", target.display()))?;
+
+    Ok(DownloadedUpdate {
+        file_path: target.to_string_lossy().to_string(),
+        file_name: safe_file_name,
+        size_bytes: bytes.len() as u64,
+    })
+}
+
+#[command]
+pub fn install_desktop_update(path: String) -> Result<String, String> {
+    let path = PathBuf::from(path.trim());
+    if !path.exists() {
+        return Err("更新安装包不存在，请重新下载".to_string());
+    }
+    open_path(&path)?;
+    Ok("Installer opened".to_string())
+}
+
+fn safe_download_file_name(value: &str) -> String {
+    let trimmed = value.trim();
+    let fallback = "termsync-desktop-update";
+    let name = if trimmed.is_empty() { fallback } else { trimmed };
+    name.chars()
+        .map(|ch| match ch {
+            '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            _ if ch.is_control() => '_',
+            _ => ch,
+        })
+        .collect()
+}
+
+fn open_path(path: &PathBuf) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "Start-Process -LiteralPath $args[0]",
+                &path.to_string_lossy(),
+            ])
+            .spawn()
+            .map_err(|error| format!("打开安装包失败: {error}"))?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(path)
+            .spawn()
+            .map_err(|error| format!("打开安装包失败: {error}"))?;
+        return Ok(());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .map_err(|error| format!("打开安装包失败: {error}"))?;
+        return Ok(());
+    }
+}
+
 #[command]
 pub fn debug_log(message: String) -> Result<String, String> {
     crate::log_debug(&format!("frontend:{message}"));
@@ -372,12 +499,8 @@ pub fn save_clipboard_image_to_screenshots() -> Result<String, String> {
         .map_err(|error| format!("剪贴板中没有可保存的图片: {error}"))?;
 
     let dir = screenshots_dir()?;
-    fs::create_dir_all(&dir).map_err(|error| {
-        format!(
-            "创建截图目录失败 {}: {error}",
-            dir.to_string_lossy()
-        )
-    })?;
+    fs::create_dir_all(&dir)
+        .map_err(|error| format!("创建截图目录失败 {}: {error}", dir.to_string_lossy()))?;
 
     let file_name = format!(
         "tty1_clipboard_{}.png",
@@ -432,6 +555,22 @@ pub fn window_is_maximized(window: tauri::WebviewWindow) -> Result<bool, String>
     window
         .is_maximized()
         .map_err(|error| format!("读取窗口状态失败: {error}"))
+}
+
+#[command]
+pub fn window_start_dragging(window: tauri::WebviewWindow) -> Result<String, String> {
+    let maximized = window
+        .is_maximized()
+        .map_err(|error| format!("读取窗口状态失败: {error}"))?;
+    if maximized {
+        window
+            .unmaximize()
+            .map_err(|error| format!("窗口还原失败: {error}"))?;
+    }
+    window
+        .start_dragging()
+        .map_err(|error| format!("启动窗口拖动失败: {error}"))?;
+    Ok("Window dragging started".to_string())
 }
 
 #[command]

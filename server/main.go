@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/tls"
 	_ "embed"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"log"
@@ -90,6 +91,8 @@ func main() {
 	// Routes
 	r.Get("/", serveHome(downloadsDir, httpPort))
 	r.Handle("/downloads/*", http.StripPrefix("/downloads/", http.FileServer(http.Dir(downloadsDir))))
+	r.Get("/api/releases/latest", serveLatestRelease(downloadsDir, httpPort))
+	r.Get("/api/mobile/latest", serveLatestMobile(downloadsDir, httpPort))
 	r.Post("/api/register", authHandler.HandleRegister)
 	r.Post("/api/login", authHandler.HandleLogin)
 	r.Post("/api/ai/chat", aiHandler.HandleDefaultChat)
@@ -241,6 +244,84 @@ func serveHome(downloadsDir, httpPort string) http.HandlerFunc {
 	}
 }
 
+func serveLatestMobile(downloadsDir, httpPort string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		writeLatestRelease(w, r, downloadsDir, httpPort, "android")
+	}
+}
+
+func serveLatestRelease(downloadsDir, httpPort string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		platform := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("platform")))
+		if platform == "" {
+			platform = "desktop"
+		}
+		writeLatestRelease(w, r, downloadsDir, httpPort, platform)
+	}
+}
+
+func writeLatestRelease(w http.ResponseWriter, r *http.Request, downloadsDir, httpPort, platform string) {
+	items := listDownloads(downloadsDir, mobileDownloadBaseURL(r, httpPort))
+	var latest *downloadItem
+	var latestVersion string
+	for i := range items {
+		item := &items[i]
+		if !matchesReleasePlatform(item.Name, platform) {
+			continue
+		}
+		version := versionFromDownloadName(item.Name)
+		if version == "" {
+			continue
+		}
+		if latest == nil || compareVersion(version, latestVersion) > 0 {
+			latest = item
+			latestVersion = version
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if latest == nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"available": false,
+			"platform":  platform,
+		})
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"available":    true,
+		"platform":     platform,
+		"version_name": latestVersion,
+		"file_name":    latest.Name,
+		"download_url": latest.Path,
+		"size":         latest.Size,
+		"updated_at":   latest.UpdatedAt,
+	})
+}
+
+func matchesReleasePlatform(name, platform string) bool {
+	lower := strings.ToLower(name)
+	ext := strings.ToLower(filepath.Ext(name))
+	switch platform {
+	case "android", "mobile":
+		return ext == ".apk"
+	case "desktop", "pc":
+		return ext == ".exe" || ext == ".msi" || ext == ".deb" || ext == ".appimage" ||
+			ext == ".dmg" || ext == ".zip" || strings.Contains(lower, "windows") ||
+			strings.Contains(lower, "macos") || strings.Contains(lower, "linux")
+	default:
+		return false
+	}
+}
+
+func mobileDownloadBaseURL(r *http.Request, httpPort string) string {
+	host := hostWithoutPort(r.Host)
+	if host == "" || httpPort == "" {
+		return ""
+	}
+	return "http://" + host + ":" + httpPort
+}
+
 func listDownloads(downloadsDir, downloadBaseURL string) []downloadItem {
 	entries, err := os.ReadDir(downloadsDir)
 	if err != nil {
@@ -275,6 +356,74 @@ func listDownloads(downloadsDir, downloadBaseURL string) []downloadItem {
 		})
 	}
 	return items
+}
+
+func versionFromDownloadName(name string) string {
+	base := strings.TrimSuffix(name, filepath.Ext(name))
+	fields := strings.FieldsFunc(base, func(r rune) bool {
+		return r == '-' || r == '_' || r == ' '
+	})
+	for i := len(fields) - 1; i >= 0; i-- {
+		field := strings.TrimPrefix(strings.ToLower(fields[i]), "v")
+		if looksLikeVersion(field) {
+			return field
+		}
+	}
+	return ""
+}
+
+func looksLikeVersion(value string) bool {
+	if value == "" {
+		return false
+	}
+	hasDigit := false
+	for _, r := range value {
+		if r >= '0' && r <= '9' {
+			hasDigit = true
+			continue
+		}
+		if r != '.' {
+			return false
+		}
+	}
+	return hasDigit
+}
+
+func compareVersion(left, right string) int {
+	leftParts := versionParts(left)
+	rightParts := versionParts(right)
+	maxLen := len(leftParts)
+	if len(rightParts) > maxLen {
+		maxLen = len(rightParts)
+	}
+	for i := 0; i < maxLen; i++ {
+		l := 0
+		r := 0
+		if i < len(leftParts) {
+			l = leftParts[i]
+		}
+		if i < len(rightParts) {
+			r = rightParts[i]
+		}
+		if l > r {
+			return 1
+		}
+		if l < r {
+			return -1
+		}
+	}
+	return 0
+}
+
+func versionParts(value string) []int {
+	parts := strings.Split(value, ".")
+	result := make([]int, 0, len(parts))
+	for _, part := range parts {
+		var n int
+		fmt.Sscanf(part, "%d", &n)
+		result = append(result, n)
+	}
+	return result
 }
 
 func shouldHideDownload(name string) bool {

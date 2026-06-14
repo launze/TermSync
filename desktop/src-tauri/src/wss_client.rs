@@ -229,16 +229,20 @@ impl WssClientState {
         title: &str,
         cols: u16,
         rows: u16,
+        layout: Option<Value>,
     ) -> Result<(), String> {
+        let mut payload = serde_json::Map::new();
+        payload.insert("title".to_string(), Value::String(title.to_string()));
+        payload.insert("cols".to_string(), json!(cols));
+        payload.insert("rows".to_string(), json!(rows));
+        if let Some(value) = layout {
+            payload.insert("layout".to_string(), value);
+        }
         self.send_json(json!({
             "type": "session.create",
             "session_id": session_id,
             "timestamp": current_timestamp(),
-            "payload": {
-                "title": title,
-                "cols": cols,
-                "rows": rows
-            }
+            "payload": payload
         }))
         .await
     }
@@ -324,6 +328,7 @@ impl WssClientState {
         activity: Option<&str>,
         preview: Option<&str>,
         task_state: Option<&str>,
+        layout: Option<Value>,
     ) -> Result<(), String> {
         let mut payload = serde_json::Map::new();
         if let Some(value) = title {
@@ -337,6 +342,9 @@ impl WssClientState {
         }
         if let Some(value) = task_state {
             payload.insert("task_state".to_string(), Value::String(value.to_string()));
+        }
+        if let Some(value) = layout {
+            payload.insert("layout".to_string(), value);
         }
 
         self.send_json(json!({

@@ -4,6 +4,10 @@ import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -19,6 +23,7 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
+import androidx.core.content.FileProvider
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -41,12 +46,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -85,8 +92,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -119,13 +124,16 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
+import java.io.File
 import com.termsync.mobile.viewmodel.TerminalSession
 import com.termsync.mobile.viewmodel.TerminalDeltaBatch
+import com.termsync.mobile.viewmodel.TerminalTabGroup
 import com.termsync.mobile.viewmodel.ConnectionState
 import com.termsync.mobile.viewmodel.CommandLibraryUiState
 import com.termsync.mobile.viewmodel.CommandShortcut
 import com.termsync.mobile.viewmodel.MainViewModel
 import com.termsync.mobile.viewmodel.SpecialKey
+import com.termsync.mobile.viewmodel.AppUpdateUiState
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.platform.LocalFocusManager
@@ -158,6 +166,54 @@ private val ALL_SPECIAL_KEYS = PRIMARY_SPECIAL_KEYS + listOf(
     "PgDn" to SpecialKey.PageDown,
     "Home" to SpecialKey.Home,
     "End" to SpecialKey.End
+)
+
+private data class CodexQuickPrompt(
+    val label: String,
+    val prompt: String
+)
+
+private val CODEX_QUICK_PROMPTS = listOf(
+    CodexQuickPrompt("继续", "继续当前任务，完成后简要汇报结果。"),
+    CodexQuickPrompt("测试", "运行相关测试，优先汇报失败点和需要我决策的地方。"),
+    CodexQuickPrompt("总结", "总结当前进展、已改文件、验证结果和下一步建议。"),
+    CodexQuickPrompt("修复失败", "根据刚才的错误继续修复，先定位原因，再做最小改动。"),
+    CodexQuickPrompt("等我确认", "先停在需要确认的地方，列出选项和推荐方案。")
+)
+
+private enum class ComposerQuickActionKind {
+    ContinuePrompt,
+    CommandLibrary,
+    Favorite,
+    TerminalSubmit,
+    Escape,
+    CtrlC,
+    Tab,
+    ArrowUp,
+    ArrowDown
+}
+
+private data class ComposerQuickActionSpec(
+    val kind: ComposerQuickActionKind,
+    val label: String,
+    val defaultRank: Int
+)
+
+private data class ComposerQuickActionUsage(
+    val count: Int = 0,
+    val lastUsedOrder: Int = 0
+)
+
+private val COMPOSER_QUICK_ACTIONS = listOf(
+    ComposerQuickActionSpec(ComposerQuickActionKind.ContinuePrompt, "继续", 100),
+    ComposerQuickActionSpec(ComposerQuickActionKind.Escape, "ESC", 92),
+    ComposerQuickActionSpec(ComposerQuickActionKind.CtrlC, "Ctrl+C", 90),
+    ComposerQuickActionSpec(ComposerQuickActionKind.Tab, "TAB", 88),
+    ComposerQuickActionSpec(ComposerQuickActionKind.ArrowUp, "↑", 86),
+    ComposerQuickActionSpec(ComposerQuickActionKind.ArrowDown, "↓", 84),
+    ComposerQuickActionSpec(ComposerQuickActionKind.CommandLibrary, "命令库", 70),
+    ComposerQuickActionSpec(ComposerQuickActionKind.Favorite, "收藏", 56),
+    ComposerQuickActionSpec(ComposerQuickActionKind.TerminalSubmit, "发到终端", 52)
 )
 
 /**
@@ -197,7 +253,9 @@ fun TTY1App(viewModel: MainViewModel) {
     val isPaired by viewModel.isPaired.collectAsState()
     val pairedDesktopName by viewModel.pairedDesktopName.collectAsState()
     val commandLibrary by viewModel.commandLibrary.collectAsState()
+    val appUpdate by viewModel.appUpdate.collectAsState()
     val selectedSession = sessions.firstOrNull { it.sessionId == selectedSessionId }
+    val tabGroups = remember(sessions) { buildTerminalTabGroups(sessions) }
     val hasToken = deviceToken.isNotBlank()
     val canRequestRemoteTerminal = connectionState is ConnectionState.Connected && isPaired
     val activeSessionCount = sessions.count { it.taskState == "running" || it.taskState == "waiting_input" }
@@ -256,6 +314,7 @@ fun TTY1App(viewModel: MainViewModel) {
                     HomeScreen(
                         connectionState = connectionState,
                         sessions = sessions,
+                        tabGroups = tabGroups,
                         serverUrl = serverUrl,
                         deviceName = deviceName,
                         hasToken = hasToken,
@@ -283,9 +342,12 @@ fun TTY1App(viewModel: MainViewModel) {
             deviceToken = deviceToken,
             deviceName = deviceName,
             statusMessage = statusMessage,
+            appUpdate = appUpdate,
             onServerUrlChange = viewModel::updateServerUrl,
             onDeviceTokenChange = viewModel::updateDeviceToken,
             onDeviceNameChange = viewModel::updateDeviceName,
+            onCheckUpdate = { viewModel.checkForAppUpdate(silent = false) },
+            onDownloadUpdate = { viewModel.downloadAppUpdate() },
             onRegister = { viewModel.registerMobileDevice() },
             onPair = { code -> viewModel.completePairing(code) },
             onConnect = {
@@ -359,14 +421,14 @@ fun CompactHomeTopBar(
                 IconButton(
                     onClick = onCreateTerminal,
                     enabled = canCreateTerminal,
-                    modifier = Modifier.size(32.dp)
+                    modifier = Modifier.size(40.dp)
                 ) {
                     Icon(Icons.Default.Add, contentDescription = "新建终端", modifier = Modifier.size(18.dp))
                 }
-                IconButton(onClick = onRefresh, modifier = Modifier.size(32.dp)) {
+                IconButton(onClick = onRefresh, modifier = Modifier.size(40.dp)) {
                     Icon(Icons.Default.Refresh, contentDescription = "刷新", modifier = Modifier.size(18.dp))
                 }
-                IconButton(onClick = onOpenSettings, modifier = Modifier.size(32.dp)) {
+                IconButton(onClick = onOpenSettings, modifier = Modifier.size(40.dp)) {
                     Icon(Icons.Default.Settings, contentDescription = "设置", modifier = Modifier.size(18.dp))
                 }
             }
@@ -415,6 +477,7 @@ fun ConnectionStatusBar(state: ConnectionState) {
 fun HomeScreen(
     connectionState: ConnectionState,
     sessions: List<TerminalSession>,
+    tabGroups: List<TerminalTabGroup>,
     serverUrl: String,
     deviceName: String,
     hasToken: Boolean,
@@ -428,7 +491,9 @@ fun HomeScreen(
     onSessionSelected: (String) -> Unit
 ) {
     LazyColumn(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier
+            .fillMaxSize()
+            .navigationBarsPadding(),
         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
@@ -482,7 +547,11 @@ fun HomeScreen(
                 EmptyStateScreen(connectionState, hasToken, isPaired)
             } else {
                 Text(
-                    text = "终端 (${sessions.size})",
+                    text = if (tabGroups.size > 1) {
+                        "终端 (${tabGroups.size} 个标签 · ${sessions.size} 个屏幕)"
+                    } else {
+                        "终端 (${sessions.size})"
+                    },
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold
                 )
@@ -490,7 +559,128 @@ fun HomeScreen(
         }
 
         if (sessions.isNotEmpty()) {
-            items(sessions) { session ->
+            if (tabGroups.any { it.tabId.startsWith("desktop_tab_") }) {
+                items(tabGroups, key = { it.tabId }) { group ->
+                    TerminalTabGroupSection(
+                        group = group,
+                        onSessionSelected = onSessionSelected
+                    )
+                }
+            } else {
+                items(sessions, key = { it.sessionId }) { session ->
+                    SessionCard(session, onClick = { onSessionSelected(session.sessionId) })
+                }
+            }
+        }
+    }
+}
+
+private fun buildTerminalTabGroups(sessions: List<TerminalSession>): List<TerminalTabGroup> {
+    if (sessions.isEmpty()) return emptyList()
+
+    return sessions
+        .groupBy { session ->
+            session.tabId.takeIf { it.isNotBlank() }
+                ?.let { "desktop_tab_$it" }
+                ?: "ungrouped_${session.sessionId}"
+        }
+        .map { (groupId, groupSessions) ->
+            val first = groupSessions.first()
+            val sortedSessions = groupSessions.sortedWith(
+                compareBy<TerminalSession> { terminalSessionAttentionRank(it) }
+                    .thenByDescending { it.lastActivityAt }
+                    .thenBy { normalizedOrder(it.paneOrder) }
+                    .thenBy { it.title.lowercase() }
+                    .thenBy { it.sessionId }
+            )
+            val title = first.tabTitle.takeIf { it.isNotBlank() }
+                ?: if (sessions.size == 1) "未分组终端" else "标签"
+            TerminalTabGroup(
+                tabId = groupId,
+                title = title,
+                order = normalizedOrder(first.tabOrder),
+                sessions = sortedSessions
+            )
+        }
+        .sortedWith(
+            compareBy<TerminalTabGroup> { groupAttentionRank(it) }
+                .thenByDescending { groupLastActivityAt(it) }
+                .thenBy { it.order }
+                .thenBy { it.title.lowercase() }
+                .thenBy { it.tabId }
+        )
+}
+
+private fun normalizedOrder(value: Int): Int {
+    return if (value < 0 || value == Int.MAX_VALUE) Int.MAX_VALUE else value
+}
+
+private fun terminalSessionAttentionRank(session: TerminalSession): Int {
+    return when (session.taskState) {
+        "waiting_input" -> 0
+        "running" -> 1
+        else -> 2
+    }
+}
+
+private fun groupAttentionRank(group: TerminalTabGroup): Int {
+    return group.sessions.minOfOrNull(::terminalSessionAttentionRank) ?: 2
+}
+
+private fun groupLastActivityAt(group: TerminalTabGroup): Long {
+    return group.sessions.maxOfOrNull { it.lastActivityAt } ?: 0L
+}
+
+@Composable
+fun TerminalTabGroupSection(
+    group: TerminalTabGroup,
+    onSessionSelected: (String) -> Unit
+) {
+    val activeCount = group.sessions.count { it.taskState == "running" || it.taskState == "waiting_input" }
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(7.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 2.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                modifier = Modifier.weight(1f),
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Terminal,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Text(
+                    text = group.title,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Text(
+                text = if (activeCount > 0) {
+                    "${group.sessions.size} 屏 · $activeCount 活跃"
+                } else {
+                    "${group.sessions.size} 屏"
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1
+            )
+        }
+
+        group.sessions.forEach { session ->
+            key(session.sessionId) {
                 SessionCard(session, onClick = { onSessionSelected(session.sessionId) })
             }
         }
@@ -665,7 +855,7 @@ private fun SummaryActionButton(
     IconButton(
         onClick = onClick,
         enabled = enabled,
-        modifier = Modifier.size(30.dp)
+        modifier = Modifier.size(40.dp)
     ) {
         Icon(
             imageVector = icon,
@@ -699,7 +889,7 @@ fun TerminalListScreen(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun SessionCard(session: TerminalSession, onClick: () -> Unit) {
     val now by produceState(initialValue = System.currentTimeMillis(), session.lastActivityAt) {
@@ -799,10 +989,10 @@ fun SessionCard(session: TerminalSession, onClick: () -> Unit) {
                 )
             }
 
-            Row(
+            FlowRow(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
+                verticalArrangement = Arrangement.spacedBy(5.dp)
             ) {
                 SessionMetaChip("${session.cols}x${session.rows}")
                 if (session.isOwner) {
@@ -811,13 +1001,6 @@ fun SessionCard(session: TerminalSession, onClick: () -> Unit) {
                 if (relativeTime.isNotBlank()) {
                     SessionMetaChip(relativeTime)
                 }
-                Spacer(modifier = Modifier.weight(1f))
-                Icon(
-                    imageVector = Icons.Default.Terminal,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(16.dp)
-                )
             }
         }
     }
@@ -884,24 +1067,43 @@ fun TerminalViewScreen(
     var terminalAtBottom by rememberSaveable(session?.sessionId) { mutableStateOf(true) }
     var tuiHintVisible by rememberSaveable(session?.sessionId) { mutableStateOf(false) }
     var scrollToBottomRequest by rememberSaveable(session?.sessionId) { mutableStateOf(0L) }
-    var sendRawMode by rememberSaveable(session?.sessionId) { mutableStateOf(false) }
     var inputHistory by rememberSaveable(session?.sessionId) { mutableStateOf(emptyList<String>()) }
+    var quickActionOrder by remember(session?.sessionId) { mutableStateOf(0) }
+    var quickActionUsage by remember(session?.sessionId) {
+        mutableStateOf(emptyMap<String, ComposerQuickActionUsage>())
+    }
     var selectedCommandSectionKey by rememberSaveable(session?.sessionId) {
         mutableStateOf(CommandPanelSection.Favorites.key)
     }
     val focusManager = LocalFocusManager.current
     val renderMode = remember(renderModeName) { TerminalRenderMode.valueOf(renderModeName) }
+    fun rememberQuickAction(kind: ComposerQuickActionKind) {
+        quickActionOrder += 1
+        val key = kind.name
+        val previous = quickActionUsage[key] ?: ComposerQuickActionUsage()
+        quickActionUsage = quickActionUsage + (key to previous.copy(
+            count = previous.count + 1,
+            lastUsedOrder = quickActionOrder
+        ))
+    }
     fun submitCurrentInput() {
         if (input.isNotBlank()) {
             val submitted = input
             inputHistory = (listOf(submitted) + inputHistory.filterNot { it == submitted }).take(12)
-            if (sendRawMode) {
-                onSendRawInput(submitted)
-            } else {
-                onSubmitCommand(submitted)
-            }
+            onSubmitCommand(submitted)
             input = ""
             focusManager.clearFocus()
+        }
+    }
+    fun sendCurrentInputToTerminal() {
+        if (input.isNotBlank()) {
+            val submitted = input
+            inputHistory = (listOf(submitted) + inputHistory.filterNot { it == submitted }).take(12)
+            onSendRawInput(buildTuiSubmitPayload(submitted))
+            input = ""
+            focusManager.clearFocus()
+        } else {
+            onSendRawInput("\r")
         }
     }
 
@@ -935,141 +1137,158 @@ fun TerminalViewScreen(
                 modifier = Modifier.fillMaxWidth(),
                 color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f)
             ) {
-                Column(
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 8.dp, vertical = 4.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier.weight(1f),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Row(
+                        IconButton(onClick = onClose, modifier = Modifier.size(40.dp)) {
+                            Icon(Icons.Default.ArrowBack, contentDescription = "返回", modifier = Modifier.size(20.dp))
+                        }
+                        Column(
                             modifier = Modifier.weight(1f),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                            verticalArrangement = Arrangement.spacedBy(1.dp)
                         ) {
-                            IconButton(onClick = onClose, modifier = Modifier.size(32.dp)) {
-                                Icon(Icons.Default.ArrowBack, contentDescription = "返回", modifier = Modifier.size(20.dp))
-                            }
                             Text(
                                 text = session?.title ?: "远程终端",
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.SemiBold,
                                 maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f)
+                                overflow = TextOverflow.Ellipsis
                             )
-                        }
-                        Row(horizontalArrangement = Arrangement.spacedBy(1.dp)) {
-                            IconButton(onClick = { copyMode = !copyMode }, modifier = Modifier.size(32.dp)) {
-                                Icon(
-                                    Icons.Default.ContentCopy,
-                                    contentDescription = if (copyMode) "退出复制模式" else "进入复制模式",
-                                    modifier = Modifier.size(19.dp),
-                                    tint = if (copyMode) Color(0xFF4CAF50) else MaterialTheme.colorScheme.onSurface
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                val (connLabel, connColor) = connectionStateVisual(connectionState)
+                                Box(
+                                    modifier = Modifier
+                                        .size(7.dp)
+                                        .background(connColor, RoundedCornerShape(999.dp))
                                 )
-                            }
-                            Box {
-                                IconButton(onClick = { showMoreMenu = true }, modifier = Modifier.size(32.dp)) {
-                                    Icon(Icons.Default.MoreVert, contentDescription = "更多", modifier = Modifier.size(20.dp))
-                                }
-                                DropdownMenu(
-                                    expanded = showMoreMenu,
-                                    onDismissRequest = { showMoreMenu = false }
-                                ) {
-                                    DropdownMenuItem(
-                                        text = { Text(if (replayLoading) "正在刷新" else "刷新输出") },
-                                        leadingIcon = {
-                                            Icon(Icons.Default.Refresh, contentDescription = null)
-                                        },
-                                        onClick = {
-                                            showMoreMenu = false
-                                            onRefreshTerminal()
-                                        }
+                                Text(
+                                    text = connLabel,
+                                    color = connColor,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    maxLines = 1
+                                )
+                                Text(
+                                    text = stateVisual.label,
+                                    color = stateVisual.color,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    maxLines = 1
+                                )
+                                Text(
+                                    text = if (renderMode == TerminalRenderMode.MobileFit) "阅读" else "镜像",
+                                    color = MaterialTheme.colorScheme.primary,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    maxLines = 1
+                                )
+                                if (activityText.isNotBlank()) {
+                                    Text(
+                                        text = activityText,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
                                     )
-                                    DropdownMenuItem(
-                                        text = { Text("特殊键") },
-                                        leadingIcon = {
-                                            Icon(Icons.Default.Keyboard, contentDescription = null)
-                                        },
-                                        onClick = {
-                                            showMoreMenu = false
-                                            showSpecialKeysDialog = true
-                                        }
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("命令库") },
-                                        leadingIcon = {
-                                            Icon(Icons.Default.Terminal, contentDescription = null)
-                                        },
-                                        onClick = {
-                                            showMoreMenu = false
-                                            showCommandLibraryDialog = true
-                                        }
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("布局与字号") },
-                                        leadingIcon = {
-                                            Icon(Icons.Default.Settings, contentDescription = null)
-                                        },
-                                        onClick = {
-                                            showMoreMenu = false
-                                            showLayoutControls = true
-                                        }
-                                    )
-                                    if (session != null) {
-                                        DropdownMenuItem(
-                                            text = { Text("关闭终端") },
-                                            leadingIcon = {
-                                                Icon(Icons.Default.Delete, contentDescription = null)
-                                            },
-                                            onClick = {
-                                                showMoreMenu = false
-                                                showCloseSessionDialog = true
-                                            }
-                                        )
-                                    }
                                 }
                             }
                         }
                     }
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(start = 38.dp),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        val (connLabel, connColor) = connectionStateVisual(connectionState)
-                        Box(
-                            modifier = Modifier
-                                .size(7.dp)
-                                .background(connColor, RoundedCornerShape(999.dp))
-                        )
-                        Text(
-                            text = connLabel,
-                            color = connColor,
-                            style = MaterialTheme.typography.labelSmall,
-                            maxLines = 1
-                        )
-                        Text(
-                            text = stateVisual.label,
-                            color = stateVisual.color,
-                            style = MaterialTheme.typography.labelSmall,
-                            maxLines = 1
-                        )
-                        if (activityText.isNotBlank()) {
-                            Text(
-                                text = activityText,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                style = MaterialTheme.typography.labelSmall,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f)
+                    Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                        IconButton(onClick = { copyMode = !copyMode }, modifier = Modifier.size(40.dp)) {
+                            Icon(
+                                Icons.Default.ContentCopy,
+                                contentDescription = if (copyMode) "退出复制模式" else "进入复制模式",
+                                modifier = Modifier.size(19.dp),
+                                tint = if (copyMode) Color(0xFF4CAF50) else MaterialTheme.colorScheme.onSurface
                             )
+                        }
+                        Box {
+                            IconButton(onClick = { showMoreMenu = true }, modifier = Modifier.size(40.dp)) {
+                                Icon(Icons.Default.MoreVert, contentDescription = "更多", modifier = Modifier.size(20.dp))
+                            }
+                            DropdownMenu(
+                                expanded = showMoreMenu,
+                                onDismissRequest = { showMoreMenu = false }
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text(if (replayLoading) "正在刷新" else "刷新输出") },
+                                    leadingIcon = {
+                                        Icon(Icons.Default.Refresh, contentDescription = null)
+                                    },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        onRefreshTerminal()
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text(if (renderMode == TerminalRenderMode.MobileFit) "切换到镜像" else "切换到阅读") },
+                                    leadingIcon = {
+                                        Icon(Icons.Default.Settings, contentDescription = null)
+                                    },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        renderModeName = if (renderMode == TerminalRenderMode.MobileFit) {
+                                            TerminalRenderMode.DesktopMirror.name
+                                        } else {
+                                            TerminalRenderMode.MobileFit.name
+                                        }
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("特殊键") },
+                                    leadingIcon = {
+                                        Icon(Icons.Default.Keyboard, contentDescription = null)
+                                    },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        showSpecialKeysDialog = true
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("命令库") },
+                                    leadingIcon = {
+                                        Icon(Icons.Default.Terminal, contentDescription = null)
+                                    },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        showCommandLibraryDialog = true
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("布局与字号") },
+                                    leadingIcon = {
+                                        Icon(Icons.Default.Settings, contentDescription = null)
+                                    },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        showLayoutControls = true
+                                    }
+                                )
+                                if (session != null) {
+                                    DropdownMenuItem(
+                                        text = { Text("关闭终端") },
+                                        leadingIcon = {
+                                            Icon(Icons.Default.Delete, contentDescription = null)
+                                        },
+                                        onClick = {
+                                            showMoreMenu = false
+                                            showCloseSessionDialog = true
+                                        }
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -1098,7 +1317,12 @@ fun TerminalViewScreen(
                         scrollToBottomRequest = scrollToBottomRequest,
                         onTerminalResize = onTerminalResize,
                         onScrollAtBottom = { terminalAtBottom = it },
-                        onTuiDetected = { tuiHintVisible = true },
+                        onTuiDetected = {
+                            if (renderMode != TerminalRenderMode.DesktopMirror) {
+                                renderModeName = TerminalRenderMode.DesktopMirror.name
+                            }
+                            tuiHintVisible = false
+                        },
                         onReaderCommand = onSubmitCommand,
                         onDebug = onDebug,
                         modifier = Modifier.fillMaxSize()
@@ -1197,9 +1421,10 @@ fun TerminalViewScreen(
                 input = input,
                 onInputChange = { input = it },
                 onSubmit = { submitCurrentInput() },
-                sendRawMode = sendRawMode,
                 inputHistory = inputHistory,
-                onToggleSendRawMode = { sendRawMode = !sendRawMode },
+                quickActionUsage = quickActionUsage,
+                onQuickActionUsed = ::rememberQuickAction,
+                onSendToTerminal = { sendCurrentInputToTerminal() },
                 onInsertNewline = { input += "\n" },
                 onHistorySelected = { input = it },
                 onOpenCommandLibrary = { showCommandLibraryDialog = true },
@@ -1212,6 +1437,7 @@ fun TerminalViewScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .imePadding()
+                    .navigationBarsPadding()
             )
         }
     }
@@ -1409,14 +1635,26 @@ fun SpecialKeyButton(label: String, onClick: () -> Unit) {
     }
 }
 
+private fun buildTuiSubmitPayload(input: String): String {
+    val text = input.replace("\r\n", "\n").replace("\r", "\n")
+    if (text.isBlank()) return "\r"
+    val pasteSafeText = text.replace("\u001B", "")
+    return if (pasteSafeText.contains('\n')) {
+        "\u001B[200~$pasteSafeText\u001B[201~\r"
+    } else {
+        "$pasteSafeText\r"
+    }
+}
+
 @Composable
 private fun MobileTerminalComposer(
     input: String,
     onInputChange: (String) -> Unit,
     onSubmit: () -> Unit,
-    sendRawMode: Boolean,
     inputHistory: List<String>,
-    onToggleSendRawMode: () -> Unit,
+    quickActionUsage: Map<String, ComposerQuickActionUsage>,
+    onQuickActionUsed: (ComposerQuickActionKind) -> Unit,
+    onSendToTerminal: () -> Unit,
     onInsertNewline: () -> Unit,
     onHistorySelected: (String) -> Unit,
     onOpenCommandLibrary: () -> Unit,
@@ -1425,6 +1663,13 @@ private fun MobileTerminalComposer(
     modifier: Modifier = Modifier
 ) {
     val canSubmit = input.isNotBlank()
+    val sortedQuickActions = remember(quickActionUsage) {
+        COMPOSER_QUICK_ACTIONS.sortedWith(
+            compareByDescending<ComposerQuickActionSpec> { quickActionUsage[it.kind.name]?.count ?: 0 }
+                .thenByDescending { quickActionUsage[it.kind.name]?.lastUsedOrder ?: 0 }
+                .thenByDescending { it.defaultRank }
+        )
+    }
 
     Surface(
         modifier = modifier,
@@ -1442,40 +1687,49 @@ private fun MobileTerminalComposer(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 contentPadding = PaddingValues(horizontal = 0.dp)
             ) {
-                item("commands") {
+                items(sortedQuickActions, key = { it.kind.name }) { action ->
+                    val enabled = when (action.kind) {
+                        ComposerQuickActionKind.Favorite,
+                        ComposerQuickActionKind.TerminalSubmit -> canSubmit
+                        else -> true
+                    }
+                    val selected = action.kind == ComposerQuickActionKind.Favorite && canSubmit
                     ComposerToolChip(
-                        label = "命令库",
-                        selected = false,
-                        onClick = onOpenCommandLibrary
-                    )
-                }
-                item("favorite") {
-                    ComposerToolChip(
-                        label = "收藏",
-                        selected = canSubmit,
-                        enabled = canSubmit,
-                        onClick = onToggleFavorite
-                    )
-                }
-                item("mode") {
-                    ComposerToolChip(
-                        label = if (sendRawMode) "原始输入" else "回车执行",
-                        selected = sendRawMode,
-                        onClick = onToggleSendRawMode
+                        label = action.label,
+                        selected = selected,
+                        enabled = enabled,
+                        onClick = {
+                            onQuickActionUsed(action.kind)
+                            when (action.kind) {
+                                ComposerQuickActionKind.ContinuePrompt -> {
+                                    val prompt = CODEX_QUICK_PROMPTS.first().prompt
+                                    onInputChange(
+                                        if (input.isBlank()) {
+                                            prompt
+                                        } else {
+                                            input.trimEnd() + "\n" + prompt
+                                        }
+                                    )
+                                }
+                                ComposerQuickActionKind.CommandLibrary -> onOpenCommandLibrary()
+                                ComposerQuickActionKind.Favorite -> onToggleFavorite()
+                                ComposerQuickActionKind.TerminalSubmit -> onSendToTerminal()
+                                ComposerQuickActionKind.Escape -> onSendSpecialKey(SpecialKey.Escape)
+                                ComposerQuickActionKind.CtrlC -> onSendSpecialKey(SpecialKey.CtrlC)
+                                ComposerQuickActionKind.Tab -> onSendSpecialKey(SpecialKey.Tab)
+                                ComposerQuickActionKind.ArrowUp -> onSendSpecialKey(SpecialKey.ArrowUp)
+                                ComposerQuickActionKind.ArrowDown -> onSendSpecialKey(SpecialKey.ArrowDown)
+                            }
+                        }
                     )
                 }
                 item("newline") {
                     ComposerToolChip(
                         label = "换行",
                         selected = false,
-                        onClick = onInsertNewline
-                    )
-                }
-                items(PRIMARY_SPECIAL_KEYS, key = { it.first }) { (label, key) ->
-                    ComposerToolChip(
-                        label = label,
-                        selected = false,
-                        onClick = { onSendSpecialKey(key) }
+                        onClick = {
+                            onInsertNewline()
+                        }
                     )
                 }
             }
@@ -1491,19 +1745,25 @@ private fun MobileTerminalComposer(
                     modifier = Modifier
                         .weight(1f)
                         .heightIn(min = 48.dp, max = 136.dp),
-                    placeholder = { Text("输入命令或 Codex 提示") },
+                    placeholder = { Text("给 Codex 的下一步指令") },
                     minLines = 1,
                     maxLines = 5,
+                    singleLine = false,
                     keyboardOptions = KeyboardOptions(
                         keyboardType = KeyboardType.Text,
-                        imeAction = ImeAction.Default
+                        imeAction = ImeAction.Send
+                    ),
+                    keyboardActions = KeyboardActions(
+                        onSend = { onSubmit() }
                     )
                 )
                 Button(
                     onClick = onSubmit,
                     enabled = canSubmit,
                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
-                    modifier = Modifier.height(48.dp)
+                    modifier = Modifier
+                        .height(48.dp)
+                        .width(56.dp)
                 ) {
                     Icon(Icons.Default.Send, contentDescription = "发送", modifier = Modifier.size(18.dp))
                 }
@@ -1833,9 +2093,12 @@ fun ConnectionDialog(
     deviceToken: String,
     deviceName: String,
     statusMessage: String,
+    appUpdate: AppUpdateUiState,
     onServerUrlChange: (String) -> Unit,
     onDeviceTokenChange: (String) -> Unit,
     onDeviceNameChange: (String) -> Unit,
+    onCheckUpdate: () -> Unit,
+    onDownloadUpdate: () -> Unit,
     onRegister: () -> Unit,
     onPair: (String) -> Unit,
     onConnect: () -> Unit
@@ -1843,100 +2106,244 @@ fun ConnectionDialog(
     var pairingCode by remember { mutableStateOf("") }
     var showAdvanced by rememberSaveable { mutableStateOf(false) }
     val displayedServerUrl = if (isCustomServerUrl(serverUrl)) serverUrl else ""
+    val context = LocalContext.current
     
-    AlertDialog(
+    Dialog(
         onDismissRequest = onDismiss,
-        title = { Text("连接桌面") },
-        text = {
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth(0.94f)
+                .fillMaxHeight(0.86f)
+                .imePadding()
+                .navigationBarsPadding(),
+            shape = RoundedCornerShape(12.dp),
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 6.dp
+        ) {
             Column(
-                modifier = Modifier.verticalScroll(androidx.compose.foundation.rememberScrollState()),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(14.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Surface(
-                    shape = RoundedCornerShape(14.dp),
-                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f)
+                Text(
+                    text = "连接桌面",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .verticalScroll(androidx.compose.foundation.rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Column(modifier = Modifier.padding(12.dp)) {
-                        Text("输入桌面端生成的 6 位配对码", fontWeight = FontWeight.SemiBold)
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text("手机身份会自动准备，配对成功后会直接连接到桌面终端。", style = MaterialTheme.typography.bodySmall)
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f)
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Text("输入桌面端生成的 6 位配对码", fontWeight = FontWeight.SemiBold)
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text("手机身份会自动准备，配对成功后会直接连接到桌面终端。", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    OutlinedTextField(
+                        value = pairingCode,
+                        onValueChange = { pairingCode = it.filter(Char::isDigit).take(6) },
+                        label = { Text("桌面配对码") },
+                        modifier = Modifier.fillMaxWidth(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true
+                    )
+                    Button(
+                        onClick = { onPair(pairingCode) },
+                        enabled = pairingCode.length == 6,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("完成配对并连接")
+                    }
+                    TextButton(onClick = { showAdvanced = !showAdvanced }) {
+                        Text(if (showAdvanced) "收起高级设置" else "高级设置")
+                    }
+                    if (showAdvanced) {
+                        OutlinedTextField(
+                            value = displayedServerUrl,
+                            onValueChange = {
+                                val trimmed = it.trim()
+                                onServerUrlChange(if (trimmed.isBlank()) DEFAULT_SERVER_URL else trimmed)
+                            },
+                            label = { Text("服务器地址") },
+                            placeholder = { Text(DEFAULT_SERVER_URL) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = deviceName,
+                            onValueChange = onDeviceNameChange,
+                            label = { Text("手机名称") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = deviceToken,
+                            onValueChange = onDeviceTokenChange,
+                            label = { Text("手机身份 Token") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        TextButton(onClick = onRegister) {
+                            Text("重新生成手机身份")
+                        }
+                    }
+                    VersionUpdatePanel(
+                        appUpdate = appUpdate,
+                        onCheckUpdate = onCheckUpdate,
+                        onDownloadUpdate = onDownloadUpdate,
+                        onInstallUpdate = {
+                            installDownloadedApk(context, appUpdate.downloadedFilePath)
+                        }
+                    )
+                    if (statusMessage.isNotBlank()) {
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.secondaryContainer
+                        ) {
+                            Text(
+                                text = statusMessage,
+                                modifier = Modifier.padding(10.dp),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer
+                            )
+                        }
                     }
                 }
-                OutlinedTextField(
-                    value = pairingCode,
-                    onValueChange = { pairingCode = it.filter(Char::isDigit).take(6) },
-                    label = { Text("桌面配对码") },
+                Row(
                     modifier = Modifier.fillMaxWidth(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    singleLine = true
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("关闭")
+                    }
+                    Button(
+                        onClick = onConnect,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("连接")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun VersionUpdatePanel(
+    appUpdate: AppUpdateUiState,
+    onCheckUpdate: () -> Unit,
+    onDownloadUpdate: () -> Unit,
+    onInstallUpdate: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("版本升级", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        text = "当前版本 ${appUpdate.currentVersionName}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                TextButton(
+                    onClick = onCheckUpdate,
+                    enabled = !appUpdate.checking && !appUpdate.downloading
+                ) {
+                    Text(if (appUpdate.checking) "检查中" else "检查")
+                }
+            }
+            if (appUpdate.message.isNotBlank()) {
+                Text(
+                    text = appUpdate.message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (appUpdate.hasUpdate) {
+                val latest = appUpdate.latest
+                Text(
+                    text = listOfNotNull(
+                        latest?.fileName,
+                        latest?.size?.takeIf { it.isNotBlank() },
+                        latest?.updatedAt?.takeIf { it.isNotBlank() }
+                    ).joinToString(" · "),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
                 )
                 Button(
-                    onClick = { onPair(pairingCode) },
-                    enabled = pairingCode.length == 6,
+                    onClick = if (appUpdate.readyToInstall) onInstallUpdate else onDownloadUpdate,
+                    enabled = !appUpdate.downloading,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("完成配对并连接")
-                }
-                TextButton(onClick = { showAdvanced = !showAdvanced }) {
-                    Text(if (showAdvanced) "收起高级设置" else "高级设置")
-                }
-                if (showAdvanced) {
-                    OutlinedTextField(
-                        value = displayedServerUrl,
-                        onValueChange = {
-                            val trimmed = it.trim()
-                            onServerUrlChange(if (trimmed.isBlank()) DEFAULT_SERVER_URL else trimmed)
-                        },
-                        label = { Text("服务器地址") },
-                        placeholder = { Text(DEFAULT_SERVER_URL) },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true
+                    Text(
+                        when {
+                            appUpdate.downloading -> "下载中"
+                            appUpdate.readyToInstall -> "安装"
+                            else -> "下载更新"
+                        }
                     )
-                    OutlinedTextField(
-                        value = deviceName,
-                        onValueChange = onDeviceNameChange,
-                        label = { Text("手机名称") },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true
-                    )
-                    OutlinedTextField(
-                        value = deviceToken,
-                        onValueChange = onDeviceTokenChange,
-                        label = { Text("手机身份 Token") },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true
-                    )
-                    TextButton(onClick = onRegister) {
-                        Text("重新生成手机身份")
-                    }
-                }
-                if (statusMessage.isNotBlank()) {
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = MaterialTheme.colorScheme.secondaryContainer
-                    ) {
-                        Text(
-                            text = statusMessage,
-                            modifier = Modifier.padding(10.dp),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSecondaryContainer
-                        )
-                    }
                 }
             }
-        },
-        confirmButton = {
-            Button(
-                onClick = onConnect
-            ) {
-                Text("连接")
+        }
+    }
+}
+
+private fun installDownloadedApk(context: Context, filePath: String) {
+    val apk = File(filePath)
+    if (!apk.exists()) {
+        Toast.makeText(context, "安装包不存在，请重新下载", Toast.LENGTH_SHORT).show()
+        return
+    }
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !context.packageManager.canRequestPackageInstalls()) {
+        context.startActivity(
+            Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+                data = Uri.parse("package:${context.packageName}")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("关闭")
-            }
+        )
+        Toast.makeText(context, "请允许安装未知来源应用后再点安装", Toast.LENGTH_LONG).show()
+        return
+    }
+
+    val uri = FileProvider.getUriForFile(
+        context,
+        "${context.packageName}.fileprovider",
+        apk
+    )
+    context.startActivity(
+        Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
     )
 }
@@ -2224,11 +2631,13 @@ private data class SessionTaskVisual(
 private fun sessionTaskVisual(session: TerminalSession?, isRecentlyActive: Boolean): SessionTaskVisual {
     val state = when {
         session == null -> "idle"
+        session.status == "offline" -> "offline"
         session.taskState.isNotBlank() -> session.taskState
         isRecentlyActive -> "running"
         else -> "idle"
     }
     return when (state) {
+        "offline" -> SessionTaskVisual("offline", "离线", Color(0xFF9AA0A6), false)
         "running" -> SessionTaskVisual("running", "运行中", Color(0xFF59D499), true)
         "waiting_input" -> SessionTaskVisual("waiting_input", "等待输入", Color(0xFFFFC857), true)
         "completed" -> SessionTaskVisual("completed", "已完成", Color(0xFF7FC8FF), false)

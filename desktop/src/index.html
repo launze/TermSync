@@ -37,6 +37,8 @@
         body.windows-custom-frame .tab-bar {
             padding-right: 0;
             gap: 6px;
+            app-region: drag;
+            -webkit-app-region: drag;
         }
         .tab-strip {
             display: flex;
@@ -45,12 +47,16 @@
             min-width: 0;
             max-width: 100%;
             overflow-x: auto;
+            app-region: no-drag;
+            -webkit-app-region: no-drag;
         }
         .titlebar-drag-region {
             display: none;
             align-self: stretch;
             flex: 1 1 64px;
             min-width: 24px;
+            app-region: drag;
+            -webkit-app-region: drag;
         }
         body.windows-custom-frame .titlebar-drag-region {
             display: block;
@@ -68,6 +74,8 @@
             justify-content: center;
             cursor: move;
             color: #8f8f8f;
+            app-region: drag;
+            -webkit-app-region: drag;
         }
         body.windows-custom-frame .titlebar-drag-handle {
             display: inline-flex;
@@ -97,6 +105,8 @@
             min-width: 120px;
             max-width: 200px;
             transition: background-color 0.2s;
+            app-region: no-drag;
+            -webkit-app-region: no-drag;
         }
         .tab:hover { background-color: #3c3c3c; }
         .tab.active { background-color: #1e1e1e; color: #ffffff; }
@@ -241,6 +251,8 @@
             cursor: pointer;
             font-size: 16px;
             margin-left: 4px;
+            app-region: no-drag;
+            -webkit-app-region: no-drag;
         }
         .tab-add:hover { color: #ffffff; }
         .tab-bar-actions {
@@ -248,6 +260,8 @@
             align-items: center;
             gap: 6px;
             flex-shrink: 0;
+            app-region: no-drag;
+            -webkit-app-region: no-drag;
         }
         body.windows-custom-frame .tab-bar-actions {
             gap: 4px;
@@ -265,6 +279,8 @@
             cursor: pointer;
             font-size: 13px;
             padding: 0;
+            app-region: no-drag;
+            -webkit-app-region: no-drag;
         }
         .tab-icon-btn:hover {
             color: #ffffff;
@@ -275,6 +291,8 @@
             align-self: stretch;
             flex-shrink: 0;
             margin-left: 2px;
+            app-region: no-drag;
+            -webkit-app-region: no-drag;
         }
         body.windows-custom-frame .window-controls {
             display: flex;
@@ -1248,6 +1266,15 @@
                     <option value="false">否</option>
                 </select>
             </div>
+            <div class="form-group" style="padding:10px 12px;background:#252526;border:1px solid #3c3c3c;border-radius:4px;">
+                <label>版本升级</label>
+                <small id="desktopVersionStatus">当前版本: 检测中</small>
+                <small id="desktopVersionMeta"></small>
+                <div class="inline-actions" style="margin-top:8px;">
+                    <button class="btn btn-secondary" id="desktopCheckUpdateBtn" onclick="window.app.checkDesktopUpdate()">检查更新</button>
+                    <button class="btn btn-primary" id="desktopDownloadUpdateBtn" onclick="window.app.handleDesktopUpdateAction()" style="display:none;">下载更新</button>
+                </div>
+            </div>
             <div class="modal-buttons">
                 <button class="btn btn-secondary" onclick="window.app.closeSettings()">取消</button>
                 <button class="btn btn-primary" onclick="window.app.saveSettings()">保存</button>
@@ -1544,6 +1571,7 @@
         const COMMAND_LIBRARY_STORAGE_KEY = 'TermSync-command-library';
         const SAVED_TABS_STORAGE_KEY = 'TermSync-saved-tabs';
         const SAVED_TABS_LIMIT = 30;
+        const RUNNING_OUTPUT_IDLE_MS = 3500;
         const COMMAND_CATEGORY_LABELS = {
             ai: 'AI 助手',
             git: 'Git',
@@ -1808,8 +1836,25 @@
         function looksLikeShellPrompt(line) {
             if (!line) return false;
             return /^PS [^>]+>\s*$/.test(line)
-                || /^(?:[A-Za-z]:)?[^<>{}\n\r]*[#$>]\s*$/.test(line)
-                || /^[$#>]\s*$/.test(line);
+                || /^(?:[A-Za-z]:)?[^<>{}\n\r]+[#$>]\s*$/.test(line)
+                || /^[$#]\s*$/.test(line);
+        }
+
+        function outputHasWaitingInputSignal(text) {
+            return /(waiting for input|press enter|enter to continue|select an option|y\/n|password|token|pairing code|验证码|配对码|继续\?|是否继续)/i.test(text);
+        }
+
+        function outputHasErrorSignal(text) {
+            if (/\b(no|0)\s+(errors?|failures?)\b|\bwithout\s+(errors?|failures?)\b/i.test(text)) {
+                return false;
+            }
+            return /\b(error|failed|failure|exception|panic|traceback|permission denied|authentication failed)\b|认证失败|错误|失败/i.test(text);
+        }
+
+        function outputHasCompletionSignal(text) {
+            return /(build successful|all tests passed|successfully|任务已完成|完成了)/i.test(text)
+                || /\b(finished|completed)\b/i.test(text)
+                || /^\s*done[.!]?\s*$/i.test(text);
         }
 
         function normalizeApiBaseUrl(value) {
@@ -2748,6 +2793,7 @@
                 this.sessionSyncTimer = null;
                 this.sessionActivity = new Map();
                 this.sessionMetaSendTimers = new Map();
+                this.sessionRunningIdleTimers = new Map();
                 this.replayBuffers = new Map();
                 this.commandCatalog = this.loadCommandCatalog();
                 this.commandLibrary = buildCommandLibraryUiState(this.commandCatalog);
@@ -2764,6 +2810,14 @@
                 this.windowStateSyncTimer = null;
                 this.windowCloseInProgress = false;
                 this.backendRecoveryPromises = new Map();
+                this.desktopUpdate = {
+                    checking: false,
+                    downloading: false,
+                    currentVersion: '',
+                    latest: null,
+                    downloaded: null,
+                    message: ''
+                };
                 this.connectionGuideDismissed = false;
                 this.connectionGuideState = {
                     phase: 'idle',
@@ -2810,6 +2864,7 @@
                 this.showToast(this.hasDesktopToken()
                     ? 'TTY1 终端已启动 - 默认使用 ' + this.settings.get('shell')
                     : '首次使用可直接生成手机配对码', 'success');
+                this.checkDesktopUpdate(true);
                 this.debug('init:done', {
                     tabs: this.tabs.size,
                     activeTabId: this.activeTabId,
@@ -4710,11 +4765,13 @@
                 const title = this.getSessionTitleForPane(paneId, tab);
                 const state = this.ensureSessionActivity(paneId, title);
                 state.title = title;
+                const layout = this.buildSessionLayoutMeta(paneId, tab);
                 const payload = {
                     title: state.title || title,
                     activity: state.activity || '',
                     preview: state.preview || '',
-                    taskState: state.taskState || 'idle'
+                    taskState: state.taskState || 'idle',
+                    layout
                 };
                 try {
                     await invoke('update_session_meta', {
@@ -4722,7 +4779,8 @@
                         title: payload.title,
                         activity: payload.activity,
                         preview: payload.preview,
-                        taskState: payload.taskState
+                        taskState: payload.taskState,
+                        layout: payload.layout
                     });
                     state.lastSentKey = JSON.stringify(payload);
                 } catch (err) {
@@ -4779,7 +4837,8 @@
                         preview: '',
                         taskState: 'idle',
                         lastSentKey: '',
-                        lastUpdatedAt: Date.now()
+                        lastUpdatedAt: Date.now(),
+                        outputSequence: 0
                     };
                     this.sessionActivity.set(sessionId, state);
                 } else {
@@ -4822,6 +4881,7 @@
                 let best = { kind: 'idle', label: '空闲', priority: 0 };
                 for (const paneId of tab.panes || []) {
                     const paneState = this.getPaneRuntimeState(paneId);
+                    if (paneState.kind === 'waiting_input' && !tab.attention) continue;
                     if (paneState.priority > best.priority) best = paneState;
                 }
                 if (tab.attention && best.priority < 4) {
@@ -4840,14 +4900,13 @@
                 const tab = this.findTabByPaneId(paneId);
                 if (!tab) return;
                 const isRunning = nextTaskState === 'running';
-                const stopped = wasRunning && nextTaskState !== 'running';
                 const needsInput = nextTaskState === 'waiting_input';
                 let changed = wasRunning !== isRunning;
                 if (isRunning && tab.attention) {
                     tab.attention = false;
                     changed = true;
                 }
-                if ((stopped || needsInput) && !tab.attention) {
+                if (wasRunning && needsInput && tab.id !== this.activeTabId && !tab.attention) {
                     tab.attention = true;
                     changed = true;
                     this.scheduleWorkspaceSave();
@@ -4871,6 +4930,11 @@
                     clearTimeout(timer);
                     this.sessionMetaSendTimers.delete(sessionId);
                 }
+                const runningIdleTimer = this.sessionRunningIdleTimers.get(sessionId);
+                if (runningIdleTimer) {
+                    clearTimeout(runningIdleTimer);
+                    this.sessionRunningIdleTimers.delete(sessionId);
+                }
                 this.sessionActivity.delete(sessionId);
                 this.replayBuffers.delete(sessionId);
             }
@@ -4878,7 +4942,7 @@
             appendReplayBuffer(sessionId, text) {
                 if (!sessionId || !text) return;
                 const current = this.replayBuffers.get(sessionId) || '';
-                this.replayBuffers.set(sessionId, trimReplayBuffer(current + text, 200000));
+                this.replayBuffers.set(sessionId, trimReplayBuffer(current + text, 1500000));
                 this.scheduleWorkspaceSave();
             }
 
@@ -4890,13 +4954,13 @@
                 const normalized = collapseWhitespace(line);
                 const lower = normalized.toLowerCase();
                 if (!normalized) return '等待新的输出';
-                if (/(waiting for input|press enter|enter to continue|select an option|y\/n|password|token|pairing code|验证码|配对码|继续\?|是否继续)/i.test(normalized)) {
+                if (outputHasWaitingInputSignal(normalized)) {
                     return '等待输入';
                 }
-                if (/(error|failed|exception|panic|traceback|permission denied|认证失败)/i.test(normalized)) {
+                if (outputHasErrorSignal(normalized)) {
                     return clipText(normalized, 72);
                 }
-                if (/(build successful|finished|completed|done|all tests passed|successfully|任务已完成|完成了)/i.test(normalized)) {
+                if (outputHasCompletionSignal(normalized)) {
                     return '任务已完成';
                 }
                 if (/apply_patch|patching|applying patch/.test(lower)) return '正在应用补丁';
@@ -4909,6 +4973,35 @@
                 if (/writing|editing|updating|rewriting|refactor|fixing|implement/.test(lower)) return '正在修改代码';
                 if (/codex|claude|gpt/.test(lower)) return clipText(normalized, 72);
                 return clipText(normalized, 72);
+            }
+
+            clearRunningIdleTimer(sessionId) {
+                const timer = this.sessionRunningIdleTimers.get(sessionId);
+                if (!timer) return;
+                clearTimeout(timer);
+                this.sessionRunningIdleTimers.delete(sessionId);
+            }
+
+            scheduleRunningIdleTimeout(sessionId, paneId, state) {
+                this.clearRunningIdleTimer(sessionId);
+                if (!state || state.taskState !== 'running') return;
+                const outputSequence = state.outputSequence || 0;
+                const timer = setTimeout(() => {
+                    this.sessionRunningIdleTimers.delete(sessionId);
+                    const current = this.sessionActivity.get(sessionId);
+                    if (!current || current.taskState !== 'running' || current.outputSequence !== outputSequence) return;
+                    current.taskState = 'idle';
+                    current.activity = '等待新的输出';
+                    current.lastUpdatedAt = Date.now();
+                    this.scheduleSessionMetaSend(sessionId);
+                    this.debug('session:meta:running-idle', {
+                        sessionId: sessionId,
+                        taskState: current.taskState,
+                        activity: current.activity
+                    });
+                    this.updateTabAttentionForPane(paneId, true, current.taskState);
+                }, RUNNING_OUTPUT_IDLE_MS);
+                this.sessionRunningIdleTimers.set(sessionId, timer);
             }
 
             applySessionOutput(sessionId, text, options) {
@@ -4928,6 +5021,7 @@
                 state.lastUpdatedAt = Date.now();
 
                 if (options && options.exited) {
+                    this.clearRunningIdleTimer(sessionId);
                     const exitCode = Number.isFinite(options.exitCode) ? options.exitCode : null;
                     state.taskState = exitCode === null || exitCode === 0 ? 'completed' : 'error';
                     state.activity = exitCode === null || exitCode === 0 ? '终端任务已结束' : '终端异常退出';
@@ -4944,27 +5038,27 @@
                 }
 
                 if (meaningfulLine) {
+                    state.outputSequence = (state.outputSequence || 0) + 1;
                     state.preview = clipText(meaningfulLine, 96);
-                    if (looksLikeShellPrompt(meaningfulLine)) {
+                    if (outputHasErrorSignal(sourceText)) {
+                        state.taskState = 'error';
+                        state.activity = this.summarizeActivity(meaningfulLine);
+                    } else if (outputHasWaitingInputSignal(sourceText)) {
+                        state.taskState = 'waiting_input';
+                        state.activity = '等待输入';
+                    } else if (outputHasCompletionSignal(sourceText)) {
+                        state.taskState = 'completed';
+                        state.activity = this.summarizeActivity(meaningfulLine);
+                    } else if (looksLikeShellPrompt(meaningfulLine)) {
                         state.taskState = state.taskState === 'running' || state.taskState === 'waiting_input'
                             ? 'completed'
                             : 'idle';
                         state.activity = state.taskState === 'completed' ? '任务已完成' : '等待下一条命令';
-                    } else if (/(error|failed|exception|panic|traceback|permission denied|authentication failed)/i.test(sourceText)) {
-                        state.taskState = 'error';
-                        state.activity = this.summarizeActivity(meaningfulLine);
-                    } else if (/(waiting for input|press enter|enter to continue|select an option|y\/n|password|token|验证码|配对码|继续\?|是否继续)/i.test(sourceText)) {
-                        state.taskState = 'waiting_input';
-                        state.activity = '等待输入';
-                    } else if (/(build successful|finished|completed|done|all tests passed|successfully|任务已完成|完成了)/i.test(sourceText)) {
-                        state.taskState = 'completed';
-                        state.activity = this.summarizeActivity(meaningfulLine);
                     } else {
                         state.taskState = 'running';
                         state.activity = this.summarizeActivity(meaningfulLine);
                     }
-                } else if (terminal && terminal.backendReady && !state.activity) {
-                    state.taskState = 'idle';
+                } else if (terminal && terminal.backendReady && !state.activity && state.taskState !== 'running') {
                     state.activity = '等待新的输出';
                 }
 
@@ -4975,7 +5069,27 @@
                     activity: state.activity,
                     preview: state.preview
                 });
+                if (state.taskState === 'running') {
+                    this.scheduleRunningIdleTimeout(sessionId, paneId, state);
+                } else {
+                    this.clearRunningIdleTimer(sessionId);
+                }
                 this.updateTabAttentionForPane(paneId, wasRunning, state.taskState);
+            }
+
+            buildSessionLayoutMeta(paneId, tab = this.findTabByPaneId(paneId)) {
+                if (!tab) return null;
+                const paneIds = this.splitTree.collectPaneIds(tab.root || null);
+                const order = Math.max(0, paneIds.indexOf(paneId));
+                return {
+                    tab_id: String(tab.id),
+                    tab_title: normalizeEditableTitle(tab.title, defaultTabTitle(tab.id)),
+                    tab_order: Array.from(this.tabs.keys()).indexOf(tab.id),
+                    pane_id: String(paneId),
+                    pane_title: this.getSessionTitleForPane(paneId, tab),
+                    pane_order: order,
+                    pane_count: paneIds.length
+                };
             }
 
             scheduleSessionMetaSend(sessionId, immediate) {
@@ -4998,11 +5112,14 @@
                 if (!this.serverConnected || typeof invoke === 'undefined') return;
                 const state = this.sessionActivity.get(sessionId);
                 if (!state) return;
+                const paneId = this.paneIdFromSession(sessionId);
+                const layout = paneId === null ? null : this.buildSessionLayoutMeta(paneId);
                 const payload = {
                     title: state.title || '',
                     activity: state.activity || '',
                     preview: state.preview || '',
-                    taskState: state.taskState || 'idle'
+                    taskState: state.taskState || 'idle',
+                    layout
                 };
                 const nextKey = JSON.stringify(payload);
                 if (!force && nextKey === state.lastSentKey) return;
@@ -5012,7 +5129,8 @@
                         title: payload.title,
                         activity: payload.activity,
                         preview: payload.preview,
-                        taskState: payload.taskState
+                        taskState: payload.taskState,
+                        layout: payload.layout
                     });
                     state.lastSentKey = nextKey;
                     this.debug('session:meta:sent', {
@@ -5422,7 +5540,8 @@
                         rows: 24,
                         title: sessionTitle,
                         shell: shell,
-                        cwd: cwd || null
+                        cwd: cwd || null,
+                        layout: this.buildSessionLayoutMeta(paneId)
                     });
                     const nextCwd = (typeof session?.cwd === 'string' && session.cwd.trim())
                         || cwd
@@ -6216,6 +6335,15 @@
                 dragRegion.classList.toggle('collapsed', tabsNeed + 40 >= availableForTabs);
             }
 
+            isTitlebarInteractiveTarget(event) {
+                const target = event.target;
+                if (!target?.closest) return true;
+                return !!target.closest(
+                    'button, input, select, textarea, [contenteditable="true"], ' +
+                    '.tab, .tab-bar-actions, .window-controls, .inline-title-input'
+                );
+            }
+
             setupWindowChrome() {
                 document.body.classList.toggle('windows-custom-frame', this.windowControlsEnabled);
                 const dragRegion = document.getElementById('titlebarDragRegion');
@@ -6229,29 +6357,36 @@
                 if (!this.windowControlsEnabled) return;
 
                 const handleTitlebarDoubleClick = (event) => {
-                    if (event.target.closest('button, input, select, textarea, .tab, .tab-bar-actions, .window-controls')) return;
+                    if (this.isTitlebarInteractiveTarget(event)) return;
                     event.preventDefault();
                     this.toggleWindowMaximize();
                 };
-                const handleTitlebarDragStart = async (event) => {
+                const handleTitlebarDragStart = (event) => {
                     if (event.button !== 0 || event.detail > 1) return;
-                    if (event.target.closest('button, input, select, textarea, .tab, .tab-bar-actions, .window-controls')) return;
-                    const currentWindow = typeof getCurrentWindow === 'function' ? getCurrentWindow() : null;
-                    if (!currentWindow?.startDragging) return;
+                    if (this.isTitlebarInteractiveTarget(event)) return;
                     event.preventDefault();
-                    try {
-                        if (currentWindow.isMaximized && currentWindow.unmaximize) {
-                            const maximized = await currentWindow.isMaximized();
-                            if (maximized) {
-                                await currentWindow.unmaximize();
+                    const startNativeDrag = () => {
+                        const currentWindow = typeof getCurrentWindow === 'function' ? getCurrentWindow() : null;
+                        if (currentWindow?.startDragging) {
+                            return currentWindow.startDragging();
+                        }
+                        return Promise.reject(new Error('window.startDragging unavailable'));
+                    };
+                    const dragPromise = typeof invoke === 'undefined'
+                        ? startNativeDrag()
+                        : invoke('window_start_dragging').catch(() => startNativeDrag());
+                    dragPromise
+                        .then(() => {
+                            if (this.windowMaximized) {
                                 this.applyWindowMaximizedState(false);
                             }
-                        }
-                        await currentWindow.startDragging();
-                    } catch (error) {
-                        this.debug('window:start-dragging:failed', { error: String(error) });
-                    }
+                        })
+                        .catch((error) => {
+                            this.debug('window:start-dragging:failed', { error: String(error) });
+                        });
                 };
+                tabBar?.addEventListener('dblclick', handleTitlebarDoubleClick);
+                tabBar?.addEventListener('mousedown', handleTitlebarDragStart);
                 dragRegion?.addEventListener('dblclick', handleTitlebarDoubleClick);
                 dragRegion?.addEventListener('mousedown', handleTitlebarDragStart);
                 dragHandle?.addEventListener('dblclick', handleTitlebarDoubleClick);
@@ -6358,6 +6493,8 @@
                 document.getElementById('settingAutoReconnect').value = this.settings.get('autoReconnect').toString();
                 document.getElementById('pairingCodeDisplay').value = '';
                 document.getElementById('pairingCodeHint').textContent = '配对码有效期 5 分钟，在手机端输入后即可绑定。';
+                this.renderDesktopUpdate();
+                this.checkDesktopUpdate(true);
                 this.updateCustomShellVisibility();
                 modal.classList.add('visible');
             }
@@ -6380,6 +6517,144 @@
                 }
                 this.closeSettings();
                 this.showToast('设置已保存', 'success');
+            }
+
+            compareVersions(left, right) {
+                const parse = (value) => String(value || '')
+                    .replace(/^v/i, '')
+                    .split('.')
+                    .map((part) => parseInt(String(part).match(/^\d+/)?.[0] || '0', 10));
+                const a = parse(left);
+                const b = parse(right);
+                const len = Math.max(a.length, b.length);
+                for (let i = 0; i < len; i += 1) {
+                    const diff = (a[i] || 0) - (b[i] || 0);
+                    if (diff !== 0) return diff;
+                }
+                return 0;
+            }
+
+            renderDesktopUpdate() {
+                const statusEl = document.getElementById('desktopVersionStatus');
+                const metaEl = document.getElementById('desktopVersionMeta');
+                const checkBtn = document.getElementById('desktopCheckUpdateBtn');
+                const downloadBtn = document.getElementById('desktopDownloadUpdateBtn');
+                if (!statusEl || !metaEl || !checkBtn || !downloadBtn) return;
+
+                const { checking, downloading, currentVersion, latest, downloaded, message } = this.desktopUpdate;
+                checkBtn.disabled = checking || downloading;
+                checkBtn.textContent = checking ? '检查中' : '检查更新';
+                const current = currentVersion || '未知';
+                const hasUpdate = latest?.available &&
+                    latest.version_name &&
+                    latest.download_url &&
+                    this.compareVersions(latest.version_name, current) > 0;
+                const readyToInstall = hasUpdate && downloaded?.file_path;
+                statusEl.textContent = message || (hasUpdate
+                    ? `发现新版本 ${latest.version_name}，当前版本 ${current}`
+                    : `当前版本 ${current}`);
+                metaEl.textContent = readyToInstall
+                    ? `已下载: ${downloaded.file_name}`
+                    : hasUpdate
+                    ? [latest.file_name, latest.size, latest.updated_at].filter(Boolean).join(' · ')
+                    : '';
+                downloadBtn.style.display = hasUpdate ? '' : 'none';
+                downloadBtn.disabled = downloading;
+                downloadBtn.textContent = downloading ? '下载中' : (readyToInstall ? '安装' : '下载更新');
+            }
+
+            async checkDesktopUpdate(silent = false) {
+                if (this.desktopUpdate.checking || this.desktopUpdate.downloading || typeof invoke === 'undefined') return;
+                const serverUrl = this.settings.get('serverUrl') || DEFAULT_SERVER_URL;
+                this.desktopUpdate = {
+                    ...this.desktopUpdate,
+                    checking: true,
+                    message: silent ? this.desktopUpdate.message : '正在检查新版本...'
+                };
+                this.renderDesktopUpdate();
+                try {
+                    const result = await invoke('check_desktop_update', { serverUrl });
+                    const latest = result.latest || {};
+                    const currentVersion = result.current_version || this.desktopUpdate.currentVersion || '';
+                    const hasUpdate = latest.available &&
+                        latest.version_name &&
+                        latest.download_url &&
+                        this.compareVersions(latest.version_name, currentVersion) > 0;
+                    this.desktopUpdate = {
+                        checking: false,
+                        downloading: false,
+                        currentVersion,
+                        latest,
+                        downloaded: null,
+                        message: hasUpdate
+                            ? `发现新版本 ${latest.version_name}`
+                            : (latest.available ? '当前已是最新版本' : '服务器暂无桌面端安装包')
+                    };
+                    if (hasUpdate && silent) {
+                        this.showToast(`发现桌面端新版本 ${latest.version_name}`, 'success');
+                    }
+                } catch (error) {
+                    this.desktopUpdate = {
+                        ...this.desktopUpdate,
+                        checking: false,
+                        message: silent ? this.desktopUpdate.message : `检查更新失败: ${error}`
+                    };
+                }
+                this.renderDesktopUpdate();
+            }
+
+            async handleDesktopUpdateAction() {
+                if (this.desktopUpdate.downloaded?.file_path) {
+                    await this.installDesktopUpdate();
+                    return;
+                }
+                await this.downloadDesktopUpdate();
+            }
+
+            async downloadDesktopUpdate() {
+                const latest = this.desktopUpdate.latest;
+                if (!latest?.download_url || typeof invoke === 'undefined') {
+                    this.showToast('没有可下载的新版本', 'warning');
+                    return;
+                }
+                this.desktopUpdate = {
+                    ...this.desktopUpdate,
+                    downloading: true,
+                    message: `正在下载 ${latest.version_name || latest.file_name || '新版本'}...`
+                };
+                this.renderDesktopUpdate();
+                try {
+                    const downloaded = await invoke('download_desktop_update', {
+                        url: latest.download_url,
+                        fileName: latest.file_name || 'termsync-desktop-update'
+                    });
+                    this.desktopUpdate = {
+                        ...this.desktopUpdate,
+                        downloading: false,
+                        downloaded,
+                        message: '下载完成，点击安装'
+                    };
+                } catch (error) {
+                    this.desktopUpdate = {
+                        ...this.desktopUpdate,
+                        downloading: false,
+                        message: '下载失败: ' + error
+                    };
+                }
+                this.renderDesktopUpdate();
+            }
+
+            async installDesktopUpdate() {
+                const path = this.desktopUpdate.downloaded?.file_path;
+                if (!path || typeof invoke === 'undefined') {
+                    this.showToast('安装包不存在，请重新下载', 'warning');
+                    return;
+                }
+                try {
+                    await invoke('install_desktop_update', { path });
+                } catch (error) {
+                    this.showToast('打开安装包失败: ' + error, 'error');
+                }
             }
 
             updateCustomShellVisibility() {

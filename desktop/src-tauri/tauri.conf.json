@@ -1,6 +1,6 @@
 {
   "productName": "TermSync",
-  "version": "0.1.3",
+  "version": "0.1.5",
   "identifier": "com.termsync.desktop",
   "build": {
     "beforeDevCommand": {
@@ -35,6 +35,8 @@
         "height": 600,
         "maximized": true,
         "resizable": true,
+        "decorations": false,
+        "dragDropEnabled": false,
         "fullscreen": false
       }
     ]

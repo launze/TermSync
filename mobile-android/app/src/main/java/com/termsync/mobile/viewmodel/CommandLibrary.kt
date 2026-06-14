@@ -78,7 +78,11 @@ fun suggestCommandCategory(command: String): CommandCategory {
             lower.startsWith("claude") ||
             lower.startsWith("gemini") ||
             lower.startsWith("chatgpt") ||
-            lower.startsWith("openai") -> CommandCategory.Ai
+            lower.startsWith("openai") ||
+            normalized.contains("Codex", ignoreCase = true) ||
+            normalized.contains("当前任务") ||
+            normalized.contains("汇报") ||
+            normalized.contains("验证结果") -> CommandCategory.Ai
         lower == "git" || lower.startsWith("git ") -> CommandCategory.Git
         isDangerousCommand(normalized) -> CommandCategory.HighRisk
         lower.contains(" test") ||
@@ -184,6 +188,9 @@ fun defaultCommandShortcuts(now: Long = System.currentTimeMillis()): List<Comman
 
     return listOf(
         preset("codex_default", "Codex", "codex", CommandCategory.Ai, 130),
+        preset("codex_resume", "Codex 继续当前任务", "继续当前任务，完成后简要汇报结果。", CommandCategory.Ai, 128),
+        preset("codex_test", "Codex 运行验证", "运行相关测试，优先汇报失败点和需要我决策的地方。", CommandCategory.Ai, 126),
+        preset("codex_summary", "Codex 汇报进展", "总结当前进展、已改文件、验证结果和下一步建议。", CommandCategory.Ai, 124),
         preset("codex_full_auto", "Codex 自动执行", "codex --full-auto", CommandCategory.Ai, 122),
         preset("claude_default", "Claude", "claude", CommandCategory.Ai, 120),
         preset("claude_dont_ask", "Claude 免确认", "claude --permission-mode dontAsk", CommandCategory.Ai, 116),

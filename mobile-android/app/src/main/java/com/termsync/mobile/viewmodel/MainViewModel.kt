@@ -2,12 +2,15 @@ package com.termsync.mobile.viewmodel
 
 import android.app.Application
 import android.content.Context
+import com.termsync.mobile.BuildConfig
+import android.os.Environment
 import android.os.Build
 import android.provider.Settings
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.termsync.mobile.network.ApiClient
+import com.termsync.mobile.network.AppUpdateInfo
 import com.termsync.mobile.network.WssClient
 import com.termsync.mobile.network.WssMessage
 import kotlinx.coroutines.Job
@@ -72,7 +75,14 @@ data class TerminalSession(
     val activity: String = "",
     val taskState: String = "",
     val preview: String = "",
-    val lastActivityAt: Long = 0L
+    val lastActivityAt: Long = 0L,
+    val tabId: String = "",
+    val tabTitle: String = "",
+    val tabOrder: Int = Int.MAX_VALUE,
+    val paneId: String = "",
+    val paneTitle: String = "",
+    val paneOrder: Int = Int.MAX_VALUE,
+    val paneCount: Int = 1
 )
 
 data class TerminalDeltaBatch(
@@ -80,6 +90,49 @@ data class TerminalDeltaBatch(
     val data: String,
     val version: Long
 )
+
+data class AppUpdateUiState(
+    val currentVersionName: String = BuildConfig.VERSION_NAME,
+    val checking: Boolean = false,
+    val downloading: Boolean = false,
+    val latest: AppUpdateInfo? = null,
+    val downloadedFilePath: String = "",
+    val message: String = ""
+) {
+    val hasUpdate: Boolean
+        get() = latest?.available == true &&
+            latest.versionName.isNotBlank() &&
+            compareVersionNames(latest.versionName, currentVersionName) > 0 &&
+            latest.downloadUrl.isNotBlank()
+    val readyToInstall: Boolean
+        get() = hasUpdate && downloadedFilePath.isNotBlank()
+}
+
+data class TerminalTabGroup(
+    val tabId: String,
+    val title: String,
+    val order: Int,
+    val sessions: List<TerminalSession>
+)
+
+private fun compareVersionNames(left: String, right: String): Int {
+    val leftParts = left.versionParts()
+    val rightParts = right.versionParts()
+    val maxLen = maxOf(leftParts.size, rightParts.size)
+    for (index in 0 until maxLen) {
+        val l = leftParts.getOrElse(index) { 0 }
+        val r = rightParts.getOrElse(index) { 0 }
+        if (l != r) return l.compareTo(r)
+    }
+    return 0
+}
+
+private fun String.versionParts(): List<Int> {
+    return trim()
+        .trimStart('v', 'V')
+        .split('.')
+        .map { part -> part.takeWhile(Char::isDigit).toIntOrNull() ?: 0 }
+}
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -124,6 +177,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val sessionOutputCache = loadSessionOutputCache().toMutableMap()
     private val commandCatalog = loadCommandCatalog().toMutableList()
     private val _commandLibrary = MutableStateFlow(buildCommandLibraryUiState(commandCatalog))
+    private val _appUpdate = MutableStateFlow(AppUpdateUiState())
     private val sessionOutputVersion = mutableMapOf<String, Long>()
     private val lastRequestedResizeBySession = mutableMapOf<String, Pair<Int, Int>>()
     private val lastResizeRequestAtBySession = mutableMapOf<String, Long>()
@@ -198,6 +252,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val pairedDesktopName: StateFlow<String> = _pairedDesktopName.asStateFlow()
     val isPaired: StateFlow<Boolean> = _isPaired.asStateFlow()
     val commandLibrary: StateFlow<CommandLibraryUiState> = _commandLibrary.asStateFlow()
+    val appUpdate: StateFlow<AppUpdateUiState> = _appUpdate.asStateFlow()
 
     init {
         viewModelScope.launch {
@@ -240,6 +295,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         autoConnectIfPossible()
+        checkForAppUpdate(silent = true)
     }
 
     private fun handleMessage(msg: WssMessage) {
@@ -374,10 +430,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (!sessionId.isNullOrBlank()) {
                         val merged = mergeReplayWithLive(data, sessionOutputCache[sessionId].orEmpty())
                         sessionOutputCache[sessionId] = trimReplay(merged)
+                        val version = nextSessionOutputVersion(sessionId)
                         scheduleSessionOutputCacheSave()
                         if (_selectedSessionId.value == sessionId) {
                             _terminalOutput.value = sessionOutputCache[sessionId].orEmpty()
-                            _terminalOutputVersion.value = currentSessionOutputVersion(sessionId)
+                            _terminalOutputVersion.value = version
                             _replayLoading.value = false
                             _terminalStreamStatus.value = if (data.isNotBlank()) "已加载桌面端回放" else "桌面端暂无可回放内容"
                         }
@@ -473,6 +530,86 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateDeviceName(value: String) {
         _deviceName.value = value
+    }
+
+    fun checkForAppUpdate(silent: Boolean = false) {
+        val url = _serverUrl.value.trim()
+        if (url.isBlank()) {
+            _appUpdate.value = _appUpdate.value.copy(message = "请先填写服务器地址")
+            return
+        }
+        if (_appUpdate.value.checking) return
+
+        _appUpdate.value = _appUpdate.value.copy(
+            checking = true,
+            message = if (silent) "" else "正在检查新版本…"
+        )
+        viewModelScope.launch {
+            try {
+                val latest = withContext(Dispatchers.IO) {
+                    apiClient.getLatestAndroidRelease(url)
+                }
+                val next = AppUpdateUiState(
+                    checking = false,
+                    latest = latest,
+                    message = when {
+                        latest.available && compareVersionNames(latest.versionName, BuildConfig.VERSION_NAME) > 0 -> {
+                            "发现新版本 ${latest.versionName}"
+                        }
+                        latest.available -> "当前已是最新版本"
+                        else -> "服务器暂无 Android 安装包"
+                    }
+                )
+                _appUpdate.value = next
+                if (next.hasUpdate && silent) {
+                    _statusMessage.value = next.message
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to check Android update", e)
+                _appUpdate.value = _appUpdate.value.copy(
+                    checking = false,
+                    message = if (silent) "" else "检查更新失败: ${describeException(e)}"
+                )
+            }
+        }
+    }
+
+    fun downloadAppUpdate() {
+        val update = _appUpdate.value
+        val latest = update.latest ?: return
+        if (!update.hasUpdate || latest.downloadUrl.isBlank()) return
+        if (update.downloading) return
+
+        _appUpdate.value = update.copy(
+            downloading = true,
+            downloadedFilePath = "",
+            message = "正在下载 ${latest.versionName}…"
+        )
+        viewModelScope.launch {
+            try {
+                val file = withContext(Dispatchers.IO) {
+                    val context = getApplication<Application>()
+                    val dir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+                        ?.resolve("updates")
+                        ?: context.filesDir.resolve("updates")
+                    val safeName = latest.fileName.ifBlank { "termsync-mobile-${latest.versionName}.apk" }
+                    val target = dir.resolve(safeName)
+                    apiClient.downloadFile(latest.downloadUrl, target)
+                    target
+                }
+                _appUpdate.value = _appUpdate.value.copy(
+                    downloading = false,
+                    downloadedFilePath = file.absolutePath,
+                    message = "下载完成，点击安装"
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to download Android update", e)
+                _appUpdate.value = _appUpdate.value.copy(
+                    downloading = false,
+                    message = "下载失败: ${describeException(e)}"
+                )
+            }
+        }
     }
 
     fun registerMobileDevice() {
@@ -586,7 +723,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         dbg("SELECT_SESSION sid=${sessionId.take(8)} cache.len=$cachedLen")
         _selectedSessionId.value = sessionId
         _terminalOutput.value = sessionOutputCache[sessionId].orEmpty()
-        _terminalOutputVersion.value = currentSessionOutputVersion(sessionId)
+        _terminalOutputVersion.value = ensureSessionOutputVersion(sessionId)
         dbg("SELECT_SESSION output.len=${_terminalOutput.value.length}")
         _replayLoading.value = _terminalOutput.value.isBlank()
         _terminalStreamStatus.value = if (_terminalOutput.value.isBlank()) "正在请求桌面端回放…" else "已加载本地缓存，正在同步实时输出"
@@ -795,11 +932,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val preview = snapshot.optString("preview", previous?.preview.orEmpty()).orEmpty()
         val activity = snapshot.optString("activity", previous?.activity.orEmpty()).orEmpty()
         val taskState = snapshot.optString("task_state", previous?.taskState.orEmpty()).orEmpty()
+        val layout = snapshot.optJSONObject("layout")
         val previousActivityAt = previous?.lastActivityAt ?: 0L
         val activityChanged = activity != previous?.activity || preview != previous?.preview || taskState != previous?.taskState
+        val sessionId = snapshot.optString("session_id", fallbackSessionId)
+        val paneTitle = layout?.optString("pane_title")?.takeIf { it.isNotBlank() }
+            ?: snapshot.optString("title", previous?.title ?: "Terminal")
         return TerminalSession(
-            sessionId = snapshot.optString("session_id", fallbackSessionId),
-            title = snapshot.optString("title", previous?.title ?: "Terminal"),
+            sessionId = sessionId,
+            title = paneTitle,
             cols = snapshot.optInt("cols", previous?.cols ?: 80),
             rows = snapshot.optInt("rows", previous?.rows ?: 24),
             status = snapshot.optString("status", previous?.status ?: "running"),
@@ -811,7 +952,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (previousActivityAt == 0L || activityChanged || taskState == "running" || taskState == "waiting_input") now else previousActivityAt
             } else {
                 previousActivityAt
-            }
+            },
+            tabId = layout?.optString("tab_id")?.takeIf { it.isNotBlank() } ?: previous?.tabId.orEmpty(),
+            tabTitle = layout?.optString("tab_title")?.takeIf { it.isNotBlank() } ?: previous?.tabTitle.orEmpty(),
+            tabOrder = layout?.optInt("tab_order", previous?.tabOrder ?: Int.MAX_VALUE) ?: (previous?.tabOrder ?: Int.MAX_VALUE),
+            paneId = layout?.optString("pane_id")?.takeIf { it.isNotBlank() } ?: previous?.paneId.orEmpty(),
+            paneTitle = paneTitle,
+            paneOrder = layout?.optInt("pane_order", previous?.paneOrder ?: Int.MAX_VALUE) ?: (previous?.paneOrder ?: Int.MAX_VALUE),
+            paneCount = layout?.optInt("pane_count", previous?.paneCount ?: 1)?.coerceAtLeast(1) ?: (previous?.paneCount ?: 1)
         )
     }
 
@@ -1080,8 +1228,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun trimReplay(text: String): String {
-        val maxLines = 1_000
-        val maxLength = 400_000
+        val maxLines = 5_000
+        val maxLength = 1_500_000
         val normalized = collapseCarriageReturnFrames(text)
         var start = 0
         var lineCount = 0
@@ -1168,5 +1316,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun currentSessionOutputVersion(sessionId: String): Long {
         return sessionOutputVersion[sessionId] ?: 0L
+    }
+
+    private fun ensureSessionOutputVersion(sessionId: String): Long {
+        val current = currentSessionOutputVersion(sessionId)
+        if (current > 0L) return current
+        if (sessionOutputCache[sessionId].isNullOrEmpty()) return 0L
+        sessionOutputVersion[sessionId] = 1L
+        return 1L
     }
 }

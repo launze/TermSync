@@ -2,6 +2,22 @@ use reqwest::Certificate;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReleaseInfo {
+    pub available: bool,
+    pub platform: String,
+    #[serde(default)]
+    pub version_name: String,
+    #[serde(default)]
+    pub file_name: String,
+    #[serde(default)]
+    pub download_url: String,
+    #[serde(default)]
+    pub size: String,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisteredDevice {
     pub id: String,
     pub name: String,
@@ -98,4 +114,27 @@ pub async fn generate_pairing_code(
         .json::<PairingCodeResponse>()
         .await
         .map_err(|e| format!("Failed to parse pairing response: {e}"))
+}
+
+pub async fn fetch_latest_release(
+    server_url: String,
+    platform: &str,
+) -> Result<ReleaseInfo, String> {
+    let client = http_client()?;
+    let url = format!(
+        "{}/api/releases/latest?platform={}",
+        server_base_url(&server_url)?,
+        platform
+    );
+
+    client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("Release request failed: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("Release request failed: {e}"))?
+        .json::<ReleaseInfo>()
+        .await
+        .map_err(|e| format!("Failed to parse release response: {e}"))
 }
