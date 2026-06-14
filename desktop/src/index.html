@@ -4950,6 +4950,17 @@
                 return this.replayBuffers.get(sessionId) || '';
             }
 
+            splitReplayBuffer(data) {
+                const text = String(data || '');
+                if (!text) return [''];
+                const chunkSize = 256 * 1024;
+                const chunks = [];
+                for (let index = 0; index < text.length; index += chunkSize) {
+                    chunks.push(text.slice(index, index + chunkSize));
+                }
+                return chunks;
+            }
+
             summarizeActivity(line) {
                 const normalized = collapseWhitespace(line);
                 const lower = normalized.toLowerCase();
@@ -5353,18 +5364,24 @@
                     if (sessionId && targetDeviceId && typeof invoke !== 'undefined') {
                         const data = this.getReplayBuffer(sessionId);
                         console.log('获取到的回放数据长度:', data.length);
-                        invoke('relay_terminal_replay', {
-                            sessionId: sessionId,
-                            targetDeviceId: targetDeviceId,
-                            data: data
-                        }).then(() => {
+                        const chunks = this.splitReplayBuffer(data);
+                        (async () => {
+                            for (let index = chunks.length - 1; index >= 0; index--) {
+                                const chunk = chunks[index];
+                                await invoke('relay_terminal_replay', {
+                                    sessionId: sessionId,
+                                    targetDeviceId: targetDeviceId,
+                                    data: chunk
+                                });
+                            }
                             this.debug('terminal:replay:sent', {
                                 sessionId: sessionId,
                                 targetDeviceId: targetDeviceId,
-                                bytes: data.length
+                                bytes: data.length,
+                                chunks: chunks.length
                             });
                             console.log('回放数据发送成功');
-                        }).catch((err) => {
+                        })().catch((err) => {
                             console.warn('Relay terminal replay failed:', err);
                             this.debug('terminal:replay:send-failed', {
                                 sessionId: sessionId,

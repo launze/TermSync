@@ -213,8 +213,10 @@ func (h *WSHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "connection closed")
 
-	// Set a generous read limit for large terminal output messages (1MB)
-	conn.SetReadLimit(1 << 20)
+	// Replay messages can be large when a mobile client opens a busy terminal.
+	// Keep this above the desktop replay chunk size so one replay cannot drop
+	// the desktop connection with "read limited" errors.
+	conn.SetReadLimit(8 << 20)
 
 	// Wait for auth message first
 	deviceID, deviceType, err := h.waitForAuth(r.Context(), conn)

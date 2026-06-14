@@ -436,7 +436,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             _terminalOutput.value = sessionOutputCache[sessionId].orEmpty()
                             _terminalOutputVersion.value = version
                             _replayLoading.value = false
-                            _terminalStreamStatus.value = if (data.isNotBlank()) "已加载桌面端回放" else "桌面端暂无可回放内容"
+                            _terminalStreamStatus.value = if (data.isNotBlank()) "正在接收桌面端回放" else "桌面端暂无可回放内容"
                         }
                     }
                 }
