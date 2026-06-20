@@ -172,7 +172,17 @@ systemctl restart termsync.service
 sleep 1
 systemctl is-active --quiet termsync.service
 if systemctl list-unit-files download-portal-8888.service >/dev/null 2>&1; then
-  systemctl restart download-portal-8888.service
+  systemctl stop download-portal-8888.service || true
+  old_pids=`$(ss -ltnp 'sport = :8888' | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | sort -u)
+  for old_pid in `$old_pids; do
+    old_comm=`$(ps -p "`$old_pid" -o comm= 2>/dev/null || true)
+    if [ "`$old_comm" = "download-portal" ]; then
+      kill "`$old_pid" || true
+    fi
+  done
+  sleep 1
+  systemctl reset-failed download-portal-8888.service || true
+  systemctl start download-portal-8888.service
 elif systemctl list-unit-files download-portal.service >/dev/null 2>&1; then
   systemctl restart download-portal.service
 fi
