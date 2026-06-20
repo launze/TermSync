@@ -42,7 +42,7 @@ func (h *AuthHandler) HandleRegister(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		Name string `json:"name"`
-		Type string `json:"type"` // "desktop" or "mobile"
+		Type string `json:"type"` // "desktop", "mobile", or "pc_receiver"
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -56,7 +56,7 @@ func (h *AuthHandler) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	if req.Type == "" {
 		req.Type = "desktop"
 	}
-	if req.Type != "desktop" && req.Type != "mobile" {
+	if !isValidDeviceType(req.Type) {
 		http.Error(w, "Invalid device type", http.StatusBadRequest)
 		return
 	}
@@ -408,7 +408,7 @@ func (h *APIHandler) HandleStartPairing(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-// HandleCompletePairing binds a mobile device to the desktop associated with a pairing code.
+// HandleCompletePairing binds a viewer device to the desktop associated with a pairing code.
 func (h *APIHandler) HandleCompletePairing(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -436,8 +436,8 @@ func (h *APIHandler) HandleCompletePairing(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "Invalid device token", http.StatusUnauthorized)
 		return
 	}
-	if device.Type != "mobile" {
-		http.Error(w, "Only mobile devices can complete pairing", http.StatusForbidden)
+	if !isViewerDeviceType(device.Type) {
+		http.Error(w, "Only viewer devices can complete pairing", http.StatusForbidden)
 		return
 	}
 
@@ -519,3 +519,11 @@ func CORSMiddleware(next http.Handler) http.Handler {
 
 // Ensure io is used (for potential future streaming)
 var _ = io.EOF
+
+func isValidDeviceType(deviceType string) bool {
+	return deviceType == "desktop" || isViewerDeviceType(deviceType)
+}
+
+func isViewerDeviceType(deviceType string) bool {
+	return deviceType == "mobile" || deviceType == "pc_receiver"
+}

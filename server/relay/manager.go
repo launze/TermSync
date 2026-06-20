@@ -39,7 +39,7 @@ type SessionManager struct {
 	// deviceConnections maps device ID to its WebSocket connection
 	deviceConnections map[string]*websocket.Conn
 
-	// deviceTypes maps device ID to its type ("desktop" | "mobile")
+	// deviceTypes maps device ID to its type ("desktop" | "mobile" | "pc_receiver")
 	deviceTypes map[string]string
 
 	// sessions maps session ID to its metadata
@@ -386,10 +386,10 @@ func (sm *SessionManager) handleSessionUpdate(deviceID string, msg models.Messag
 	return nil
 }
 
-// handleSessionCreateRequest forwards a mobile-originated create request to a paired desktop.
+// handleSessionCreateRequest forwards a viewer-originated create request to a paired desktop.
 func (sm *SessionManager) handleSessionCreateRequest(deviceID string, msg models.Message) error {
-	if sm.getDeviceType(deviceID) != "mobile" {
-		sm.sendError(deviceID, "permission_denied", "Only mobile devices can request remote terminal creation")
+	if !isViewerDeviceType(sm.getDeviceType(deviceID)) {
+		sm.sendError(deviceID, "permission_denied", "Only viewer devices can request remote terminal creation")
 		return nil
 	}
 
@@ -504,8 +504,8 @@ func (sm *SessionManager) handleSessionCloseRequest(deviceID string, msg models.
 		})
 	}
 
-	if sm.getDeviceType(deviceID) != "mobile" {
-		sm.sendError(deviceID, "permission_denied", "Only mobile devices can request remote terminal close")
+	if !isViewerDeviceType(sm.getDeviceType(deviceID)) {
+		sm.sendError(deviceID, "permission_denied", "Only viewer devices can request remote terminal close")
 		return nil
 	}
 
@@ -603,7 +603,7 @@ func (sm *SessionManager) relayTerminalInput(deviceID string, msg models.Message
 	return nil
 }
 
-// relayTerminalResize: desktop owner/viewer -> owner.
+// relayTerminalResize: owner or desktop-class viewer -> owner.
 // Mobile viewers render locally and must not resize the owner's PTY.
 func (sm *SessionManager) relayTerminalResize(deviceID string, msg models.Message) error {
 	if msg.SessionID == "" {
@@ -906,15 +906,15 @@ func (sm *SessionManager) sendError(deviceID, code, message string) {
 	sm.sendToDevice(deviceID, errMsg)
 }
 
-// notifyPairedMobiles sends a message to all mobiles paired with the owner.
+// notifyPairedMobiles sends a message to all viewer devices paired with the owner.
 func (sm *SessionManager) notifyPairedMobiles(ownerID string, msg models.Message) {
-	mobileIDs, err := sm.store.ListPairedMobileIDs(context.Background(), ownerID)
+	viewerIDs, err := sm.store.ListPairedViewerIDs(context.Background(), ownerID)
 	if err != nil {
-		log.Printf("[pairing] Failed to list paired mobiles for %s: %v", ownerID, err)
+		log.Printf("[pairing] Failed to list paired viewers for %s: %v", ownerID, err)
 		return
 	}
 
-	for _, deviceID := range mobileIDs {
+	for _, deviceID := range viewerIDs {
 		dID := deviceID
 		go func() {
 			sm.sendToDevice(dID, msg)
@@ -983,7 +983,7 @@ func (sm *SessionManager) PushSessionList(deviceID string) error {
 func (sm *SessionManager) listSessionSnapshotsForDevice(deviceID string) ([]models.SessionSnapshot, error) {
 	deviceType := sm.getDeviceType(deviceID)
 	allowedOwners := map[string]bool{}
-	if deviceType == "mobile" {
+	if isViewerDeviceType(deviceType) {
 		pairedDesktopIDs, err := sm.store.ListPairedDesktopIDs(context.Background(), deviceID)
 		if err != nil {
 			return nil, err
@@ -998,16 +998,20 @@ func (sm *SessionManager) listSessionSnapshotsForDevice(deviceID string) ([]mode
 
 	snapshots := make([]models.SessionSnapshot, 0, len(sm.sessions))
 	for sid, si := range sm.sessions {
-		if deviceType == "mobile" && !allowedOwners[si.OwnerID] {
+		if isViewerDeviceType(deviceType) && !allowedOwners[si.OwnerID] {
 			continue
 		}
-		if deviceType != "mobile" && si.OwnerID != deviceID {
+		if !isViewerDeviceType(deviceType) && si.OwnerID != deviceID {
 			continue
 		}
 		snapshots = append(snapshots, sessionSnapshot(sid, si))
 	}
 
 	return snapshots, nil
+}
+
+func isViewerDeviceType(deviceType string) bool {
+	return deviceType == "mobile" || deviceType == "pc_receiver"
 }
 
 // ─── Payload helpers ──────────────────────────────────────────────────────

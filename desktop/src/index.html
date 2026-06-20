@@ -1203,17 +1203,32 @@
     <div class="modal-overlay" id="settingsModal">
         <div class="modal">
             <h3>⚙ 设置</h3>
+            <div class="form-group">
+                <label>客户端模式</label>
+                <select id="settingClientMode" onchange="window.app.updateClientModeVisibility()">
+                    <option value="sender">PC 发送端</option>
+                    <option value="receiver">PC 接收端</option>
+                </select>
+                <small>发送端运行真实终端；接收端像手机一样查看并控制已配对发送端。</small>
+            </div>
             <details class="form-group" style="padding:10px 12px;background:#252526;border:1px solid #3c3c3c;border-radius:4px;">
                 <summary style="cursor:pointer;color:#fff;font-size:13px;">手机配对</summary>
-                <small>点击“生成配对码”，桌面身份会自动准备。</small>
-                <small>在手机端输入 6 位配对码后即可绑定并连接。</small>
+                <small>发送端生成配对码；每个手机或 PC 接收端各输入一次即可绑定。</small>
             </details>
-            <div class="form-group">
-                <label>手机配对码</label>
+            <div class="form-group" id="senderPairingGroup">
+                <label>发送端配对码</label>
                 <input type="text" id="pairingCodeDisplay" class="readonly-output pairing-code" placeholder="点击生成" readonly />
-                <small id="pairingCodeHint">配对码有效期 5 分钟，在手机端输入后即可绑定。</small>
+                <small id="pairingCodeHint">配对码有效期 5 分钟，在接收端输入后即可绑定。</small>
                 <div class="inline-actions" style="margin-top:8px;">
                     <button class="btn btn-primary" onclick="window.app.generatePairingCode()">生成配对码</button>
+                </div>
+            </div>
+            <div class="form-group" id="receiverPairingGroup" style="display:none;">
+                <label>绑定发送端</label>
+                <input type="text" id="receiverPairingCode" placeholder="输入发送端 6 位配对码" maxlength="6" />
+                <small id="receiverPairingHint">绑定成功后，PC 接收端可以同时和手机一样订阅发送端终端。</small>
+                <div class="inline-actions" style="margin-top:8px;">
+                    <button class="btn btn-primary" onclick="window.app.completeReceiverPairing()">绑定发送端</button>
                 </div>
             </div>
             <div class="form-group">
@@ -2078,6 +2093,7 @@
         const DEFAULT_SERVER_URL = 'wss://8.153.163.104:7373/ws';
         const LEGACY_DEFAULT_SERVER_URL = 'wss://nas.smarthome2020.top:7373/ws';
         const DEFAULT_DESKTOP_DEVICE_NAME = 'TTY1 Desktop';
+        const DEFAULT_PC_RECEIVER_DEVICE_NAME = 'TermSync PC Receiver';
         const DEFAULT_AI_PRESET = 'termsync';
         const DEFAULT_AI_MODEL = 'DeepSeek-V4-Pro';
         const TERMINAL_FONT_SIZE_DEFAULT = 14;
@@ -2098,6 +2114,10 @@
             const parsed = Number.parseInt(value, 10);
             if (!Number.isFinite(parsed)) return TERMINAL_FONT_SIZE_DEFAULT;
             return Math.max(TERMINAL_FONT_SIZE_MIN, Math.min(TERMINAL_FONT_SIZE_MAX, parsed));
+        }
+
+        function normalizeClientMode(value) {
+            return value === 'receiver' ? 'receiver' : 'sender';
         }
 
         function getTerminalFontShortcutAction(event) {
@@ -2152,8 +2172,10 @@
             constructor() {
                 this.defaults = {
                     shell: 'pwsh', customShell: '', fontSize: TERMINAL_FONT_SIZE_DEFAULT,
+                    clientMode: 'sender',
                     serverUrl: DEFAULT_SERVER_URL, serverToken: '',
                     deviceName: DEFAULT_DESKTOP_DEVICE_NAME,
+                    pairedDesktopId: '', pairedDesktopName: '',
                     autoConnect: true, autoReconnect: true,
                     reconnectInterval: 3000, maxReconnectAttempts: 10,
                     aiPreset: DEFAULT_AI_PRESET,
@@ -2182,6 +2204,7 @@
                     if (this.isDefaultDeviceName(this.settings.deviceName)) {
                         this.settings.deviceName = DEFAULT_DESKTOP_DEVICE_NAME;
                     }
+                    this.settings.clientMode = normalizeClientMode(this.settings.clientMode);
                     const aiIsOldBlankDefault = this.settings.aiPreset === 'litellm'
                         && !String(this.settings.aiApiKey || '').trim()
                         && normalizeApiBaseUrl(this.settings.aiBaseUrl) === normalizeApiBaseUrl(AI_PRESETS.litellm.baseUrl)
@@ -2200,7 +2223,9 @@
             }
             get(k) { return this.settings[k]; }
             set(k, v) {
-                this.settings[k] = k === 'fontSize' ? normalizeTerminalFontSize(v) : v;
+                this.settings[k] = k === 'fontSize'
+                    ? normalizeTerminalFontSize(v)
+                    : (k === 'clientMode' ? normalizeClientMode(v) : v);
                 this.save();
             }
             getAll() { return { ...this.settings }; }
@@ -2433,6 +2458,8 @@
                 this.paneId = paneId;
                 this.shell = shell;
                 this.cwd = options.cwd || null;
+                this.remote = !!options.remote;
+                this.sessionId = options.sessionId || ('local-' + paneId);
                 this.backendReady = false;
                 this.term = null;
                 this.fitAddon = null;
@@ -2442,8 +2469,12 @@
                 this.lastCols = 0;
                 this.lastRows = 0;
                 this.pendingWrites = [
-                    '\x1b[38;2;78;201;176mTTY1 本地终端已就绪\x1b[0m\r\n',
-                    '\x1b[38;2;138;138;138m已切换到真实 PTY 终端，支持选择、复制、粘贴和 ANSI 输出。\x1b[0m\r\n'
+                    this.remote
+                        ? '\x1b[38;2;78;201;176mTermSync 远程终端已连接\x1b[0m\r\n'
+                        : '\x1b[38;2;78;201;176mTTY1 本地终端已就绪\x1b[0m\r\n',
+                    this.remote
+                        ? '\x1b[38;2;138;138;138m真实终端运行在已配对的 PC 发送端。\x1b[0m\r\n'
+                        : '\x1b[38;2;138;138;138m已切换到真实 PTY 终端，支持选择、复制、粘贴和 ANSI 输出。\x1b[0m\r\n'
                 ];
             }
             setBackendReady(ready) {
@@ -2672,12 +2703,13 @@
             async sendText(text) {
                 if (!text || typeof invoke === 'undefined') return false;
                 if (!this.backendReady) {
+                    if (this.remote) return false;
                     const restored = await window.app?.ensureTerminalBackendReady(this.paneId);
                     if (!restored) return false;
                 }
                 try {
                     await invoke('send_input', {
-                        sessionId: 'local-' + this.paneId,
+                        sessionId: this.sessionId,
                         input: text
                     });
                     this.focus();
@@ -2688,7 +2720,7 @@
                     if (restored) {
                         try {
                             await invoke('send_input', {
-                                sessionId: 'local-' + this.paneId,
+                                sessionId: this.sessionId,
                                 input: text
                             });
                             this.focus();
@@ -2705,12 +2737,13 @@
             async sendInput(data) {
                 if (!data || typeof invoke === 'undefined') return false;
                 if (!this.backendReady) {
+                    if (this.remote) return false;
                     const restored = await window.app?.ensureTerminalBackendReady(this.paneId);
                     if (!restored) return false;
                 }
                 try {
                     await invoke('send_input', {
-                        sessionId: 'local-' + this.paneId,
+                        sessionId: this.sessionId,
                         input: data
                     });
                     return true;
@@ -2745,7 +2778,7 @@
                     if (!this.backendReady || typeof invoke === 'undefined') return;
                     try {
                         await invoke('resize_terminal_cmd', {
-                            sessionId: 'local-' + this.paneId,
+                            sessionId: this.sessionId,
                             cols: dims.cols,
                             rows: dims.rows
                         });
@@ -2795,6 +2828,9 @@
                 this.sessionMetaSendTimers = new Map();
                 this.sessionRunningIdleTimers = new Map();
                 this.replayBuffers = new Map();
+                this.remoteReplayTimers = new Map();
+                this.sessionPaneMap = new Map();
+                this.remoteSessions = new Map();
                 this.commandCatalog = this.loadCommandCatalog();
                 this.commandLibrary = buildCommandLibraryUiState(this.commandCatalog);
                 this.savedTabs = this.loadSavedTabs();
@@ -2846,7 +2882,14 @@
                 this.refreshConnectionInputs();
                 this.syncAiConfigInputs();
                 await this.setupTauriListeners();
-                if (!this.restoreWorkspace()) {
+                if (this.isReceiverMode()) {
+                    const firstPaneId = this.splitTree.init();
+                    this.createNewTab(firstPaneId, {
+                        title: '远程终端',
+                        paneTitle: '等待远程终端',
+                        placeholderRemote: true
+                    });
+                } else if (!this.restoreWorkspace()) {
                     const firstPaneId = this.splitTree.init();
                     this.createNewTab(firstPaneId);
                 }
@@ -2862,7 +2905,7 @@
                     await this.connect();
                 }
                 this.showToast(this.hasDesktopToken()
-                    ? 'TTY1 终端已启动 - 默认使用 ' + this.settings.get('shell')
+                    ? (this.isReceiverMode() ? 'PC 接收端已启动' : 'TTY1 终端已启动 - 默认使用 ' + this.settings.get('shell'))
                     : '首次使用可直接生成手机配对码', 'success');
                 this.checkDesktopUpdate(true);
                 this.debug('init:done', {
@@ -2874,6 +2917,14 @@
 
             hasDesktopToken() {
                 return !!(this.settings.get('serverToken') || '').trim();
+            }
+
+            isReceiverMode() {
+                return normalizeClientMode(this.settings.get('clientMode')) === 'receiver';
+            }
+
+            deviceTypeForCurrentMode() {
+                return this.isReceiverMode() ? 'pc_receiver' : 'desktop';
             }
 
             hideConnectionGuide() {
@@ -2975,7 +3026,9 @@
                 if (!this.settings.isDefaultDeviceName(this.settings.get('deviceName'))) return;
                 const name = await this.resolveDefaultDeviceName();
                 if (!name || !name.trim()) return;
-                this.settings.set('deviceName', name.trim());
+                this.settings.set('deviceName', this.isReceiverMode()
+                    ? name.trim() + ' Receiver'
+                    : name.trim());
             }
 
             async resolveDefaultDeviceName() {
@@ -4761,6 +4814,7 @@
 
             async syncSessionTitleForPane(paneId, tab = this.findTabByPaneId(paneId)) {
                 if (!tab || typeof invoke === 'undefined') return;
+                if (this.terminals.get(paneId)?.remote) return;
                 const sessionId = this.sessionIdForPane(paneId);
                 const title = this.getSessionTitleForPane(paneId, tab);
                 const state = this.ensureSessionActivity(paneId, title);
@@ -4810,12 +4864,15 @@
             }
 
             sessionIdForPane(paneId) {
-                return 'local-' + paneId;
+                return this.terminals.get(paneId)?.sessionId || ('local-' + paneId);
             }
 
             paneIdFromSession(sessionId) {
-                if (!sessionId || !sessionId.startsWith('local-')) return null;
-                const paneId = parseInt(sessionId.slice(6), 10);
+                if (!sessionId) return null;
+                const mapped = this.sessionPaneMap.get(sessionId);
+                if (Number.isFinite(mapped)) return mapped;
+                if (!String(sessionId).startsWith('local-')) return null;
+                const paneId = parseInt(String(sessionId).slice(6), 10);
                 return Number.isFinite(paneId) ? paneId : null;
             }
 
@@ -5104,6 +5161,7 @@
             }
 
             scheduleSessionMetaSend(sessionId, immediate) {
+                if (this.isReceiverMode()) return;
                 if (!this.serverConnected || typeof invoke === 'undefined') return;
                 const existing = this.sessionMetaSendTimers.get(sessionId);
                 if (existing) clearTimeout(existing);
@@ -5120,6 +5178,7 @@
             }
 
             async flushSessionMetaSend(sessionId, force) {
+                if (this.isReceiverMode()) return;
                 if (!this.serverConnected || typeof invoke === 'undefined') return;
                 const state = this.sessionActivity.get(sessionId);
                 if (!state) return;
@@ -5159,9 +5218,122 @@
             }
 
             async syncAllSessionActivity() {
+                if (this.isReceiverMode()) return;
                 for (const sessionId of this.sessionActivity.keys()) {
                     await this.flushSessionMetaSend(sessionId, true);
                 }
+            }
+
+            async requestRemoteSessionList() {
+                if (!this.isReceiverMode() || typeof invoke === 'undefined' || !this.serverConnected) return;
+                try {
+                    await invoke('request_session_list');
+                } catch (err) {
+                    console.warn('Request remote session list failed:', err);
+                    this.showToast('刷新远程终端列表失败: ' + err, 'error');
+                }
+            }
+
+            async subscribeRemoteSession(sessionId) {
+                if (!sessionId || typeof invoke === 'undefined') return;
+                try {
+                    await invoke('subscribe_session', { sessionId });
+                    await invoke('request_terminal_replay', { sessionId });
+                } catch (err) {
+                    console.warn('Subscribe remote session failed:', err);
+                    this.debug('remote:subscribe:failed', { sessionId, error: String(err) });
+                }
+            }
+
+            async handleSessionListResponse(payload) {
+                const sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
+                this.debug('remote:session-list', { count: sessions.length });
+                for (const session of sessions) {
+                    if (!session?.session_id) continue;
+                    await this.openOrUpdateRemoteSession(session);
+                    await this.subscribeRemoteSession(session.session_id);
+                }
+                if (sessions.length === 0 && this.isReceiverMode()) {
+                    const terminal = this.terminals.get(this.activePaneId);
+                    if (terminal && terminal.remote && !terminal.backendReady) {
+                        terminal.appendOutput('当前没有可见的远程终端。可点击 + 请求发送端新建终端。', false);
+                    }
+                }
+            }
+
+            snapshotFromServerPayload(payload) {
+                return payload?.snapshot || payload || null;
+            }
+
+            async openOrUpdateRemoteSession(snapshot) {
+                if (!snapshot?.session_id) return null;
+                const sessionId = String(snapshot.session_id);
+                this.remoteSessions.set(sessionId, snapshot);
+                let paneId = this.paneIdFromSession(sessionId);
+                const title = snapshot.title || '远程终端';
+
+                if (paneId === null) {
+                    const shouldReuseOnlyPane = this.isReceiverMode()
+                        && this.tabs.size === 1
+                        && this.terminals.size === 1
+                        && Array.from(this.terminals.values())[0]?.remote
+                        && !Array.from(this.terminals.values())[0]?.backendReady;
+                    if (shouldReuseOnlyPane) {
+                        paneId = this.activePaneId || Array.from(this.terminals.keys())[0];
+                        const terminal = this.terminals.get(paneId);
+                        if (terminal) {
+                            terminal.remote = true;
+                            terminal.sessionId = sessionId;
+                            terminal.pendingWrites = [];
+                        }
+                    } else {
+                        const tabId = this.createNewTab(undefined, {
+                            title,
+                            paneTitle: title,
+                            remoteSessionId: sessionId,
+                            skipRequestRemoteCreate: true
+                        });
+                        const tab = this.tabs.get(tabId);
+                        paneId = tab ? Array.from(tab.panes)[0] : null;
+                    }
+                }
+
+                if (paneId === null || paneId === undefined) return null;
+                this.sessionPaneMap.set(sessionId, paneId);
+                const terminal = this.terminals.get(paneId);
+                if (terminal) {
+                    terminal.remote = true;
+                    terminal.sessionId = sessionId;
+                    terminal.setBackendReady(snapshot.status !== 'closed');
+                    terminal.queueResize();
+                }
+
+                const tab = this.findTabByPaneId(paneId);
+                if (tab) {
+                    tab.title = normalizeEditableTitle(snapshot.layout?.tab_title || title, title);
+                    this.setPaneTitleValue(tab, paneId, snapshot.layout?.pane_title || title, 'auto');
+                    this.renderTabs();
+                    if (tab.id === this.activeTabId) this.syncPaneTitleElements(tab);
+                }
+
+                const state = this.ensureSessionActivity(paneId, title);
+                state.title = title;
+                state.activity = snapshot.activity || state.activity || '远程终端已就绪';
+                state.preview = snapshot.preview || state.preview || '';
+                state.taskState = snapshot.task_state || state.taskState || 'idle';
+                state.lastUpdatedAt = Date.now();
+                this.updateStatusBar();
+                return paneId;
+            }
+
+            handleRemoteSessionClosed(sessionId) {
+                const paneId = this.paneIdFromSession(sessionId);
+                if (paneId === null) return;
+                const terminal = this.terminals.get(paneId);
+                terminal?.setBackendReady(false);
+                terminal?.appendOutput('远程终端已关闭。', true);
+                document.getElementById('indicator-' + paneId)?.classList.add('disconnected');
+                this.remoteSessions.delete(sessionId);
             }
 
             async setupTauriListeners() {
@@ -5260,13 +5432,19 @@
                     this.setConnectionGuide({
                         phase: 'success',
                         title: '服务器连接成功',
-                        detail: payload.message || '设备认证完成，手机端可以看到这台电脑的终端。',
+                        detail: payload.message || (this.isReceiverMode()
+                            ? '设备认证完成，可以查看已配对发送端的终端。'
+                            : '设备认证完成，接收端可以看到这台电脑的终端。'),
                         steps: { address: 'done', identity: 'done', socket: 'done', auth: 'done' },
                         actions: [],
                         autoHideMs: 2200
                     });
-                    try { await invoke('sync_active_sessions'); } catch (e) { console.warn('Sync sessions failed:', e); }
-                    await this.syncAllSessionActivity();
+                    if (this.isReceiverMode()) {
+                        await this.requestRemoteSessionList();
+                    } else {
+                        try { await invoke('sync_active_sessions'); } catch (e) { console.warn('Sync sessions failed:', e); }
+                        await this.syncAllSessionActivity();
+                    }
                     if (payload.message) this.showToast(payload.message, 'success');
                     else this.showToast('已连接到服务器', 'success');
                     return;
@@ -5338,6 +5516,53 @@
                     sessionId: payload.session_id || null,
                     payload: payload.payload || null
                 });
+                if (payload.type === 'session.list_res') {
+                    this.handleSessionListResponse(payload.payload || {});
+                    return;
+                }
+                if (payload.type === 'session.state') {
+                    const snapshot = this.snapshotFromServerPayload(payload.payload || {});
+                    if (this.isReceiverMode() && snapshot?.session_id) {
+                        this.openOrUpdateRemoteSession(snapshot);
+                    }
+                    return;
+                }
+                if (payload.type === 'terminal.output' && this.isReceiverMode()) {
+                    const sessionId = payload.session_id || null;
+                    const data = payload.payload?.data || '';
+                    const paneId = this.paneIdFromSession(sessionId);
+                    const terminal = paneId === null ? null : this.terminals.get(paneId);
+                    if (terminal) terminal.appendChunk(data);
+                    if (sessionId && data) {
+                        this.appendReplayBuffer(sessionId, data);
+                        this.applySessionOutput(sessionId, data, null);
+                    }
+                    return;
+                }
+                if (payload.type === 'terminal.replay' && this.isReceiverMode()) {
+                    const sessionId = payload.session_id || null;
+                    const data = payload.payload?.data || '';
+                    const paneId = this.paneIdFromSession(sessionId);
+                    const terminal = paneId === null ? null : this.terminals.get(paneId);
+                    if (terminal && data) {
+                        if (!this.remoteReplayTimers.has(sessionId)) {
+                            terminal.term?.clear?.();
+                            this.replayBuffers.set(sessionId, '');
+                        } else {
+                            clearTimeout(this.remoteReplayTimers.get(sessionId));
+                        }
+                        terminal.appendChunk(data);
+                        this.remoteReplayTimers.set(sessionId, setTimeout(() => {
+                            this.remoteReplayTimers.delete(sessionId);
+                        }, 250));
+                    }
+                    if (sessionId && data) this.appendReplayBuffer(sessionId, data);
+                    return;
+                }
+                if (payload.type === 'session.close' && this.isReceiverMode()) {
+                    this.handleRemoteSessionClosed(payload.session_id || null);
+                    return;
+                }
                 if (payload.type === 'session.create_request') {
                     const requestedTitle = payload.payload && payload.payload.title
                         ? String(payload.payload.title)
@@ -5429,30 +5654,36 @@
 
             async registerDesktopDevice() {
                 const serverUrl = document.getElementById('settingServerUrl').value.trim() || this.settings.get('serverUrl');
-                const deviceName = document.getElementById('settingDeviceName').value.trim() || this.settings.get('deviceName') || DEFAULT_DESKTOP_DEVICE_NAME;
+                const deviceName = document.getElementById('settingDeviceName').value.trim()
+                    || this.settings.get('deviceName')
+                    || (this.isReceiverMode() ? DEFAULT_PC_RECEIVER_DEVICE_NAME : DEFAULT_DESKTOP_DEVICE_NAME);
                 if (!serverUrl) { this.showToast('请先填写服务器地址', 'warning'); return; }
                 try {
-                    const result = await this.registerDesktopDeviceFor(serverUrl, deviceName);
-                    this.showToast('桌面身份已准备: ' + result.device.name, 'success');
+                    const result = await this.registerDesktopDeviceFor(serverUrl, deviceName, this.deviceTypeForCurrentMode());
+                    this.showToast('设备身份已准备: ' + result.device.name, 'success');
                 } catch (err) {
                     console.error('Register device failed:', err);
-                    this.showToast('准备桌面身份失败: ' + err, 'error');
+                    this.showToast('准备设备身份失败: ' + err, 'error');
                 }
             }
 
-            async registerDesktopDeviceFor(serverUrl, deviceName) {
+            async registerDesktopDeviceFor(serverUrl, deviceName, deviceType = 'desktop') {
                 const result = await invoke('register_device', {
                     serverUrl: serverUrl,
-                    name: deviceName || DEFAULT_DESKTOP_DEVICE_NAME,
-                    deviceType: 'desktop'
+                    name: deviceName || (deviceType === 'pc_receiver' ? DEFAULT_PC_RECEIVER_DEVICE_NAME : DEFAULT_DESKTOP_DEVICE_NAME),
+                    deviceType: deviceType
                 });
                 this.settings.set('serverUrl', serverUrl);
                 this.settings.set('deviceName', result.device.name);
                 this.settings.set('serverToken', result.device.token);
+                this.settings.set('clientMode', deviceType === 'pc_receiver' ? 'receiver' : 'sender');
                 const nameInput = document.getElementById('settingDeviceName');
                 const tokenInput = document.getElementById('settingDeviceToken');
+                const modeInput = document.getElementById('settingClientMode');
                 if (nameInput) nameInput.value = result.device.name;
                 if (tokenInput) tokenInput.value = result.device.token;
+                if (modeInput) modeInput.value = this.settings.get('clientMode');
+                this.updateClientModeVisibility();
                 this.refreshConnectionInputs();
                 return result;
             }
@@ -5466,7 +5697,7 @@
                     try {
                         this.showToast('正在准备桌面身份...', 'warning');
                         const deviceName = document.getElementById('settingDeviceName').value.trim() || this.settings.get('deviceName') || DEFAULT_DESKTOP_DEVICE_NAME;
-                        const result = await this.registerDesktopDeviceFor(serverUrl, deviceName);
+                        const result = await this.registerDesktopDeviceFor(serverUrl, deviceName, 'desktop');
                         token = result.device.token;
                     } catch (err) {
                         console.error('Auto register before pairing failed:', err);
@@ -5486,6 +5717,50 @@
                 } catch (err) {
                     console.error('Generate pairing code failed:', err);
                     this.showToast('生成配对码失败: ' + err, 'error');
+                }
+            }
+
+            async completeReceiverPairing() {
+                const serverUrl = document.getElementById('settingServerUrl').value.trim() || this.settings.get('serverUrl');
+                const tokenInput = document.getElementById('settingDeviceToken');
+                const codeInput = document.getElementById('receiverPairingCode');
+                const code = (codeInput?.value || '').trim();
+                let token = tokenInput.value.trim() || this.settings.get('serverToken');
+                if (!serverUrl) { this.showToast('请先填写服务器地址', 'warning'); return; }
+                if (!/^\d{6}$/.test(code)) { this.showToast('请输入 6 位配对码', 'warning'); return; }
+                if (!token || this.settings.get('clientMode') !== 'receiver') {
+                    try {
+                        const deviceName = document.getElementById('settingDeviceName').value.trim()
+                            || this.settings.get('deviceName')
+                            || DEFAULT_PC_RECEIVER_DEVICE_NAME;
+                        const result = await this.registerDesktopDeviceFor(serverUrl, deviceName, 'pc_receiver');
+                        token = result.device.token;
+                    } catch (err) {
+                        this.showToast('准备接收端身份失败: ' + err, 'error');
+                        return;
+                    }
+                }
+                try {
+                    const result = await invoke('complete_pairing', {
+                        serverUrl,
+                        token,
+                        code
+                    });
+                    const pairing = result.pairing || {};
+                    this.settings.set('clientMode', 'receiver');
+                    this.settings.set('serverUrl', serverUrl);
+                    this.settings.set('serverToken', token);
+                    this.settings.set('pairedDesktopId', pairing.desktop_id || '');
+                    this.settings.set('pairedDesktopName', pairing.desktop_name || '');
+                    if (tokenInput) tokenInput.value = token;
+                    if (codeInput) codeInput.value = '';
+                    document.getElementById('receiverPairingHint').textContent =
+                        '已绑定发送端: ' + (pairing.desktop_name || pairing.desktop_id || '未知发送端');
+                    this.updateClientModeVisibility();
+                    this.showToast('已绑定发送端: ' + (pairing.desktop_name || 'PC 发送端'), 'success');
+                    if (this.serverConnected) await this.requestRemoteSessionList();
+                } catch (err) {
+                    this.showToast('绑定发送端失败: ' + err, 'error');
                 }
             }
 
@@ -5542,6 +5817,7 @@
 
             async ensureBackendSession(paneId, title, cwd) {
                 const terminal = this.terminals.get(paneId);
+                if (terminal?.remote) return;
                 if (typeof invoke === 'undefined') {
                     if (terminal) terminal.appendOutput('Tauri API 未注入，无法启动真实本地终端。', true);
                     return;
@@ -5549,10 +5825,12 @@
                 try {
                     const shell = this.resolveShellCommand();
                     const sessionTitle = title || this.getSessionTitleForPane(paneId) || defaultPaneTitle(paneId);
+                    const sessionId = this.sessionIdForPane(paneId);
+                    this.sessionPaneMap.set(sessionId, paneId);
                     this.debug('session:create', { paneId, title: sessionTitle, shell, cwd });
                     this.ensureSessionActivity(paneId, sessionTitle);
                     const session = await invoke('create_session', {
-                        sessionId: this.sessionIdForPane(paneId),
+                        sessionId: sessionId,
                         cols: 80,
                         rows: 24,
                         title: sessionTitle,
@@ -5578,7 +5856,6 @@
                         terminal.queueResize();
                     }
                     if (cwdChanged) this.scheduleWorkspaceSave();
-                    const sessionId = this.sessionIdForPane(paneId);
                     const state = this.ensureSessionActivity(paneId, sessionTitle);
                     if (!state.preview) {
                         state.preview = shell;
@@ -5600,8 +5877,14 @@
 
             async destroyBackendSession(paneId) {
                 if (typeof invoke === 'undefined') return;
+                const terminal = this.terminals.get(paneId);
+                const sessionId = this.sessionIdForPane(paneId);
                 try {
-                    await invoke('close_session', { sessionId: this.sessionIdForPane(paneId) });
+                    if (terminal?.remote) {
+                        await invoke('request_remote_session_close', { sessionId });
+                    } else {
+                        await invoke('close_session', { sessionId });
+                    }
                 } catch (err) {
                     console.warn('Close backend session failed:', err);
                 }
@@ -5658,6 +5941,10 @@
             setupHistoryKeys() {}
 
             createNewTab(initPaneId, options = {}) {
+                if (this.isReceiverMode() && !options.remoteSessionId && !options.placeholderRemote) {
+                    this.requestRemoteTerminalCreate(options.title);
+                    return null;
+                }
                 const tabId = options.id || (++this.nextTabId);
                 this.nextTabId = Math.max(this.nextTabId, tabId);
                 const rootNode = initPaneId ? this.splitTree.getNode(initPaneId) : this.splitTree.createLeaf();
@@ -5678,15 +5965,49 @@
                 };
                 this.tabs.set(tabId, tab);
                 this.activeTabId = tabId;
-                const terminal = new LocalTerminal(paneId, this.settings.get('shell'), { cwd });
+                const terminal = new LocalTerminal(paneId, this.settings.get('shell'), {
+                    cwd,
+                    remote: !!options.remoteSessionId || !!options.placeholderRemote || this.isReceiverMode(),
+                    sessionId: options.remoteSessionId || ('local-' + paneId)
+                });
                 this.terminals.set(paneId, terminal);
+                this.sessionPaneMap.set(terminal.sessionId, paneId);
                 this.renderTabs();
                 this.renderActiveTab();
                 this.focusPane(paneId);
-                this.ensureBackendSession(paneId, this.getSessionTitleForPane(paneId, tab), cwd);
+                if (terminal.remote) {
+                    terminal.setBackendReady(!!options.remoteSessionId);
+                    if (options.remoteSessionId) this.subscribeRemoteSession(options.remoteSessionId);
+                } else {
+                    this.ensureBackendSession(paneId, this.getSessionTitleForPane(paneId, tab), cwd);
+                }
                 this.updateStatusBar();
                 this.scheduleWorkspaceSave();
                 return tabId;
+            }
+
+            async requestRemoteTerminalCreate(title) {
+                if (!this.isReceiverMode()) return;
+                const desktopId = (this.settings.get('pairedDesktopId') || '').trim();
+                if (!desktopId) {
+                    this.showToast('请先在设置中绑定 PC 发送端', 'warning');
+                    this.showSettings();
+                    return;
+                }
+                if (!this.serverConnected) {
+                    this.showToast('请先连接服务器', 'warning');
+                    await this.connect({ forceGuide: true });
+                    return;
+                }
+                try {
+                    await invoke('request_remote_session_create', {
+                        desktopId,
+                        title: title || '远程终端'
+                    });
+                    this.showToast('已请求发送端新建终端', 'success');
+                } catch (err) {
+                    this.showToast('请求远程终端失败: ' + err, 'error');
+                }
             }
 
             renderActiveTab() {
@@ -5934,6 +6255,13 @@
             }
 
             splitPane(direction) {
+                if (this.isReceiverMode()) {
+                    this.requestRemoteTerminalCreate('远程终端');
+                    document.getElementById('splitMenu').classList.remove('visible');
+                    this.splitMenuTarget = null;
+                    this.contextMenuTarget = null;
+                    return;
+                }
                 if (!this.splitMenuTarget) return;
                 const tab = this.tabs.get(this.activeTabId);
                 if (!tab) return;
@@ -6151,7 +6479,8 @@
                         });
                         const result = await this.registerDesktopDeviceFor(
                             url,
-                            this.settings.get('deviceName') || DEFAULT_DESKTOP_DEVICE_NAME
+                            this.settings.get('deviceName') || (this.isReceiverMode() ? DEFAULT_PC_RECEIVER_DEVICE_NAME : DEFAULT_DESKTOP_DEVICE_NAME),
+                            this.deviceTypeForCurrentMode()
                         );
                         token = result.device.token;
                         this.debug('connection:auto-register-ok', {
@@ -6499,6 +6828,7 @@
 
             showSettings() {
                 const modal = document.getElementById('settingsModal');
+                document.getElementById('settingClientMode').value = this.settings.get('clientMode');
                 document.getElementById('settingShell').value = this.settings.get('shell');
                 document.getElementById('settingCustomShell').value = this.settings.get('customShell');
                 document.getElementById('settingFontSize').value = this.settings.get('fontSize');
@@ -6509,22 +6839,24 @@
                 document.getElementById('settingAutoConnect').value = this.settings.get('autoConnect').toString();
                 document.getElementById('settingAutoReconnect').value = this.settings.get('autoReconnect').toString();
                 document.getElementById('pairingCodeDisplay').value = '';
-                document.getElementById('pairingCodeHint').textContent = '配对码有效期 5 分钟，在手机端输入后即可绑定。';
+                document.getElementById('pairingCodeHint').textContent = '配对码有效期 5 分钟，在接收端输入后即可绑定。';
                 this.renderDesktopUpdate();
                 this.checkDesktopUpdate(true);
                 this.updateCustomShellVisibility();
+                this.updateClientModeVisibility();
                 modal.classList.add('visible');
             }
 
             closeSettings() { document.getElementById('settingsModal').classList.remove('visible'); }
 
             saveSettings() {
+                this.settings.set('clientMode', document.getElementById('settingClientMode').value);
                 this.settings.set('shell', document.getElementById('settingShell').value);
                 this.settings.set('customShell', document.getElementById('settingCustomShell').value);
                 this.setTerminalFontSize(document.getElementById('settingFontSize').value);
                 const customServerUrl = normalizeServerUrl(document.getElementById('settingServerUrl').value);
                 this.settings.set('serverUrl', customServerUrl || DEFAULT_SERVER_URL);
-                this.settings.set('deviceName', document.getElementById('settingDeviceName').value.trim() || DEFAULT_DESKTOP_DEVICE_NAME);
+                this.settings.set('deviceName', document.getElementById('settingDeviceName').value.trim() || (this.isReceiverMode() ? DEFAULT_PC_RECEIVER_DEVICE_NAME : DEFAULT_DESKTOP_DEVICE_NAME));
                 this.settings.set('serverToken', document.getElementById('settingDeviceToken').value.trim());
                 this.settings.set('autoConnect', document.getElementById('settingAutoConnect').value === 'true');
                 this.settings.set('autoReconnect', document.getElementById('settingAutoReconnect').value === 'true');
@@ -6679,10 +7011,27 @@
                 document.getElementById('customShellGroup').style.display = shell === 'custom' ? 'block' : 'none';
             }
 
+            updateClientModeVisibility() {
+                const mode = normalizeClientMode(document.getElementById('settingClientMode')?.value || this.settings.get('clientMode'));
+                const senderGroup = document.getElementById('senderPairingGroup');
+                const receiverGroup = document.getElementById('receiverPairingGroup');
+                if (senderGroup) senderGroup.style.display = mode === 'sender' ? '' : 'none';
+                if (receiverGroup) receiverGroup.style.display = mode === 'receiver' ? '' : 'none';
+                const pairedName = this.settings.get('pairedDesktopName') || this.settings.get('pairedDesktopId');
+                const receiverHint = document.getElementById('receiverPairingHint');
+                if (receiverHint) {
+                    receiverHint.textContent = pairedName
+                        ? '已绑定发送端: ' + pairedName
+                        : '绑定成功后，PC 接收端可以同时和手机一样订阅发送端终端。';
+                }
+            }
+
             updateStatusBar() {
-                document.getElementById('statusMode').textContent = this.serverConnected ? '服务器模式' : '本地终端';
+                document.getElementById('statusMode').textContent = this.isReceiverMode()
+                    ? (this.serverConnected ? 'PC 接收端' : '接收端离线')
+                    : (this.serverConnected ? '服务器模式' : '本地终端');
                 document.getElementById('statusTabs').textContent = '标签: ' + this.tabs.size;
-                document.getElementById('statusShell').textContent = this.settings.get('shell');
+                document.getElementById('statusShell').textContent = this.isReceiverMode() ? 'remote' : this.settings.get('shell');
                 const activeTerminal = this.terminals.get(this.activePaneId);
                 document.getElementById('statusSize').textContent = activeTerminal ? activeTerminal.getSizeLabel() : '80x24';
                 this.updateChrome();

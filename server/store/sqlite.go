@@ -293,6 +293,11 @@ func (s *Store) ListPairedMobileIDs(ctx context.Context, desktopID string) ([]st
 	return ids, rows.Err()
 }
 
+// ListPairedViewerIDs returns all viewer device IDs paired with the given desktop.
+func (s *Store) ListPairedViewerIDs(ctx context.Context, desktopID string) ([]string, error) {
+	return s.ListPairedMobileIDs(ctx, desktopID)
+}
+
 // IsPaired reports whether the given desktop/mobile devices are paired.
 func (s *Store) IsPaired(ctx context.Context, desktopID, mobileID string) (bool, error) {
 	var count int

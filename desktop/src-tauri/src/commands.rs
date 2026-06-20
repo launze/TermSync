@@ -13,7 +13,9 @@ use sysinfo::System;
 use tauri::{command, AppHandle, Manager, State};
 use uuid::Uuid;
 
-use crate::api_client::{self, PairingCodeResponse, RegisterDeviceResponse, ReleaseInfo};
+use crate::api_client::{
+    self, CompletePairingResponse, PairingCodeResponse, RegisterDeviceResponse, ReleaseInfo,
+};
 use crate::pty_manager::{PtyManager, SessionDescriptor};
 use crate::wss_client::{ServerStatusSnapshot, WssClientState};
 
@@ -92,7 +94,13 @@ pub async fn create_session(
     // 检查WebSocket连接状态，如果已连接则发送会话创建消息
     if wss_state.is_connected() {
         let result = wss_state
-            .send_session_create(&session.session_id, &session.title, cols, rows, layout.clone())
+            .send_session_create(
+                &session.session_id,
+                &session.title,
+                cols,
+                rows,
+                layout.clone(),
+            )
             .await;
         if let Err(e) = result {
             log::warn!("Failed to send session create: {}", e);
@@ -338,6 +346,48 @@ pub async fn generate_pairing_code(
     api_client::generate_pairing_code(server_url, token).await
 }
 
+#[command]
+pub async fn complete_pairing(
+    server_url: String,
+    token: String,
+    code: String,
+) -> Result<CompletePairingResponse, String> {
+    api_client::complete_pairing(server_url, token, code).await
+}
+
+#[command]
+pub async fn request_session_list(state: State<'_, WssClientState>) -> Result<String, String> {
+    state.send_session_list_request().await?;
+    Ok("Session list requested".to_string())
+}
+
+#[command]
+pub async fn request_remote_session_create(
+    desktop_id: String,
+    title: Option<String>,
+    state: State<'_, WssClientState>,
+) -> Result<String, String> {
+    let desktop_id = desktop_id.trim();
+    if desktop_id.is_empty() {
+        return Err("desktop_id is required".to_string());
+    }
+    state
+        .send_session_create_request(desktop_id, title.as_deref())
+        .await?;
+    Ok("Remote session create requested".to_string())
+}
+
+#[command]
+pub async fn request_remote_session_close(
+    session_id: String,
+    state: State<'_, WssClientState>,
+) -> Result<String, String> {
+    state
+        .send_session_close_request(&require_session_id(session_id)?)
+        .await?;
+    Ok("Remote session close requested".to_string())
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DesktopUpdateResponse {
     pub current_version: String,
@@ -417,7 +467,11 @@ pub fn install_desktop_update(path: String) -> Result<String, String> {
 fn safe_download_file_name(value: &str) -> String {
     let trimmed = value.trim();
     let fallback = "termsync-desktop-update";
-    let name = if trimmed.is_empty() { fallback } else { trimmed };
+    let name = if trimmed.is_empty() {
+        fallback
+    } else {
+        trimmed
+    };
     name.chars()
         .map(|ch| match ch {
             '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',

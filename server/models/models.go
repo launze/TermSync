@@ -2,12 +2,12 @@ package models
 
 import "time"
 
-// Device represents a registered device (desktop or mobile)
+// Device represents a registered device.
 type Device struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`
 	Token     string    `json:"token"`
-	Type      string    `json:"type"` // "desktop" or "mobile"
+	Type      string    `json:"type"` // "desktop", "mobile", or "pc_receiver"
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -115,15 +115,15 @@ type AuthResponsePayload struct {
 
 // SessionSnapshot represents the full state of a session for sync.
 type SessionSnapshot struct {
-	SessionID string `json:"session_id"`
-	OwnerID   string `json:"owner_id"`
-	Title     string `json:"title"`
-	Cols      int    `json:"cols"`
-	Rows      int    `json:"rows"`
-	Status    string `json:"status"`
-	TaskState string `json:"task_state,omitempty"`
-	Preview   string `json:"preview,omitempty"`
-	Activity  string `json:"activity,omitempty"`
+	SessionID string                 `json:"session_id"`
+	OwnerID   string                 `json:"owner_id"`
+	Title     string                 `json:"title"`
+	Cols      int                    `json:"cols"`
+	Rows      int                    `json:"rows"`
+	Status    string                 `json:"status"`
+	TaskState string                 `json:"task_state,omitempty"`
+	Preview   string                 `json:"preview,omitempty"`
+	Activity  string                 `json:"activity,omitempty"`
 	Layout    map[string]interface{} `json:"layout,omitempty"`
 }
 

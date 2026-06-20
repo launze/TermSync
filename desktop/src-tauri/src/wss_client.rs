@@ -256,6 +256,44 @@ impl WssClientState {
         .await
     }
 
+    pub async fn send_session_list_request(&self) -> Result<(), String> {
+        self.send_json(json!({
+            "type": "session.list",
+            "timestamp": current_timestamp()
+        }))
+        .await
+    }
+
+    pub async fn send_session_create_request(
+        &self,
+        desktop_id: &str,
+        title: Option<&str>,
+    ) -> Result<(), String> {
+        let mut payload = serde_json::Map::new();
+        payload.insert(
+            "desktop_id".to_string(),
+            Value::String(desktop_id.to_string()),
+        );
+        if let Some(title) = title {
+            payload.insert("title".to_string(), Value::String(title.to_string()));
+        }
+        self.send_json(json!({
+            "type": "session.create_request",
+            "timestamp": current_timestamp(),
+            "payload": payload
+        }))
+        .await
+    }
+
+    pub async fn send_session_close_request(&self, session_id: &str) -> Result<(), String> {
+        self.send_json(json!({
+            "type": "session.close_request",
+            "session_id": session_id,
+            "timestamp": current_timestamp()
+        }))
+        .await
+    }
+
     pub async fn send_terminal_output(&self, session_id: &str, data: &str) -> Result<(), String> {
         self.send_json(json!({
             "type": "terminal.output",

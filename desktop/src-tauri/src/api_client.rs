@@ -46,6 +46,22 @@ pub struct PairingCodeResponse {
     pub expires_at: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DevicePairing {
+    pub desktop_id: String,
+    pub desktop_name: String,
+    pub mobile_id: String,
+    pub mobile_name: String,
+    #[serde(default)]
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompletePairingResponse {
+    pub success: bool,
+    pub pairing: DevicePairing,
+}
+
 pub fn http_client() -> Result<reqwest::Client, String> {
     let cert = Certificate::from_pem(include_bytes!("../../assets/server.crt"))
         .map_err(|e| format!("Failed to load bundled certificate: {e}"))?;
@@ -114,6 +130,30 @@ pub async fn generate_pairing_code(
         .json::<PairingCodeResponse>()
         .await
         .map_err(|e| format!("Failed to parse pairing response: {e}"))
+}
+
+pub async fn complete_pairing(
+    server_url: String,
+    token: String,
+    code: String,
+) -> Result<CompletePairingResponse, String> {
+    let client = http_client()?;
+    let url = format!("{}/api/pairing/complete", server_base_url(&server_url)?);
+
+    client
+        .post(url)
+        .json(&serde_json::json!({
+            "token": token,
+            "code": code,
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("Pairing completion request failed: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("Pairing completion request failed: {e}"))?
+        .json::<CompletePairingResponse>()
+        .await
+        .map_err(|e| format!("Failed to parse pairing completion response: {e}"))
 }
 
 pub async fn fetch_latest_release(

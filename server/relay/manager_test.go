@@ -257,6 +257,66 @@ func TestSessionList(t *testing.T) {
 	_ = sm.HandleMessage("mobile-1", data)
 }
 
+func TestPCReceiverCanPairAlongsideMobile(t *testing.T) {
+	sm, cleanup := newTestManager(t)
+	defer cleanup()
+
+	desktopID := "desktop-1"
+	mobileID := "mobile-1"
+	pcReceiverID := "pc-receiver-1"
+	seedDevice(t, sm, desktopID, "desktop-token", "desktop")
+	seedDevice(t, sm, mobileID, "mobile-token", "mobile")
+	seedDevice(t, sm, pcReceiverID, "pc-receiver-token", "pc_receiver")
+	seedPairing(t, sm, desktopID, mobileID)
+	seedPairing(t, sm, desktopID, pcReceiverID)
+
+	sm.deviceTypes[desktopID] = "desktop"
+	sm.deviceTypes[mobileID] = "mobile"
+	sm.deviceTypes[pcReceiverID] = "pc_receiver"
+
+	createMsg := models.Message{
+		Type:      string(models.MsgSessionCreate),
+		SessionID: "sess-pc-receiver",
+		Timestamp: time.Now().Unix(),
+		Payload: map[string]interface{}{
+			"title": "Shared Terminal",
+		},
+	}
+	data, _ := json.Marshal(createMsg)
+	if err := sm.HandleMessage(desktopID, data); err != nil {
+		t.Fatalf("session.create failed: %v", err)
+	}
+
+	snapshots, err := sm.listSessionSnapshotsForDevice(pcReceiverID)
+	if err != nil {
+		t.Fatalf("listSessionSnapshotsForDevice failed: %v", err)
+	}
+	if len(snapshots) != 1 || snapshots[0].SessionID != "sess-pc-receiver" {
+		t.Fatalf("expected pc receiver to see shared session, got %#v", snapshots)
+	}
+
+	subMsg := models.Message{
+		Type:      string(models.MsgSubscribe),
+		SessionID: "sess-pc-receiver",
+		Timestamp: time.Now().Unix(),
+	}
+	data, _ = json.Marshal(subMsg)
+	if err := sm.HandleMessage(pcReceiverID, data); err != nil {
+		t.Fatalf("pc receiver subscribe failed: %v", err)
+	}
+	if !sm.isViewer("sess-pc-receiver", pcReceiverID) {
+		t.Fatal("pc receiver should be subscribed as viewer")
+	}
+
+	pairedViewers, err := sm.store.ListPairedViewerIDs(context.Background(), desktopID)
+	if err != nil {
+		t.Fatalf("ListPairedViewerIDs failed: %v", err)
+	}
+	if len(pairedViewers) != 2 {
+		t.Fatalf("expected two paired viewers to remain, got %d: %#v", len(pairedViewers), pairedViewers)
+	}
+}
+
 func TestBadTimestamp(t *testing.T) {
 	sm, cleanup := newTestManager(t)
 	defer cleanup()
