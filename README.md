@@ -156,7 +156,7 @@ cd mobile-android
 典型 Release 产物命名：
 
 - `termsync-server-linux-x64-v0.1.0`
-- `termsync-android-v0.1.0.apk`
+- `termsync-android-release-v0.1.0.apk`
 - `termsync-desktop-windows-x64-v0.1.0.msi`
 - `termsync-desktop-windows-x64-v0.1.0-setup.exe`
 - `termsync-desktop-macos-x64-v0.1.0.dmg`

@@ -75,8 +75,11 @@ class ApiClient {
         )
     }
 
-    fun getLatestAndroidRelease(serverUrl: String): AppUpdateInfo {
-        val response = getJson(normalizeBaseUrl(serverUrl) + "/api/releases/latest?platform=android")
+    fun getLatestAndroidRelease(serverUrl: String, buildType: String): AppUpdateInfo {
+        val channel = if (buildType.equals("debug", ignoreCase = true)) "debug" else "release"
+        val response = getJson(
+            normalizeBaseUrl(serverUrl) + "/api/releases/latest?platform=android&build_type=$channel"
+        )
         val json = JSONObject(response)
         return AppUpdateInfo(
             available = json.optBoolean("available", false),

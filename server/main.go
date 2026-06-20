@@ -261,12 +261,16 @@ func serveLatestRelease(downloadsDir, httpPort string) http.HandlerFunc {
 }
 
 func writeLatestRelease(w http.ResponseWriter, r *http.Request, downloadsDir, httpPort, platform string) {
+	buildType := normalizeReleaseBuildType(r.URL.Query().Get("build_type"))
 	items := listDownloads(downloadsDir, releaseDownloadBaseURL(r, httpPort, platform))
 	var latest *downloadItem
 	var latestVersion string
 	for i := range items {
 		item := &items[i]
 		if !matchesReleasePlatform(item.Name, platform) {
+			continue
+		}
+		if !matchesReleaseBuildType(item.Name, platform, buildType) {
 			continue
 		}
 		version := versionFromDownloadName(item.Name)
@@ -282,8 +286,9 @@ func writeLatestRelease(w http.ResponseWriter, r *http.Request, downloadsDir, ht
 	w.Header().Set("Content-Type", "application/json")
 	if latest == nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"available": false,
-			"platform":  platform,
+			"available":  false,
+			"platform":   platform,
+			"build_type": buildType,
 		})
 		return
 	}
@@ -291,12 +296,31 @@ func writeLatestRelease(w http.ResponseWriter, r *http.Request, downloadsDir, ht
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"available":    true,
 		"platform":     platform,
+		"build_type":   buildType,
 		"version_name": latestVersion,
 		"file_name":    latest.Name,
 		"download_url": latest.Path,
 		"size":         latest.Size,
 		"updated_at":   latest.UpdatedAt,
 	})
+}
+
+func normalizeReleaseBuildType(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "debug":
+		return "debug"
+	default:
+		return "release"
+	}
+}
+
+func matchesReleaseBuildType(name, platform, buildType string) bool {
+	if platform != "android" && platform != "mobile" {
+		return true
+	}
+	lower := strings.ToLower(name)
+	isDebug := strings.Contains(lower, "debug")
+	return (buildType == "debug") == isDebug
 }
 
 func matchesReleasePlatform(name, platform string) bool {

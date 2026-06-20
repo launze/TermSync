@@ -547,17 +547,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 val latest = withContext(Dispatchers.IO) {
-                    apiClient.getLatestAndroidRelease(url)
+                    apiClient.getLatestAndroidRelease(url, BuildConfig.UPDATE_BUILD_TYPE)
                 }
                 val next = AppUpdateUiState(
                     checking = false,
                     latest = latest,
                     message = when {
                         latest.available && compareVersionNames(latest.versionName, BuildConfig.VERSION_NAME) > 0 -> {
-                            "发现新版本 ${latest.versionName}"
+                            "发现 ${BuildConfig.UPDATE_BUILD_TYPE} 新版本 ${latest.versionName}"
                         }
                         latest.available -> "当前已是最新版本"
-                        else -> "服务器暂无 Android 安装包"
+                        else -> "服务器暂无 Android ${BuildConfig.UPDATE_BUILD_TYPE} 安装包"
                     }
                 )
                 _appUpdate.value = next
@@ -583,7 +583,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _appUpdate.value = update.copy(
             downloading = true,
             downloadedFilePath = "",
-            message = "正在下载 ${latest.versionName}…"
+            message = "正在下载 ${BuildConfig.UPDATE_BUILD_TYPE} ${latest.versionName}…"
         )
         viewModelScope.launch {
             try {
@@ -592,7 +592,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val dir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
                         ?.resolve("updates")
                         ?: context.filesDir.resolve("updates")
-                    val safeName = latest.fileName.ifBlank { "termsync-mobile-${latest.versionName}.apk" }
+                    val safeName = latest.fileName.ifBlank {
+                        "termsync-android-${BuildConfig.UPDATE_BUILD_TYPE}-${latest.versionName}.apk"
+                    }
                     val target = dir.resolve(safeName)
                     apiClient.downloadFile(latest.downloadUrl, target)
                     target

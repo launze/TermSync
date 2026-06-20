@@ -28,6 +28,12 @@ Android client for TTY1 cross-platform terminal emulator.
 ./gradlew installDebug
 ```
 
+Debug builds use package `com.termsync.mobile.debug`; release builds use
+`com.termsync.mobile`. They install side by side, so manual APK installs and
+in-app update checks will not cross-upgrade between debug and release.
+
+Release upgrades require every APK to be signed with the same release keystore.
+
 ## Features
 
 - View all active terminals from paired desktop

@@ -12,8 +12,6 @@ if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(FileInputStream(keystorePropertiesFile))
 }
 
-setProperty("archivesBaseName", "termsync-mobile-0.1.6")
-
 android {
     namespace = "com.termsync.mobile"
     compileSdk = 34
@@ -22,11 +20,18 @@ android {
         applicationId = "com.termsync.mobile"
         minSdk = 26
         targetSdk = 34
-        versionCode = 7
-        versionName = "0.1.6"
+        versionCode = 8
+        versionName = "0.1.7"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
             useSupportLibrary = true
+        }
+    }
+
+    applicationVariants.all {
+        outputs.all {
+            val output = this as com.android.build.gradle.internal.api.BaseVariantOutputImpl
+            output.outputFileName = "termsync-android-${buildType.name}-v${versionName}.apk"
         }
     }
 
@@ -42,8 +47,17 @@ android {
     }
 
     buildTypes {
+        debug {
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+            resValue("string", "app_name", "TermSync Debug")
+            buildConfigField("String", "UPDATE_BUILD_TYPE", "\"debug\"")
+        }
+
         release {
             isMinifyEnabled = false
+            resValue("string", "app_name", "TermSync")
+            buildConfigField("String", "UPDATE_BUILD_TYPE", "\"release\"")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             if (keystorePropertiesFile.exists()) {
                 signingConfig = signingConfigs.getByName("release")
