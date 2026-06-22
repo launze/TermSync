@@ -2569,6 +2569,7 @@
                         brightWhite: '#ffffff'
                     }
                 });
+                this.updateCursorVisibility();
 
                 this.fitAddon = new XtermFitAddon();
                 this.term.loadAddon(this.fitAddon);
@@ -2697,6 +2698,17 @@
             }
             focus() {
                 this.term?.focus();
+            }
+            updateCursorVisibility(activePaneId = window.app?.activePaneId) {
+                if (!this.term) return;
+                const active = Number(activePaneId) === Number(this.paneId);
+                this.term.options.cursorBlink = active;
+                this.term.options.theme = {
+                    ...(this.term.options.theme || {}),
+                    cursor: active ? '#4ec9b0' : '#1e1e1e',
+                    cursorAccent: '#1e1e1e'
+                };
+                this.term.refresh(0, Math.max(0, this.term.rows - 1));
             }
             focusSoon() {
                 this.focus();
@@ -7407,6 +7419,9 @@
                 document.querySelectorAll('.terminal-pane').forEach(pane => {
                     pane.style.outline = pane.dataset.paneId == paneId ? '2px solid #007acc' : 'none';
                 });
+                for (const terminal of this.terminals.values()) {
+                    terminal.updateCursorVisibility?.(paneId);
+                }
             }
 
             focusPane(paneId) {
