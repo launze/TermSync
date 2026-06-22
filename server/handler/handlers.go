@@ -219,18 +219,15 @@ func (h *WSHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn.SetReadLimit(8 << 20)
 
 	// Wait for auth message first
-	deviceID, deviceType, err := h.waitForAuth(r.Context(), conn)
+	deviceID, deviceType, connMeta, err := h.waitForAuth(r.Context(), conn)
 	if err != nil {
 		conn.Close(websocket.StatusPolicyViolation, "authentication failed")
 		return
 	}
 
 	// Register connection
-	h.manager.RegisterConnection(deviceID, deviceType, conn)
+	h.manager.RegisterConnection(deviceID, deviceType, conn, connMeta)
 	defer h.manager.UnregisterConnection(deviceID, conn)
-	if err := h.manager.PushSessionList(deviceID); err != nil {
-		log.Printf("❌ Failed to push initial session list to %s: %v", deviceID, err)
-	}
 
 	// Start server-side keepalive: ping the client every 30s.
 	// If no pong is received within 10s the context is cancelled and
@@ -269,57 +266,73 @@ func (h *WSHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if err := h.manager.HandleMessage(deviceID, message); err != nil {
+		if err := h.manager.HandleConnectionMessage(deviceID, conn, message); err != nil {
 			log.Printf("❌ Message handling error: %v", err)
 		}
 	}
 }
 
 // waitForAuth waits for the first authentication message
-func (h *WSHandler) waitForAuth(ctx context.Context, conn *websocket.Conn) (string, string, error) {
+func (h *WSHandler) waitForAuth(ctx context.Context, conn *websocket.Conn) (string, string, relay.ConnectionMeta, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	_, message, err := conn.Read(ctx)
 	if err != nil {
-		return "", "", err
+		return "", "", relay.ConnectionMeta{}, err
 	}
 
 	var msg models.Message
 	if err := json.Unmarshal(message, &msg); err != nil {
-		return "", "", err
+		return "", "", relay.ConnectionMeta{}, err
 	}
 
 	if msg.Type != string(models.MsgAuth) {
-		return "", "", fmt.Errorf("expected auth message, got %q", msg.Type)
+		return "", "", relay.ConnectionMeta{}, fmt.Errorf("expected auth message, got %q", msg.Type)
 	}
 
 	token, _ := msg.Payload["token"].(string)
 	if token == "" {
-		return "", "", fmt.Errorf("missing auth token")
+		return "", "", relay.ConnectionMeta{}, fmt.Errorf("missing auth token")
 	}
 
 	// Look up device
 	device, err := h.authHandler.store.GetDeviceByToken(context.Background(), token)
 	if err != nil {
-		return "", "", err
+		return "", "", relay.ConnectionMeta{}, err
 	}
+	selectedProtocol := selectProtocol(protocolsFromPayload(msg.Payload))
+	if selectedProtocol != 3 {
+		return "", "", relay.ConnectionMeta{}, fmt.Errorf("protocol v3 is required")
+	}
+	clientInstanceID, _ := msg.Payload["client_instance_id"].(string)
+	connectionGeneration := int64FromPayload(msg.Payload, "connection_generation")
+	connectionID := uuid.New().String()
 
 	// Send auth success
 	resp := models.Message{
-		Type: string(models.MsgAuthResponse),
+		Type:      string(models.MsgAuthResponse),
+		V:         selectedProtocol,
+		Timestamp: time.Now().Unix(),
 		Payload: map[string]interface{}{
-			"success":     true,
-			"device_id":   device.ID,
-			"device_type": device.Type,
+			"success":           true,
+			"device_id":         device.ID,
+			"device_type":       device.Type,
+			"selected_protocol": selectedProtocol,
+			"connection_id":     connectionID,
 		},
 	}
 	respData, _ := json.Marshal(resp)
 	if err := conn.Write(ctx, websocket.MessageText, respData); err != nil {
-		return "", "", err
+		return "", "", relay.ConnectionMeta{}, err
 	}
 
-	return device.ID, device.Type, nil
+	return device.ID, device.Type, relay.ConnectionMeta{
+		ConnectionID:         connectionID,
+		ClientInstanceID:     clientInstanceID,
+		ConnectionGeneration: connectionGeneration,
+		SelectedProtocol:     selectedProtocol,
+	}, nil
 }
 
 // APIHandler handles REST API endpoints
@@ -452,6 +465,8 @@ func (h *APIHandler) HandleCompletePairing(w http.ResponseWriter, r *http.Reques
 		"success": true,
 		"pairing": pairing,
 	})
+
+	h.manager.BroadcastPeerStateForPairing(pairing.DesktopID, pairing.MobileID)
 }
 
 // HandleHealthCheck returns server health status
@@ -490,6 +505,53 @@ func generatePairingCode() (string, error) {
 		buf[i] = alphabet[int(buf[i])%len(alphabet)]
 	}
 	return string(buf), nil
+}
+
+func protocolsFromPayload(payload map[string]interface{}) []int {
+	raw, ok := payload["supported_protocols"]
+	if !ok {
+		return nil
+	}
+	values, ok := raw.([]interface{})
+	if !ok {
+		return nil
+	}
+	protocols := make([]int, 0, len(values))
+	for _, value := range values {
+		switch typed := value.(type) {
+		case float64:
+			protocols = append(protocols, int(typed))
+		case int:
+			protocols = append(protocols, typed)
+		}
+	}
+	return protocols
+}
+
+func selectProtocol(supported []int) int {
+	for _, protocol := range supported {
+		if protocol == 3 {
+			return 3
+		}
+	}
+	return 0
+}
+
+func int64FromPayload(payload map[string]interface{}, key string) int64 {
+	value, ok := payload[key]
+	if !ok {
+		return 0
+	}
+	switch typed := value.(type) {
+	case float64:
+		return int64(typed)
+	case int64:
+		return typed
+	case int:
+		return int64(typed)
+	default:
+		return 0
+	}
 }
 
 // LogMiddleware logs HTTP requests

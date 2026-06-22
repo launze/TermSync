@@ -48,7 +48,7 @@ type OnlineStatus struct {
 	LastSeen    time.Time `json:"last_seen"`
 }
 
-// ─── Protocol v2: typed, validated, routable ──────────────────────────────
+// ─── Protocol v3: typed, validated, routable ──────────────────────────────
 
 // MsgType enumerates all valid WebSocket message types.
 type MsgType string
@@ -58,78 +58,70 @@ const (
 	MsgAuth         MsgType = "auth"
 	MsgAuthResponse MsgType = "auth_response"
 
-	// Session lifecycle (owner-only)
-	MsgSessionCreate        MsgType = "session.create"
-	MsgSessionCreateRequest MsgType = "session.create_request"
-	MsgSessionClose         MsgType = "session.close"
-	MsgSessionCloseRequest  MsgType = "session.close_request"
-	MsgSessionUpdate        MsgType = "session.update"
-	MsgSessionListReq       MsgType = "session.list"
-	MsgSessionListRes       MsgType = "session.list_res"
+	// Heartbeat, peer state, errors
+	MsgHeartbeat   MsgType = "heartbeat"
+	MsgDevicePeers MsgType = "device.peer_state"
+	MsgError       MsgType = "error"
 
-	// Terminal I/O (owner writes output; viewers read output, send input/resize)
-	MsgTerminalOutput        MsgType = "terminal.output"
-	MsgTerminalInput         MsgType = "terminal.input"
-	MsgTerminalResize        MsgType = "terminal.resize"
-	MsgTerminalReplayRequest MsgType = "terminal.replay_request"
-	MsgTerminalReplay        MsgType = "terminal.replay"
-
-	// Subscription (viewer <-> server)
-	MsgSubscribe   MsgType = "session.subscribe"
-	MsgUnsubscribe MsgType = "session.unsubscribe"
-
-	// Heartbeat, snapshot, errors
-	MsgHeartbeat    MsgType = "heartbeat"
-	MsgSessionState MsgType = "session.state" // full snapshot push on subscribe
-	MsgError        MsgType = "error"
-)
-
-// Role defines a device's role in a session.
-type Role string
-
-const (
-	RoleOwner  Role = "owner"  // creator - full control
-	RoleViewer Role = "viewer" // subscriber - read output, send input/resize
+	// Protocol v3 control and stream messages.
+	MsgPeerReplaced         MsgType = "peer.replaced"
+	MsgWorkspaceList        MsgType = "workspace.list"
+	MsgWorkspaceListRes     MsgType = "workspace.list_res"
+	MsgWorkspaceSubscribe   MsgType = "workspace.subscribe"
+	MsgWorkspaceUnsubscribe MsgType = "workspace.unsubscribe"
+	MsgLayoutSnapshot       MsgType = "layout.snapshot"
+	MsgLayoutPatch          MsgType = "layout.patch"
+	MsgLayoutActionRequest  MsgType = "layout.action_request"
+	MsgLayoutActionResult   MsgType = "layout.action_result"
+	MsgScreenSubscribe      MsgType = "screen.subscribe"
+	MsgScreenUnsubscribe    MsgType = "screen.unsubscribe"
+	MsgScreenSnapshot       MsgType = "screen.snapshot"
+	MsgScreenDelta          MsgType = "screen.delta"
+	MsgScreenAck            MsgType = "screen.ack"
+	MsgScreenResyncRequest  MsgType = "screen.resync_request"
+	MsgScreenClear          MsgType = "screen.clear"
+	MsgInputSend            MsgType = "input.send"
+	MsgInputAck             MsgType = "input.ack"
+	MsgInputReject          MsgType = "input.reject"
 )
 
 // Message is the unified envelope for all WebSocket traffic.
 type Message struct {
-	Type      string                 `json:"type"`
-	SessionID string                 `json:"session_id,omitempty"`
-	Timestamp int64                  `json:"timestamp"`
-	Payload   map[string]interface{} `json:"payload,omitempty"`
+	Type        string                 `json:"type"`
+	V           int                    `json:"v,omitempty"`
+	ID          string                 `json:"id,omitempty"`
+	WorkspaceID string                 `json:"workspace_id,omitempty"`
+	PaneID      string                 `json:"pane_id,omitempty"`
+	SessionID   string                 `json:"session_id,omitempty"`
+	Timestamp   int64                  `json:"timestamp"`
+	Payload     map[string]interface{} `json:"payload,omitempty"`
 }
 
 // AuthPayload is the payload for auth messages.
 type AuthPayload struct {
-	Token string `json:"token"`
+	Token                string `json:"token"`
+	DeviceType           string `json:"device_type,omitempty"`
+	ClientInstanceID     string `json:"client_instance_id,omitempty"`
+	ConnectionGeneration int64  `json:"connection_generation,omitempty"`
+	SupportedProtocols   []int  `json:"supported_protocols,omitempty"`
 }
 
 // AuthResponsePayload is the payload for auth_response messages.
 type AuthResponsePayload struct {
-	Success    bool   `json:"success"`
-	DeviceID   string `json:"device_id"`
-	DeviceType string `json:"device_type"`
-	Message    string `json:"message,omitempty"`
+	Success          bool   `json:"success"`
+	DeviceID         string `json:"device_id"`
+	DeviceType       string `json:"device_type"`
+	SelectedProtocol int    `json:"selected_protocol,omitempty"`
+	ConnectionID     string `json:"connection_id,omitempty"`
+	Message          string `json:"message,omitempty"`
 }
 
-// SessionSnapshot represents the full state of a session for sync.
-type SessionSnapshot struct {
-	SessionID string                 `json:"session_id"`
-	OwnerID   string                 `json:"owner_id"`
-	Title     string                 `json:"title"`
-	Cols      int                    `json:"cols"`
-	Rows      int                    `json:"rows"`
-	Status    string                 `json:"status"`
-	TaskState string                 `json:"task_state,omitempty"`
-	Preview   string                 `json:"preview,omitempty"`
-	Activity  string                 `json:"activity,omitempty"`
-	Layout    map[string]interface{} `json:"layout,omitempty"`
-}
-
-// SessionListPayload is the payload for session list responses.
-type SessionListPayload struct {
-	Sessions []SessionSnapshot `json:"sessions"`
+// PeerDeviceSnapshot is the UI-facing summary of an online paired device.
+type PeerDeviceSnapshot struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Type   string `json:"type"`
+	Online bool   `json:"online"`
 }
 
 // ErrorPayload is the payload for error messages.
@@ -138,14 +130,12 @@ type ErrorPayload struct {
 	Message string `json:"message"`
 }
 
-// ─── Legacy aliases for backward compat during transition ─────────────────
-
-// AuthRequest represents an authentication request (legacy alias)
+// AuthRequest represents a REST login request.
 type AuthRequest struct {
 	Token string `json:"token"`
 }
 
-// AuthResponse represents an authentication response (legacy alias)
+// AuthResponse represents a REST login response.
 type AuthResponse struct {
 	Success  bool   `json:"success"`
 	DeviceID string `json:"device_id,omitempty"`

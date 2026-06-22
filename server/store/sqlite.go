@@ -298,6 +298,56 @@ func (s *Store) ListPairedViewerIDs(ctx context.Context, desktopID string) ([]st
 	return s.ListPairedMobileIDs(ctx, desktopID)
 }
 
+// ListPairedDesktops returns all desktop devices paired with the given viewer.
+func (s *Store) ListPairedDesktops(ctx context.Context, viewerID string) ([]models.Device, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT d.id, d.name, d.token, d.type, d.created_at
+		FROM pairings p
+		JOIN devices d ON d.id = p.desktop_device_id
+		WHERE p.mobile_device_id = ?
+		ORDER BY p.created_at DESC
+	`, viewerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var devices []models.Device
+	for rows.Next() {
+		var d models.Device
+		if err := rows.Scan(&d.ID, &d.Name, &d.Token, &d.Type, &d.CreatedAt); err != nil {
+			return nil, err
+		}
+		devices = append(devices, d)
+	}
+	return devices, rows.Err()
+}
+
+// ListPairedViewers returns all viewer devices paired with the given desktop.
+func (s *Store) ListPairedViewers(ctx context.Context, desktopID string) ([]models.Device, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT d.id, d.name, d.token, d.type, d.created_at
+		FROM pairings p
+		JOIN devices d ON d.id = p.mobile_device_id
+		WHERE p.desktop_device_id = ?
+		ORDER BY p.created_at DESC
+	`, desktopID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var devices []models.Device
+	for rows.Next() {
+		var d models.Device
+		if err := rows.Scan(&d.ID, &d.Name, &d.Token, &d.Type, &d.CreatedAt); err != nil {
+			return nil, err
+		}
+		devices = append(devices, d)
+	}
+	return devices, rows.Err()
+}
+
 // IsPaired reports whether the given desktop/mobile devices are paired.
 func (s *Store) IsPaired(ctx context.Context, desktopID, mobileID string) (bool, error) {
 	var count int

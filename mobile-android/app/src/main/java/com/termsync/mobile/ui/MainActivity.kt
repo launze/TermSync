@@ -126,6 +126,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 import java.io.File
 import com.termsync.mobile.viewmodel.TerminalSession
+import com.termsync.mobile.viewmodel.TerminalSplitNode
 import com.termsync.mobile.viewmodel.TerminalDeltaBatch
 import com.termsync.mobile.viewmodel.TerminalTabGroup
 import com.termsync.mobile.viewmodel.ConnectionState
@@ -234,6 +235,16 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    override fun onStart() {
+        super.onStart()
+        viewModel.onAppForeground()
+    }
+
+    override fun onStop() {
+        viewModel.onAppBackground()
+        super.onStop()
+    }
 }
 
 @Composable
@@ -256,6 +267,21 @@ fun TTY1App(viewModel: MainViewModel) {
     val appUpdate by viewModel.appUpdate.collectAsState()
     val selectedSession = sessions.firstOrNull { it.sessionId == selectedSessionId }
     val tabGroups = remember(sessions) { buildTerminalTabGroups(sessions) }
+    val selectedTabSessions = remember(sessions, selectedSession) {
+        if (selectedSession == null) {
+            emptyList()
+        } else if (selectedSession.tabId.isNotBlank()) {
+            sessions
+                .filter { it.tabId == selectedSession.tabId }
+                .sortedWith(
+                    compareBy<TerminalSession> { normalizedOrder(it.paneOrder) }
+                        .thenBy { it.title.lowercase() }
+                        .thenBy { it.sessionId }
+                )
+        } else {
+            listOf(selectedSession)
+        }
+    }
     val hasToken = deviceToken.isNotBlank()
     val canRequestRemoteTerminal = connectionState is ConnectionState.Connected && isPaired
     val activeSessionCount = sessions.count { it.taskState == "running" || it.taskState == "waiting_input" }
@@ -291,6 +317,7 @@ fun TTY1App(viewModel: MainViewModel) {
                     TerminalViewScreen(
                         connectionState = connectionState,
                         session = selectedSession,
+                        sameTabSessions = selectedTabSessions,
                         output = terminalOutput,
                         outputVersion = terminalOutputVersion,
                         terminalDelta = viewModel.terminalDelta,
@@ -304,6 +331,7 @@ fun TTY1App(viewModel: MainViewModel) {
                         onRefreshTerminal = { viewModel.refreshSelectedSessionReplay() },
                         onRequestCloseSession = { viewModel.requestRemoteSessionClose(it) },
                         onTerminalResize = { cols, rows, force -> viewModel.requestSelectedSessionResize(cols, rows, force) },
+                        onSessionSelected = { viewModel.selectSession(it) },
                         onDebug = { msg -> viewModel.addDebugLine(msg) },
                         onClose = { viewModel.selectSession(null) }
                     )
@@ -679,11 +707,168 @@ fun TerminalTabGroupSection(
             )
         }
 
-        group.sessions.forEach { session ->
-            key(session.sessionId) {
-                SessionCard(session, onClick = { onSessionSelected(session.sessionId) })
+        val splitRoot = group.sessions.firstNotNullOfOrNull { it.tabRoot }
+        if (splitRoot != null && group.sessions.size > 1) {
+            TerminalSplitPreview(
+                root = splitRoot,
+                sessions = group.sessions,
+                onSessionSelected = onSessionSelected,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 128.dp, max = 220.dp)
+            )
+        } else {
+            group.sessions.forEach { session ->
+                key(session.sessionId) {
+                    SessionCard(session, onClick = { onSessionSelected(session.sessionId) })
+                }
             }
         }
+    }
+}
+
+@Composable
+private fun TerminalSplitPreview(
+    root: TerminalSplitNode,
+    sessions: List<TerminalSession>,
+    onSessionSelected: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val byPaneId = remember(sessions) { sessions.associateBy { it.paneId } }
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f)
+    ) {
+        TerminalSplitNodePreview(
+            node = root,
+            sessionsByPaneId = byPaneId,
+            onSessionSelected = onSessionSelected,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(6.dp)
+        )
+    }
+}
+
+@Composable
+private fun TerminalSplitNodePreview(
+    node: TerminalSplitNode,
+    sessionsByPaneId: Map<String, TerminalSession>,
+    onSessionSelected: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    if (node.type == "leaf") {
+        val session = sessionsByPaneId[node.paneId]
+        if (session != null) {
+            SplitLeafPreview(
+                session = session,
+                onClick = { onSessionSelected(session.sessionId) },
+                modifier = modifier
+            )
+        } else {
+            SplitEmptyLeafPreview(modifier = modifier)
+        }
+        return
+    }
+
+    val children = node.children.ifEmpty { return SplitEmptyLeafPreview(modifier = modifier) }
+    val horizontal = node.type == "horizontal"
+    if (horizontal) {
+        Row(
+            modifier = modifier,
+            horizontalArrangement = Arrangement.spacedBy(5.dp)
+        ) {
+            children.forEach { child ->
+                TerminalSplitNodePreview(
+                    node = child,
+                    sessionsByPaneId = sessionsByPaneId,
+                    onSessionSelected = onSessionSelected,
+                    modifier = Modifier
+                        .weight(child.size.coerceAtLeast(0.1f))
+                        .fillMaxHeight()
+                )
+            }
+        }
+    } else {
+        Column(
+            modifier = modifier,
+            verticalArrangement = Arrangement.spacedBy(5.dp)
+        ) {
+            children.forEach { child ->
+                TerminalSplitNodePreview(
+                    node = child,
+                    sessionsByPaneId = sessionsByPaneId,
+                    onSessionSelected = onSessionSelected,
+                    modifier = Modifier
+                        .weight(child.size.coerceAtLeast(0.1f))
+                        .fillMaxWidth()
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SplitLeafPreview(
+    session: TerminalSession,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val stateVisual = sessionTaskVisual(session, false)
+    Surface(
+        onClick = onClick,
+        modifier = modifier,
+        shape = RoundedCornerShape(6.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
+        tonalElevation = 1.dp
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .border(1.dp, stateVisual.color.copy(alpha = 0.34f), RoundedCornerShape(6.dp))
+                .padding(8.dp),
+            verticalArrangement = Arrangement.spacedBy(5.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(7.dp)
+                        .background(stateVisual.color, RoundedCornerShape(999.dp))
+                )
+                Text(
+                    text = session.paneTitle.ifBlank { session.title },
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+            Text(
+                text = session.activity.ifBlank { session.preview.ifBlank { stateVisual.label } },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
+private fun SplitEmptyLeafPreview(modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(6.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.52f)
+    ) {
+        Spacer(modifier = Modifier.fillMaxSize())
     }
 }
 
@@ -1039,6 +1224,7 @@ private fun formatRelativeActivity(now: Long, lastActivityAt: Long): String {
 fun TerminalViewScreen(
     connectionState: ConnectionState,
     session: TerminalSession?,
+    sameTabSessions: List<TerminalSession>,
     output: String,
     outputVersion: Long,
     terminalDelta: SharedFlow<TerminalDeltaBatch>,
@@ -1052,6 +1238,7 @@ fun TerminalViewScreen(
     onRefreshTerminal: () -> Unit,
     onRequestCloseSession: (String) -> Unit,
     onTerminalResize: (Int, Int, Boolean) -> Unit,
+    onSessionSelected: (String) -> Unit,
     onDebug: (String) -> Unit,
     onClose: () -> Unit
 ) {
@@ -1292,6 +1479,13 @@ fun TerminalViewScreen(
                         }
                     }
                 }
+            }
+            if (sameTabSessions.size > 1) {
+                TerminalPaneSwitcher(
+                    currentSessionId = session?.sessionId,
+                    panes = sameTabSessions,
+                    onSessionSelected = onSessionSelected
+                )
             }
             Box(
                 modifier = Modifier
@@ -1643,6 +1837,75 @@ private fun buildTuiSubmitPayload(input: String): String {
         "\u001B[200~$pasteSafeText\u001B[201~\r"
     } else {
         "$pasteSafeText\r"
+    }
+}
+
+@Composable
+private fun TerminalPaneSwitcher(
+    currentSessionId: String?,
+    panes: List<TerminalSession>,
+    onSessionSelected: (String) -> Unit
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = panes.firstOrNull()?.tabTitle?.takeIf { it.isNotBlank() } ?: "当前标签",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(0.36f)
+            )
+            LazyRow(
+                modifier = Modifier.weight(0.64f),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                items(panes, key = { it.sessionId }) { pane ->
+                    val selected = pane.sessionId == currentSessionId
+                    val order = normalizedOrder(pane.paneOrder)
+                    val label = pane.paneTitle
+                        .ifBlank { pane.title }
+                        .ifBlank { if (order == Int.MAX_VALUE) "屏幕" else "屏幕 ${order + 1}" }
+                    if (selected) {
+                        Button(
+                            onClick = {},
+                            enabled = false,
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                            modifier = Modifier.height(32.dp)
+                        ) {
+                            Text(
+                                text = label,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                    } else {
+                        TextButton(
+                            onClick = { onSessionSelected(pane.sessionId) },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                            modifier = Modifier.height(32.dp)
+                        ) {
+                            Text(
+                                text = label,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

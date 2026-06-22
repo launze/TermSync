@@ -27,6 +27,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import android.util.Base64
 
 sealed class ConnectionState {
     object Disconnected : ConnectionState()
@@ -67,6 +68,7 @@ enum class SpecialKey(val escapeSequence: String) {
 
 data class TerminalSession(
     val sessionId: String,
+    val workspaceId: String = "",
     val title: String,
     val cols: Int,
     val rows: Int,
@@ -82,7 +84,15 @@ data class TerminalSession(
     val paneId: String = "",
     val paneTitle: String = "",
     val paneOrder: Int = Int.MAX_VALUE,
-    val paneCount: Int = 1
+    val paneCount: Int = 1,
+    val tabRoot: TerminalSplitNode? = null
+)
+
+data class TerminalSplitNode(
+    val type: String,
+    val paneId: String = "",
+    val size: Float = 1f,
+    val children: List<TerminalSplitNode> = emptyList()
 )
 
 data class TerminalDeltaBatch(
@@ -142,23 +152,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val version: Long
     )
 
+    private data class V3ScreenSubscription(
+        val workspaceId: String,
+        val paneId: String
+    )
+
     private val prefs = application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private val apiClient = ApiClient()
     private val wssClient = WssClient()
-    private val observedSessionIds = mutableSetOf<String>()
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     private val _sessions = MutableStateFlow<List<TerminalSession>>(emptyList())
     private val _selectedSessionId = MutableStateFlow<String?>(null)
     private val _terminalOutput = MutableStateFlow<String>("")
     private val _terminalOutputVersion = MutableStateFlow(0L)
-    // Raw delta channel: every terminal.output chunk goes here
+    // Raw v3 screen delta channel; UI batching keeps WebView updates bounded.
     private val _rawDeltaChannel = Channel<PendingTerminalDelta>(Channel.UNLIMITED)
     // Batched delta flow: merged every DELTA_BATCH_MS, consumed by WebView LaunchedEffect
     private val _terminalDelta = MutableSharedFlow<TerminalDeltaBatch>(extraBufferCapacity = 64)
     private val _debugLog = MutableStateFlow<List<String>>(emptyList())
-    private var _debugOutputMsgCount = 0
-    private var _debugOutputTotalBytes = 0L
-    private var _debugReplayCount = 0
     private val _statusMessage = MutableStateFlow<String>("")
     private val _replayLoading = MutableStateFlow(false)
     private val _terminalStreamStatus = MutableStateFlow("等待进入终端")
@@ -175,6 +186,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _pairedDesktopName = MutableStateFlow(prefs.getString(KEY_PAIRED_DESKTOP_NAME, "") ?: "")
     private val _isPaired = MutableStateFlow(_pairedDesktopId.value.isNotBlank())
     private val sessionOutputCache = loadSessionOutputCache().toMutableMap()
+    private val v3ScreenSeqByPane = mutableMapOf<String, Long>()
+    private val v3ResyncRequestedAt = mutableMapOf<String, Long>()
+    private val v3ScreenAckSeqByPane = mutableMapOf<String, Long>()
+    private val v3ScreenAckSentAt = mutableMapOf<String, Long>()
+    private val v3SubscribedScreens = mutableMapOf<String, V3ScreenSubscription>()
     private val commandCatalog = loadCommandCatalog().toMutableList()
     private val _commandLibrary = MutableStateFlow(buildCommandLibraryUiState(commandCatalog))
     private val _appUpdate = MutableStateFlow(AppUpdateUiState())
@@ -185,6 +201,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var outputCachePersistJob: Job? = null
     private var sessionListRetryJob: Job? = null
     private var manualDisconnect = false
+    private var appInForeground = true
     private var reconnectAttempts = 0
 
     companion object {
@@ -309,7 +326,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (success) {
                         val devId = payload.optString("device_id", "unknown")
                         val devType = payload.optString("device_type", "unknown")
-                        observedSessionIds.clear()
                         reconnectAttempts = 0
                         cancelReconnect()
                         _connectionState.value = ConnectionState.Connected(devId, devType)
@@ -325,141 +341,82 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
             }
-            "session.list_res" -> {
-                msg.payload?.let { payload ->
-                    val sessionsArray = payload.optJSONArray("sessions")
-                    if (sessionsArray != null) {
-                        dbg("SESSION_LIST count=${sessionsArray.length()}")
-                        val previousById = _sessions.value.associateBy { it.sessionId }
-                        val sessionList = mutableListOf<TerminalSession>()
-                        for (i in 0 until sessionsArray.length()) {
-                            val obj = sessionsArray.getJSONObject(i)
-                            val sessionId = obj.optString("session_id")
-                            val previous = previousById[sessionId]
-                            sessionList.add(parseSessionSnapshot(obj, previous, sessionId))
-                            subscribeForPreview(sessionId)
-                        }
-                        _sessions.value = sortSessionsForDisplay(sessionList)
-                        if (sessionList.isEmpty()) {
-                            _statusMessage.value = "已连接服务器，当前没有可用终端"
-                            scheduleSessionListRetry()
-                        } else {
-                            _statusMessage.value = ""
-                            cancelSessionListRetry()
-                        }
-                        Log.d(TAG, "Received ${sessionList.size} sessions")
+            "workspace.list_res" -> {
+                val workspaces = msg.payload?.optJSONArray("workspaces")
+                if (workspaces != null && workspaces.length() > 0) {
+                    val workspaceId = workspaces.optJSONObject(0)?.optString("workspace_id").orEmpty()
+                    if (workspaceId.isNotBlank()) {
+                        wssClient.subscribeWorkspace(workspaceId)
+                        _statusMessage.value = "已订阅远程工作区"
                     }
-                }
-            }
-            "session.create" -> {
-                if (_connectionState.value is ConnectionState.Connected) {
-                    wssClient.requestSessionList()
+                } else {
+                    _statusMessage.value = "已连接服务器，当前没有可用终端"
                     scheduleSessionListRetry()
                 }
             }
-            "session.state" -> {
-                msg.payload?.let { payload ->
-                    val snapshot = payload.optJSONObject("snapshot") ?: payload
-                    val sessionId = snapshot.optString("session_id", msg.sessionId ?: "")
-                    val previous = _sessions.value.firstOrNull { it.sessionId == sessionId }
-                    val session = parseSessionSnapshot(snapshot, previous, sessionId)
-                    val existing = _sessions.value.filterNot { it.sessionId == session.sessionId }
-                    _sessions.value = sortSessionsForDisplay(existing + session)
+            "layout.snapshot", "layout.patch" -> {
+                val body = msg.payload ?: JSONObject()
+                val snapshot = body.optJSONObject("snapshot") ?: body
+                val sessions = parseV3LayoutSnapshot(msg.workspaceId.orEmpty(), snapshot)
+                _sessions.value = sortSessionsForDisplay(sessions)
+                ensureSelectedSessionAfterLayout(sessions)
+                if (sessions.isEmpty()) {
+                    _statusMessage.value = "已连接服务器，当前没有可用终端"
+                    scheduleSessionListRetry()
+                } else {
                     _statusMessage.value = ""
-                    subscribeForPreview(session.sessionId)
                     cancelSessionListRetry()
                 }
             }
-            "terminal.output" -> {
-                msg.payload?.let { payload ->
-                    val data = payload.optString("data", "")
-                    _debugOutputMsgCount++
-                    _debugOutputTotalBytes += data.length
-                    val selSid = _selectedSessionId.value
-                    val matches = msg.sessionId == selSid
-                    // Only log every 50th message to avoid recomposition storm from _debugLog updates
-                    if (_debugOutputMsgCount <= 3 || _debugOutputMsgCount % 50 == 0) {
-                        dbg("TERM_OUT #$_debugOutputMsgCount sid=${msg.sessionId?.take(8)} data.len=${data.length} totalBytes=$_debugOutputTotalBytes match=$matches")
+            "screen.snapshot", "screen.delta" -> {
+                val paneId = msg.paneId.orEmpty()
+                val session = _sessions.value.firstOrNull { it.paneId == paneId || it.sessionId == msg.sessionId }
+                val sessionId = msg.sessionId ?: session?.sessionId ?: return
+                val workspaceId = msg.workspaceId ?: session?.workspaceId.orEmpty()
+                val seqKey = v3ScreenKey(workspaceId, paneId)
+                if (msg.type == "screen.snapshot") {
+                    val snapshotSeq = msg.payload?.optLong("snapshot_seq", 0L) ?: 0L
+                    v3ScreenSeqByPane[seqKey] = snapshotSeq
+                } else {
+                    val seq = msg.payload?.optLong("seq", 0L) ?: 0L
+                    val prevSeq = msg.payload?.optLong("prev_seq", 0L) ?: 0L
+                    val lastSeq = v3ScreenSeqByPane[seqKey] ?: 0L
+                    if (lastSeq > 0L && prevSeq != lastSeq) {
+                        requestScreenResyncThrottled(workspaceId, paneId, lastSeq)
+                        return
                     }
-                    if (msg.sessionId != null && data.isNotEmpty()) {
-                        val existing = sessionOutputCache[msg.sessionId].orEmpty()
-                        sessionOutputCache[msg.sessionId] = trimReplay(existing + data)
-                        val version = nextSessionOutputVersion(msg.sessionId)
-                        scheduleSessionOutputCacheSave()
-                        if (matches) {
-                            _terminalOutput.value = sessionOutputCache[msg.sessionId].orEmpty()
-                            _terminalOutputVersion.value = version
-                            // Send raw delta to batching channel — NOT directly to UI
-                            _rawDeltaChannel.trySend(
-                                PendingTerminalDelta(
-                                    sessionId = msg.sessionId,
-                                    data = data,
-                                    version = version
-                                )
-                            )
-                        }
-                    }
-                    if (matches) {
-                        _replayLoading.value = false
-                        _terminalStreamStatus.value = "实时同步中"
-                    }
-                    val preview = extractPreview(data)
-                    if (msg.sessionId != null) {
-                        val now = System.currentTimeMillis()
-                        _sessions.value = sortSessionsForDisplay(_sessions.value.map { session ->
-                            if (session.sessionId == msg.sessionId) {
-                                session.copy(
-                                    activity = session.activity.ifBlank { preview },
-                                    taskState = "running",
-                                    preview = preview.ifBlank { session.preview },
-                                    lastActivityAt = now
-                                )
-                            } else {
-                                session
-                            }
-                        })
-                    }
+                    if (seq > 0L && seq <= lastSeq) return
+                    if (seq > 0L) v3ScreenSeqByPane[seqKey] = seq
                 }
-            }
-            "terminal.replay" -> {
-                msg.payload?.let { payload ->
-                    val data = payload.optString("data", "")
-                    val sessionId = msg.sessionId
-                    _debugReplayCount++
-                    dbg("REPLAY #$_debugReplayCount sid=${sessionId?.take(8)} data.len=${data.length} selected=${_selectedSessionId.value?.take(8)}")
-                    if (!sessionId.isNullOrBlank()) {
-                        val merged = mergeReplayWithLive(data, sessionOutputCache[sessionId].orEmpty())
-                        sessionOutputCache[sessionId] = trimReplay(merged)
-                        val version = nextSessionOutputVersion(sessionId)
-                        scheduleSessionOutputCacheSave()
-                        if (_selectedSessionId.value == sessionId) {
-                            _terminalOutput.value = sessionOutputCache[sessionId].orEmpty()
-                            _terminalOutputVersion.value = version
-                            _replayLoading.value = false
-                            _terminalStreamStatus.value = if (data.isNotBlank()) "正在接收桌面端回放" else "桌面端暂无可回放内容"
-                        }
-                    }
+                val encoded = msg.payload?.optString("data").orEmpty()
+                if (encoded.isBlank()) return
+                val data = runCatching {
+                    String(Base64.decode(encoded, Base64.DEFAULT), Charsets.UTF_8)
+                }.getOrDefault("")
+                if (data.isBlank()) return
+                if (msg.type == "screen.snapshot") {
+                    sessionOutputCache[sessionId] = data
+                    val snapshotSeq = v3ScreenSeqByPane[seqKey] ?: 0L
+                    if (snapshotSeq > 0L) ackScreenThrottled(workspaceId, paneId, snapshotSeq)
+                } else {
+                    sessionOutputCache[sessionId] = trimReplay(sessionOutputCache[sessionId].orEmpty() + data)
+                    val seq = v3ScreenSeqByPane[seqKey] ?: 0L
+                    if (seq > 0L) ackScreenThrottled(workspaceId, paneId, seq)
                 }
-            }
-            "session.close" -> {
-                val sid = msg.sessionId
-                if (sid != null) {
-                    observedSessionIds.remove(sid)
-                    sessionOutputCache.remove(sid)
-                    scheduleSessionOutputCacheSave()
-                    _sessions.value = _sessions.value.filter { it.sessionId != sid }
-                    if (_selectedSessionId.value == sid) {
-                        _selectedSessionId.value = null
-                        _terminalOutput.value = ""
-                        _terminalOutputVersion.value = 0L
-                        _replayLoading.value = false
-                        _terminalStreamStatus.value = "终端已关闭"
-                    }
+                val version = nextSessionOutputVersion(sessionId)
+                scheduleSessionOutputCacheSave()
+                if (_selectedSessionId.value == sessionId) {
+                    _terminalOutput.value = sessionOutputCache[sessionId].orEmpty()
+                    _terminalOutputVersion.value = version
+                    _rawDeltaChannel.trySend(PendingTerminalDelta(sessionId, data, version))
+                    _replayLoading.value = false
+                    _terminalStreamStatus.value = "实时同步中"
                 }
             }
             "connection.error" -> {
                 val message = msg.payload?.optString("message", "Connection failed") ?: "Connection failed"
                 _connectionState.value = ConnectionState.Error(message)
+                v3SubscribedScreens.clear()
                 _statusMessage.value = message
                 cancelSessionListRetry()
                 if (_selectedSessionId.value != null) {
@@ -469,6 +426,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             "connection.closed" -> {
                 _connectionState.value = ConnectionState.Disconnected
+                v3SubscribedScreens.clear()
                 cancelSessionListRetry()
                 if (_selectedSessionId.value != null) {
                     _terminalStreamStatus.value = "连接已关闭，等待自动重连"
@@ -514,6 +472,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun connectWithToken(url: String, token: String) {
         manualDisconnect = false
         cancelReconnect()
+        v3SubscribedScreens.clear()
         _connectionState.value = ConnectionState.Connecting
         _statusMessage.value = "正在连接桌面终端服务…"
         saveConnectionSettings(url, token, _deviceName.value)
@@ -695,8 +654,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         manualDisconnect = true
         cancelReconnect()
         cancelSessionListRetry()
+        unsubscribeSelectedScreen()
         wssClient.disconnect()
-        observedSessionIds.clear()
         _connectionState.value = ConnectionState.Disconnected
         _sessions.value = emptyList()
         _selectedSessionId.value = null
@@ -709,9 +668,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private var replayTimeoutJob: Job? = null
 
+    fun onAppForeground() {
+        appInForeground = true
+        val sessionId = _selectedSessionId.value ?: return
+        _sessions.value.firstOrNull { it.sessionId == sessionId }?.let { session ->
+            syncVisibleScreenSubscriptions(session)
+            if (_terminalStreamStatus.value == "已暂停实时屏幕同步") {
+                _terminalStreamStatus.value = "正在同步远程屏幕…"
+            }
+        }
+    }
+
+    fun onAppBackground() {
+        appInForeground = false
+        unsubscribeSelectedScreen()
+        if (_selectedSessionId.value != null) {
+            _terminalStreamStatus.value = "已暂停实时屏幕同步"
+        }
+    }
+
     fun selectSession(sessionId: String?) {
         if (sessionId.isNullOrBlank()) {
             dbg("SELECT_SESSION -> null (deselect)")
+            unsubscribeSelectedScreen()
             _selectedSessionId.value = null
             _terminalOutput.value = ""
             _terminalOutputVersion.value = 0L
@@ -721,6 +700,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
+        val previousSessionId = _selectedSessionId.value
+        if (previousSessionId != sessionId) {
+            unsubscribeScreensOutsideSelectedTab(sessionId)
+        }
         val cachedLen = sessionOutputCache[sessionId].orEmpty().length
         dbg("SELECT_SESSION sid=${sessionId.take(8)} cache.len=$cachedLen")
         _selectedSessionId.value = sessionId
@@ -728,9 +711,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _terminalOutputVersion.value = ensureSessionOutputVersion(sessionId)
         dbg("SELECT_SESSION output.len=${_terminalOutput.value.length}")
         _replayLoading.value = _terminalOutput.value.isBlank()
-        _terminalStreamStatus.value = if (_terminalOutput.value.isBlank()) "正在请求桌面端回放…" else "已加载本地缓存，正在同步实时输出"
-        subscribeForPreview(sessionId, force = true)
-        wssClient.requestTerminalReplay(sessionId)
+        _terminalStreamStatus.value = if (_terminalOutput.value.isBlank()) "正在同步远程屏幕…" else "已加载本地缓存，正在同步实时输出"
+        _sessions.value.firstOrNull { it.sessionId == sessionId }?.let { session ->
+            syncVisibleScreenSubscriptions(session)
+        }
         
         // 添加超时处理，防止一直等待
         replayTimeoutJob?.cancel()
@@ -746,8 +730,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun refreshSelectedSessionReplay() {
         val sessionId = _selectedSessionId.value ?: return
         _replayLoading.value = true
-        _terminalStreamStatus.value = "正在刷新桌面端回放…"
-        wssClient.requestTerminalReplay(sessionId)
+        _terminalStreamStatus.value = "正在重新同步远程屏幕…"
+        _sessions.value.firstOrNull { it.sessionId == sessionId }?.let { session ->
+            syncVisibleScreenSubscriptions(session)
+        }
         
         // 添加超时处理
         replayTimeoutJob?.cancel()
@@ -762,7 +748,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun sendInput(input: String) {
         val sessionId = _selectedSessionId.value ?: return
-        wssClient.sendTerminalInput(sessionId, input)
+        val session = _sessions.value.firstOrNull { it.sessionId == sessionId } ?: return
+        if (session.workspaceId.isBlank() || session.paneId.isBlank()) return
+        wssClient.sendTerminalInput(
+            session.workspaceId,
+            session.paneId,
+            session.sessionId,
+            input,
+            "android:${System.currentTimeMillis()}:${input.length}"
+        )
     }
 
     fun submitCommand(command: String) {
@@ -792,7 +786,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun sendSpecialKey(key: SpecialKey) {
         val sessionId = _selectedSessionId.value ?: return
-        wssClient.sendTerminalInput(sessionId, key.escapeSequence)
+        val session = _sessions.value.firstOrNull { it.sessionId == sessionId } ?: return
+        if (session.workspaceId.isBlank() || session.paneId.isBlank()) return
+        wssClient.sendTerminalInput(
+            session.workspaceId,
+            session.paneId,
+            session.sessionId,
+            key.escapeSequence,
+            "android:${System.currentTimeMillis()}:${key.name}"
+        )
     }
 
     fun requestSelectedSessionResize(cols: Int, rows: Int, force: Boolean = false) {
@@ -819,7 +821,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         dbg("RESIZE_REQ sid=${sessionId.take(8)} cols=$cols rows=$rows force=$force")
         lastRequestedResizeBySession[sessionId] = cols to rows
         lastResizeRequestAtBySession[sessionId] = now
-        wssClient.requestResize(sessionId, cols, rows)
     }
 
     fun createSession(title: String = "Terminal", cols: Int = 80, rows: Int = 24) {
@@ -847,8 +848,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _statusMessage.value = "请先连接服务器"
             return
         }
+        val session = _sessions.value.firstOrNull { it.sessionId == sessionId }
+        if (session == null || session.workspaceId.isBlank() || session.paneId.isBlank()) {
+            _statusMessage.value = "缺少远程终端布局信息"
+            return
+        }
         _statusMessage.value = "已请求桌面关闭终端…"
-        wssClient.requestRemoteSessionClose(sessionId)
+        wssClient.requestRemoteSessionClose(session.workspaceId, session.paneId, session.sessionId)
     }
 
     fun closeSession(sessionId: String) {
@@ -869,6 +875,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     override fun onCleared() {
         super.onCleared()
         persistSessionOutputCache()
+        unsubscribeSelectedScreen()
         wssClient.disconnect()
     }
 
@@ -904,11 +911,107 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         clearSessionOutputCache()
     }
 
-    private fun subscribeForPreview(sessionId: String, force: Boolean = false) {
-        if (sessionId.isBlank()) return
-        if (!force && !observedSessionIds.add(sessionId)) return
-        if (force) observedSessionIds.add(sessionId)
-        wssClient.subscribeToSession(sessionId)
+    private fun ensureSelectedSessionAfterLayout(sessions: List<TerminalSession>) {
+        val selectedSessionId = _selectedSessionId.value
+        if (selectedSessionId.isNullOrBlank()) return
+
+        val selected = sessions.firstOrNull { it.sessionId == selectedSessionId }
+        if (selected == null) {
+            unsubscribeSelectedScreen(selectedSessionId)
+            _selectedSessionId.value = null
+            _terminalOutput.value = ""
+            _terminalOutputVersion.value = 0L
+            _replayLoading.value = false
+            _terminalStreamStatus.value = "当前终端已关闭"
+            replayTimeoutJob?.cancel()
+            return
+        }
+
+        syncVisibleScreenSubscriptions(selected)
+    }
+
+    private fun syncVisibleScreenSubscriptions(session: TerminalSession) {
+        if (!appInForeground) return
+        val visibleSessions = visibleSessionsForDetail(session)
+        val desiredKeys = visibleSessions
+            .filter { it.workspaceId.isNotBlank() && it.paneId.isNotBlank() }
+            .associate { v3ScreenKey(it.workspaceId, it.paneId) to V3ScreenSubscription(it.workspaceId, it.paneId) }
+
+        val staleKeys = v3SubscribedScreens.keys.filterNot { it in desiredKeys.keys }
+        staleKeys.forEach { key ->
+            v3SubscribedScreens.remove(key)?.let { subscription ->
+                wssClient.unsubscribeScreen(subscription.workspaceId, subscription.paneId)
+            }
+        }
+
+        desiredKeys.forEach { (key, subscription) ->
+            if (!v3SubscribedScreens.containsKey(key)) {
+                v3SubscribedScreens[key] = subscription
+                wssClient.subscribeScreen(subscription.workspaceId, subscription.paneId)
+            }
+        }
+    }
+
+    private fun visibleSessionsForDetail(selected: TerminalSession): List<TerminalSession> {
+        val allSessions = _sessions.value
+        if (selected.tabId.isBlank()) return listOf(selected)
+        return allSessions
+            .filter { it.workspaceId == selected.workspaceId && it.tabId == selected.tabId }
+            .ifEmpty { listOf(selected) }
+    }
+
+    private fun unsubscribeScreensOutsideSelectedTab(nextSessionId: String) {
+        val nextSession = _sessions.value.firstOrNull { it.sessionId == nextSessionId }
+        if (nextSession == null) {
+            unsubscribeSelectedScreen()
+            return
+        }
+        syncVisibleScreenSubscriptions(nextSession)
+    }
+
+    private fun unsubscribeSelectedScreen(sessionId: String? = _selectedSessionId.value) {
+        val session = sessionId?.let { id -> _sessions.value.firstOrNull { it.sessionId == id } }
+        if (session != null && session.workspaceId.isNotBlank() && session.paneId.isNotBlank()) {
+            val key = v3ScreenKey(session.workspaceId, session.paneId)
+            val subscription = v3SubscribedScreens.remove(key)
+            if (subscription != null) {
+                wssClient.unsubscribeScreen(subscription.workspaceId, subscription.paneId)
+            }
+            return
+        }
+
+        v3SubscribedScreens.values.forEach { subscription ->
+            wssClient.unsubscribeScreen(subscription.workspaceId, subscription.paneId)
+        }
+        v3SubscribedScreens.clear()
+    }
+
+    private fun v3ScreenKey(workspaceId: String, paneId: String): String {
+        return "${workspaceId.length}:$workspaceId${paneId.length}:$paneId"
+    }
+
+    private fun requestScreenResyncThrottled(workspaceId: String, paneId: String, lastSeq: Long) {
+        if (workspaceId.isBlank() || paneId.isBlank()) return
+        val key = v3ScreenKey(workspaceId, paneId)
+        val now = System.currentTimeMillis()
+        val lastRequestedAt = v3ResyncRequestedAt[key] ?: 0L
+        if (now - lastRequestedAt < 1000L) return
+        v3ResyncRequestedAt[key] = now
+        wssClient.requestScreenResync(workspaceId, paneId, lastSeq)
+        _terminalStreamStatus.value = "正在重新同步屏幕"
+    }
+
+    private fun ackScreenThrottled(workspaceId: String, paneId: String, ackSeq: Long) {
+        if (workspaceId.isBlank() || paneId.isBlank() || ackSeq <= 0L) return
+        val key = v3ScreenKey(workspaceId, paneId)
+        val lastAck = v3ScreenAckSeqByPane[key] ?: 0L
+        if (ackSeq <= lastAck) return
+        val now = System.currentTimeMillis()
+        val lastSentAt = v3ScreenAckSentAt[key] ?: 0L
+        v3ScreenAckSeqByPane[key] = ackSeq
+        if (now - lastSentAt < 250L) return
+        v3ScreenAckSentAt[key] = now
+        wssClient.ackScreen(workspaceId, paneId, ackSeq)
     }
 
     private fun extractPreview(data: String): String {
@@ -925,43 +1028,83 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return cleaned.replace(Regex("\\s+"), " ").take(64)
     }
 
-    private fun parseSessionSnapshot(
-        snapshot: JSONObject,
-        previous: TerminalSession?,
-        fallbackSessionId: String
-    ): TerminalSession {
+    private fun parseV3LayoutSnapshot(workspaceIdFromMessage: String, snapshot: JSONObject): List<TerminalSession> {
+        val workspaceId = workspaceIdFromMessage
+            .ifBlank { snapshot.optString("workspace_id", "") }
+            .ifBlank { _pairedDesktopId.value.trim().takeIf { it.isNotBlank() }?.let { "$it:default" }.orEmpty() }
+        val ownerId = snapshot.optString("owner_device_id", _pairedDesktopId.value.trim())
+        val tabs = snapshot.optJSONArray("tabs") ?: JSONArray()
+        val previousById = _sessions.value.associateBy { it.sessionId }
+        val result = mutableListOf<TerminalSession>()
         val now = System.currentTimeMillis()
-        val preview = snapshot.optString("preview", previous?.preview.orEmpty()).orEmpty()
-        val activity = snapshot.optString("activity", previous?.activity.orEmpty()).orEmpty()
-        val taskState = snapshot.optString("task_state", previous?.taskState.orEmpty()).orEmpty()
-        val layout = snapshot.optJSONObject("layout")
-        val previousActivityAt = previous?.lastActivityAt ?: 0L
-        val activityChanged = activity != previous?.activity || preview != previous?.preview || taskState != previous?.taskState
-        val sessionId = snapshot.optString("session_id", fallbackSessionId)
-        val paneTitle = layout?.optString("pane_title")?.takeIf { it.isNotBlank() }
-            ?: snapshot.optString("title", previous?.title ?: "Terminal")
-        return TerminalSession(
-            sessionId = sessionId,
-            title = paneTitle,
-            cols = snapshot.optInt("cols", previous?.cols ?: 80),
-            rows = snapshot.optInt("rows", previous?.rows ?: 24),
-            status = snapshot.optString("status", previous?.status ?: "running"),
-            isOwner = snapshot.optString("owner_id") == wssClient.deviceId,
-            activity = activity,
-            taskState = taskState,
-            preview = preview,
-            lastActivityAt = if (activity.isNotBlank() || preview.isNotBlank() || taskState.isNotBlank()) {
-                if (previousActivityAt == 0L || activityChanged || taskState == "running" || taskState == "waiting_input") now else previousActivityAt
-            } else {
-                previousActivityAt
-            },
-            tabId = layout?.optString("tab_id")?.takeIf { it.isNotBlank() } ?: previous?.tabId.orEmpty(),
-            tabTitle = layout?.optString("tab_title")?.takeIf { it.isNotBlank() } ?: previous?.tabTitle.orEmpty(),
-            tabOrder = layout?.optInt("tab_order", previous?.tabOrder ?: Int.MAX_VALUE) ?: (previous?.tabOrder ?: Int.MAX_VALUE),
-            paneId = layout?.optString("pane_id")?.takeIf { it.isNotBlank() } ?: previous?.paneId.orEmpty(),
-            paneTitle = paneTitle,
-            paneOrder = layout?.optInt("pane_order", previous?.paneOrder ?: Int.MAX_VALUE) ?: (previous?.paneOrder ?: Int.MAX_VALUE),
-            paneCount = layout?.optInt("pane_count", previous?.paneCount ?: 1)?.coerceAtLeast(1) ?: (previous?.paneCount ?: 1)
+
+        for (tabIndex in 0 until tabs.length()) {
+            val tab = tabs.optJSONObject(tabIndex) ?: continue
+            val tabId = tab.optString("tab_id", tab.optString("id", "tab-$tabIndex"))
+            val tabTitle = tab.optString("title", "远程终端")
+            val tabRoot = parseTerminalSplitNode(tab.optJSONObject("root"))
+            val panes = tab.optJSONArray("panes") ?: JSONArray()
+            for (paneIndex in 0 until panes.length()) {
+                val pane = panes.optJSONObject(paneIndex) ?: continue
+                val paneId = pane.optString("pane_id")
+                if (paneId.isBlank()) continue
+                val sessionId = pane.optString("session_id", "remote-$paneId")
+                val previous = previousById[sessionId]
+                val title = pane.optString("title", previous?.title ?: tabTitle)
+                val activity = pane.optString("activity", previous?.activity.orEmpty())
+                val preview = pane.optString("preview", previous?.preview.orEmpty())
+                val taskState = pane.optString("task_state", previous?.taskState.orEmpty())
+                val changed = activity != previous?.activity || preview != previous?.preview || taskState != previous?.taskState
+                result.add(
+                    TerminalSession(
+                        sessionId = sessionId,
+                        workspaceId = workspaceId,
+                        title = title,
+                        cols = pane.optInt("cols", previous?.cols ?: 80),
+                        rows = pane.optInt("rows", previous?.rows ?: 24),
+                        status = pane.optString("status", previous?.status ?: "active"),
+                        isOwner = ownerId == wssClient.deviceId,
+                        activity = activity,
+                        taskState = taskState,
+                        preview = preview,
+                        lastActivityAt = if (changed) now else previous?.lastActivityAt ?: 0L,
+                        tabId = tabId,
+                        tabTitle = tabTitle,
+                        tabOrder = tab.optInt("order", tabIndex),
+                        paneId = paneId,
+                        paneTitle = title,
+                        paneOrder = pane.optInt("order", paneIndex),
+                        paneCount = panes.length().coerceAtLeast(1),
+                        tabRoot = tabRoot
+                    )
+                )
+            }
+        }
+        return result
+    }
+
+    private fun parseTerminalSplitNode(node: JSONObject?): TerminalSplitNode? {
+        if (node == null) return null
+        val type = node.optString("type", "leaf").ifBlank { "leaf" }
+        val size = node.optDouble("size", 1.0).toFloat().takeIf { it > 0f } ?: 1f
+        if (type == "leaf") {
+            val paneId = node.optString("pane_id", node.optString("paneId", ""))
+            return if (paneId.isBlank()) null else TerminalSplitNode(
+                type = "leaf",
+                paneId = paneId,
+                size = size
+            )
+        }
+        val childrenJson = node.optJSONArray("children") ?: JSONArray()
+        val children = mutableListOf<TerminalSplitNode>()
+        for (index in 0 until childrenJson.length()) {
+            parseTerminalSplitNode(childrenJson.optJSONObject(index))?.let { children.add(it) }
+        }
+        if (children.isEmpty()) return null
+        return TerminalSplitNode(
+            type = if (type == "vertical") "vertical" else "horizontal",
+            size = size,
+            children = children
         )
     }
 
@@ -1220,9 +1363,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearDebugLog() {
         _debugLog.value = emptyList()
-        _debugOutputMsgCount = 0
-        _debugOutputTotalBytes = 0L
-        _debugReplayCount = 0
     }
 
     fun addDebugLine(msg: String) {
@@ -1293,21 +1433,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         applyOverlay()
         lines.add(line.toString())
         return lines.joinToString("\n")
-    }
-
-    private fun mergeReplayWithLive(replay: String, live: String): String {
-        if (replay.isEmpty()) return live
-        if (live.isEmpty()) return replay
-        if (live.startsWith(replay)) return live
-        if (replay.startsWith(live)) return replay
-
-        val maxOverlap = minOf(replay.length, live.length)
-        for (size in maxOverlap downTo 1) {
-            if (replay.regionMatches(replay.length - size, live, 0, size, ignoreCase = false)) {
-                return replay + live.substring(size)
-            }
-        }
-        return replay + live
     }
 
     private fun nextSessionOutputVersion(sessionId: String): Long {

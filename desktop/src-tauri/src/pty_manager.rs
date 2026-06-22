@@ -267,6 +267,9 @@ impl PtyManager {
             .ok_or_else(|| format!("Session {session_id} not found"))?;
 
         let mut session = session.lock();
+        if session.cols == cols && session.rows == rows {
+            return Ok(());
+        }
         session
             .master
             .resize(PtySize {

@@ -16,41 +16,29 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okio.ByteString
 import org.json.JSONObject
+import android.util.Base64
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
-import java.util.UUID
 
 /**
  * Data models for WebSocket messages
  */
 data class WssMessage(
     val type: String,
+    val id: String?,
+    val workspaceId: String?,
+    val paneId: String?,
     val sessionId: String?,
     val timestamp: Long?,
     val payload: JSONObject?
 )
 
 /**
- * Session snapshot for syncing
- */
-data class SessionSnapshot(
-    val sessionId: String,
-    val ownerId: String,
-    val title: String,
-    val cols: Int,
-    val rows: Int,
-    val status: String,
-    val taskState: String = "",
-    val preview: String = "",
-    val activity: String = ""
-)
-
-/**
  * WSS Client for connecting to TTY1 server
  * Uses self-signed certificate trust from TermSyncApplication
- * Protocol v2: typed messages, owner/viewer routing, snapshot sync
+ * Protocol v3: workspace/layout/screen/input streams.
  *
  * Thread-safety: OkHttp WebSocket callbacks fire on background threads while
  * connect()/disconnect()/sendMessage() may be called from coroutines or the
@@ -68,7 +56,12 @@ class WssClient {
     private val connectionGeneration = AtomicLong(0)
 
     private val activeSocket = AtomicReference<WebSocket?>(null)
-    private lateinit var client: OkHttpClient
+    private val client: OkHttpClient = OkHttpClient.Builder()
+        .sslSocketFactory(TermSyncApplication.sslContext.socketFactory, TermSyncApplication.trustManager)
+        .pingInterval(30, TimeUnit.SECONDS)
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(0, TimeUnit.MILLISECONDS)
+        .build()
     private val messageBuffer = MutableSharedFlow<WssMessage>(extraBufferCapacity = 100)
     private var heartbeatJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO)
@@ -87,15 +80,6 @@ class WssClient {
         private set
 
     val messages: SharedFlow<WssMessage> = messageBuffer
-
-    init {
-        client = OkHttpClient.Builder()
-            .sslSocketFactory(TermSyncApplication.sslContext.socketFactory, TermSyncApplication.trustManager)
-            .pingInterval(30, TimeUnit.SECONDS)
-            .connectTimeout(10, TimeUnit.SECONDS)
-            .readTimeout(0, TimeUnit.MILLISECONDS)
-            .build()
-    }
 
     /**
      * Connect to TTY1 server via WSS
@@ -132,6 +116,9 @@ class WssClient {
                     val json = JSONObject(text)
                     val msg = WssMessage(
                         type = json.optString("type"),
+                        id = json.optString("id").takeIf { it.isNotEmpty() },
+                        workspaceId = json.optString("workspace_id").takeIf { it.isNotEmpty() },
+                        paneId = json.optString("pane_id").takeIf { it.isNotEmpty() },
                         sessionId = json.optString("session_id").takeIf { it.isNotEmpty() },
                         timestamp = json.optLong("timestamp").takeIf { it > 0 },
                         payload = json.optJSONObject("payload")
@@ -176,6 +163,9 @@ class WssClient {
                     messageBuffer.emit(
                         WssMessage(
                             type = "connection.closed",
+                            id = null,
+                            workspaceId = null,
+                            paneId = null,
                             sessionId = null,
                             timestamp = System.currentTimeMillis() / 1000,
                             payload = JSONObject().put("message", reason)
@@ -194,6 +184,9 @@ class WssClient {
                     messageBuffer.emit(
                         WssMessage(
                             type = "connection.error",
+                            id = null,
+                            workspaceId = null,
+                            paneId = null,
                             sessionId = null,
                             timestamp = System.currentTimeMillis() / 1000,
                             payload = JSONObject().put("message", t.message ?: "Unknown websocket error")
@@ -220,7 +213,13 @@ class WssClient {
     /**
      * Send message to server
      */
-    fun sendMessage(type: String, sessionId: String? = null, payload: JSONObject? = null) {
+    fun sendMessage(
+        type: String,
+        workspaceId: String? = null,
+        paneId: String? = null,
+        sessionId: String? = null,
+        payload: JSONObject? = null
+    ) {
         if (!isConnected) {
             Log.w(TAG, "Not connected, dropping $type")
             return
@@ -228,6 +227,10 @@ class WssClient {
 
         val json = JSONObject().apply {
             put("type", type)
+            put("v", 3)
+            put("id", "android-${System.currentTimeMillis()}-${connectionGeneration.get()}")
+            workspaceId?.takeIf { it.isNotBlank() }?.let { put("workspace_id", it) }
+            paneId?.takeIf { it.isNotBlank() }?.let { put("pane_id", it) }
             sessionId?.let { put("session_id", it) }
             put("timestamp", System.currentTimeMillis() / 1000)
             payload?.let { put("payload", it) }
@@ -237,96 +240,118 @@ class WssClient {
     }
 
     /**
-     * Send authentication message - protocol v2
+     * Send authentication message - protocol v3
      */
     private fun sendAuth(token: String) {
         val payload = JSONObject().apply {
             put("token", token)
             put("device_type", "mobile")
+            put("client_instance_id", "android-${android.os.Process.myPid()}")
+            put("connection_generation", connectionGeneration.get())
+            put("supported_protocols", org.json.JSONArray().put(3))
         }
         sendMessage("auth", payload = payload)
     }
 
-    // ─── Protocol v2: Mobile-specific helpers ─────────────────────────────
+    // ─── Protocol v3: Mobile viewer helpers ───────────────────────────────
 
     /**
-     * Request list of all active sessions.
-     * Server responds with session.list_res containing session snapshots.
+     * Request visible v3 workspaces. The server responds with workspace.list_res.
      */
     fun requestSessionList() {
-        sendMessage("session.list")
+        sendMessage("workspace.list")
     }
 
-    /**
-     * Subscribe to a session to receive terminal output.
-     * Server pushes session.state (snapshot) then incremental terminal.output.
-     */
+    fun subscribeWorkspace(workspaceId: String) {
+        sendMessage("workspace.subscribe", workspaceId = workspaceId, payload = JSONObject().put("workspace_id", workspaceId))
+    }
+
+    fun subscribeScreen(workspaceId: String, paneId: String) {
+        sendMessage("screen.subscribe", workspaceId = workspaceId, paneId = paneId, payload = JSONObject().put("pane_id", paneId))
+    }
+
+    fun unsubscribeScreen(workspaceId: String, paneId: String) {
+        sendMessage("screen.unsubscribe", workspaceId = workspaceId, paneId = paneId, payload = JSONObject().put("pane_id", paneId))
+    }
+
+    fun requestScreenResync(workspaceId: String, paneId: String, lastSeq: Long) {
+        val payload = JSONObject().apply {
+            put("pane_id", paneId)
+            put("last_seq", lastSeq)
+        }
+        sendMessage("screen.resync_request", workspaceId = workspaceId, paneId = paneId, payload = payload)
+    }
+
+    fun ackScreen(workspaceId: String, paneId: String, ackSeq: Long) {
+        val payload = JSONObject().apply {
+            put("pane_id", paneId)
+            put("ack_seq", ackSeq)
+        }
+        sendMessage("screen.ack", workspaceId = workspaceId, paneId = paneId, payload = payload)
+    }
+
     fun subscribeToSession(sessionId: String) {
-        sendMessage("session.subscribe", sessionId = sessionId)
+        Log.d(TAG, "subscribeToSession ignored in v3: $sessionId")
     }
 
     fun requestTerminalReplay(sessionId: String) {
-        sendMessage("terminal.replay_request", sessionId = sessionId)
+        Log.d(TAG, "requestTerminalReplay ignored in v3: $sessionId")
     }
 
     fun requestRemoteSessionCreate(desktopId: String, title: String? = null) {
+        val workspaceId = "$desktopId:default"
         val payload = JSONObject().apply {
-            put("desktop_id", desktopId)
+            put("action", "new_tab")
             title?.takeIf { it.isNotBlank() }?.let { put("title", it) }
         }
-        sendMessage("session.create_request", payload = payload)
+        sendMessage("layout.action_request", workspaceId = workspaceId, payload = payload)
     }
 
-    fun requestRemoteSessionClose(sessionId: String) {
-        sendMessage("session.close_request", sessionId = sessionId)
+    fun requestRemoteSessionClose(workspaceId: String, paneId: String, sessionId: String) {
+        val payload = JSONObject().apply {
+            put("action", "close_pane")
+            put("pane_id", paneId)
+            put("session_id", sessionId)
+        }
+        sendMessage("layout.action_request", workspaceId = workspaceId, paneId = paneId, sessionId = sessionId, payload = payload)
     }
 
     /**
      * Unsubscribe from a session.
      */
     fun unsubscribeFromSession(sessionId: String) {
-        sendMessage("session.unsubscribe", sessionId = sessionId)
+        Log.d(TAG, "unsubscribeFromSession ignored in v3: $sessionId")
     }
 
-    /**
-     * Send terminal input to a session (requires subscription).
-     */
-    fun sendTerminalInput(sessionId: String, input: String) {
+    fun sendTerminalInput(workspaceId: String, paneId: String, sessionId: String, input: String, inputId: String) {
         val payload = JSONObject().apply {
-            put("data", input)
+            put("input_id", inputId)
+            put("encoding", "base64")
+            put("mode", "raw")
+            put("data", Base64.encodeToString(input.toByteArray(Charsets.UTF_8), Base64.NO_WRAP))
         }
-        sendMessage("terminal.input", sessionId = sessionId, payload = payload)
+        sendMessage("input.send", workspaceId = workspaceId, paneId = paneId, sessionId = sessionId, payload = payload)
     }
 
     /**
      * Request terminal resize (requires subscription).
      */
     fun requestResize(sessionId: String, cols: Int, rows: Int) {
-        val payload = JSONObject().apply {
-            put("cols", cols)
-            put("rows", rows)
-        }
-        sendMessage("terminal.resize", sessionId = sessionId, payload = payload)
+        Log.d(TAG, "requestResize ignored in v3: $sessionId ${cols}x$rows")
     }
 
     /**
      * Create a new terminal session (requires owner role).
      */
     fun createSession(title: String = "Terminal", cols: Int = 80, rows: Int = 24) {
-        val sessionId = UUID.randomUUID().toString()
-        val payload = JSONObject().apply {
-            put("title", title)
-            put("cols", cols)
-            put("rows", rows)
-        }
-        sendMessage("session.create", sessionId = sessionId, payload = payload)
+        Log.d(TAG, "createSession ignored on mobile v3: $title ${cols}x$rows")
     }
 
     /**
      * Close a terminal session (owner only).
      */
     fun closeSession(sessionId: String) {
-        sendMessage("session.close", sessionId = sessionId)
+        Log.d(TAG, "closeSession ignored in v3: $sessionId")
     }
 
     /**

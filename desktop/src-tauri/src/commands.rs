@@ -7,7 +7,7 @@ use arboard::Clipboard;
 use chrono::Local;
 use image::{ColorType, ImageFormat};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sysinfo::System;
 use tauri::{command, AppHandle, Manager, State};
@@ -24,6 +24,25 @@ pub struct AiProxyResponse {
     pub ok: bool,
     pub status: u16,
     pub body: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScreenDeltaPayload {
+    pub workspace_id: String,
+    pub pane_id: String,
+    pub session_id: String,
+    pub seq: i64,
+    pub prev_seq: i64,
+    pub data: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScreenSnapshotPayload {
+    pub workspace_id: String,
+    pub pane_id: String,
+    pub session_id: String,
+    pub snapshot_seq: i64,
+    pub data: String,
 }
 
 fn require_session_id(session_id: String) -> Result<String, String> {
@@ -91,25 +110,7 @@ pub async fn create_session(
         shell,
         cwd,
     )?;
-    // 检查WebSocket连接状态，如果已连接则发送会话创建消息
-    if wss_state.is_connected() {
-        let result = wss_state
-            .send_session_create(
-                &session.session_id,
-                &session.title,
-                cols,
-                rows,
-                layout.clone(),
-            )
-            .await;
-        if let Err(e) = result {
-            log::warn!("Failed to send session create: {}", e);
-        }
-    } else {
-        log::info!(
-            "WebSocket not connected, will send session create after connection is established"
-        );
-    }
+    let _ = (wss_state, layout);
 
     Ok(session)
 }
@@ -122,7 +123,7 @@ pub async fn close_session(
 ) -> Result<String, String> {
     let session_id = require_session_id(session_id)?;
     pty_manager.close_session(&session_id)?;
-    let _ = wss_state.send_session_close(&session_id).await;
+    let _ = wss_state;
     Ok("Session closed".to_string())
 }
 
@@ -131,6 +132,7 @@ pub async fn send_input(
     session_id: String,
     input: Option<String>,
     data: Option<String>,
+    input_id: Option<String>,
     pty_manager: State<'_, PtyManager>,
     wss_state: State<'_, WssClientState>,
 ) -> Result<String, String> {
@@ -145,7 +147,8 @@ pub async fn send_input(
     if pty_manager.has_session(&session_id) {
         pty_manager.write_input(&session_id, input.as_bytes())?;
     } else {
-        wss_state.send_terminal_input(&session_id, &input).await?;
+        let _ = (wss_state, input_id);
+        return Err("remote input must use input.send with workspace_id and pane_id".to_string());
     }
 
     Ok("Input sent".to_string())
@@ -164,73 +167,9 @@ pub async fn resize_terminal_cmd(
     if pty_manager.has_session(&session_id) {
         pty_manager.resize(&session_id, cols, rows)?;
     }
-    let _ = wss_state
-        .send_terminal_resize(&session_id, cols, rows)
-        .await;
+    let _ = wss_state;
 
     Ok("Terminal resized".to_string())
-}
-
-#[command]
-pub async fn subscribe_session(
-    session_id: String,
-    state: State<'_, WssClientState>,
-) -> Result<String, String> {
-    state
-        .subscribe_session(&require_session_id(session_id)?)
-        .await?;
-    Ok("Subscribed".to_string())
-}
-
-#[command]
-pub async fn unsubscribe_session(
-    session_id: String,
-    state: State<'_, WssClientState>,
-) -> Result<String, String> {
-    state
-        .unsubscribe_session(&require_session_id(session_id)?)
-        .await?;
-    Ok("Unsubscribed".to_string())
-}
-
-#[command]
-pub async fn relay_terminal_output(
-    session_id: String,
-    data: String,
-    state: State<'_, WssClientState>,
-) -> Result<String, String> {
-    state
-        .send_terminal_output(&require_session_id(session_id)?, &data)
-        .await?;
-    Ok("Output relayed".to_string())
-}
-
-#[command]
-pub async fn request_terminal_replay(
-    session_id: String,
-    state: State<'_, WssClientState>,
-) -> Result<String, String> {
-    state
-        .send_terminal_replay_request(&require_session_id(session_id)?)
-        .await?;
-    Ok("Replay requested".to_string())
-}
-
-#[command]
-pub async fn relay_terminal_replay(
-    session_id: String,
-    target_device_id: String,
-    data: String,
-    state: State<'_, WssClientState>,
-) -> Result<String, String> {
-    let session_id = require_session_id(session_id)?;
-    if target_device_id.trim().is_empty() {
-        return Err("target_device_id is required".to_string());
-    }
-    state
-        .send_terminal_replay(&session_id, target_device_id.trim(), &data)
-        .await?;
-    Ok("Replay relayed".to_string())
 }
 
 #[command]
@@ -262,39 +201,9 @@ pub async fn update_session_meta(
         pty_manager.update_session_title(&session_id, value);
     }
 
-    if state.is_connected() {
-        state
-            .send_session_update(
-                &session_id,
-                title.as_deref(),
-                activity.as_deref(),
-                preview.as_deref(),
-                task_state.as_deref(),
-                layout,
-            )
-            .await?;
-    }
+    let _ = (state, activity, preview, task_state, layout);
 
     Ok("Session metadata updated".to_string())
-}
-
-#[command]
-pub async fn sync_active_sessions(
-    pty_manager: State<'_, PtyManager>,
-    wss_state: State<'_, WssClientState>,
-) -> Result<String, String> {
-    for session in pty_manager.describe_sessions() {
-        wss_state
-            .send_session_create(
-                &session.session_id,
-                &session.title,
-                session.cols,
-                session.rows,
-                None,
-            )
-            .await?;
-    }
-    Ok("Active sessions synced".to_string())
 }
 
 #[command]
@@ -356,36 +265,192 @@ pub async fn complete_pairing(
 }
 
 #[command]
-pub async fn request_session_list(state: State<'_, WssClientState>) -> Result<String, String> {
-    state.send_session_list_request().await?;
-    Ok("Session list requested".to_string())
-}
-
-#[command]
-pub async fn request_remote_session_create(
-    desktop_id: String,
-    title: Option<String>,
+pub async fn publish_layout_snapshot(
+    workspace_id: String,
+    snapshot: Value,
+    layout_version: Option<i64>,
     state: State<'_, WssClientState>,
 ) -> Result<String, String> {
-    let desktop_id = desktop_id.trim();
-    if desktop_id.is_empty() {
-        return Err("desktop_id is required".to_string());
+    let workspace_id = workspace_id.trim();
+    if workspace_id.is_empty() {
+        return Err("workspace_id is required".to_string());
     }
     state
-        .send_session_create_request(desktop_id, title.as_deref())
+        .send_layout_snapshot(workspace_id, snapshot, layout_version)
         .await?;
-    Ok("Remote session create requested".to_string())
+    Ok("Layout snapshot published".to_string())
 }
 
 #[command]
-pub async fn request_remote_session_close(
-    session_id: String,
+pub async fn publish_layout_patch(
+    workspace_id: String,
+    snapshot: Value,
+    layout_version: Option<i64>,
+    reason: Option<String>,
+    state: State<'_, WssClientState>,
+) -> Result<String, String> {
+    let workspace_id = workspace_id.trim();
+    if workspace_id.is_empty() {
+        return Err("workspace_id is required".to_string());
+    }
+    state
+        .send_layout_patch(workspace_id, snapshot, layout_version, reason.as_deref())
+        .await?;
+    Ok("Layout patch published".to_string())
+}
+
+#[command]
+pub async fn subscribe_workspace(
+    workspace_id: String,
+    state: State<'_, WssClientState>,
+) -> Result<String, String> {
+    let workspace_id = workspace_id.trim();
+    if workspace_id.is_empty() {
+        return Err("workspace_id is required".to_string());
+    }
+    state.subscribe_workspace(workspace_id).await?;
+    Ok("Workspace subscribed".to_string())
+}
+
+#[command]
+pub async fn subscribe_screen(
+    workspace_id: String,
+    pane_id: String,
+    state: State<'_, WssClientState>,
+) -> Result<String, String> {
+    let workspace_id = workspace_id.trim();
+    let pane_id = pane_id.trim();
+    if workspace_id.is_empty() || pane_id.is_empty() {
+        return Err("workspace_id and pane_id are required".to_string());
+    }
+    state.subscribe_screen(workspace_id, pane_id).await?;
+    Ok("Screen subscribed".to_string())
+}
+
+#[command]
+pub async fn unsubscribe_screen(
+    workspace_id: String,
+    pane_id: String,
+    state: State<'_, WssClientState>,
+) -> Result<String, String> {
+    let workspace_id = workspace_id.trim();
+    let pane_id = pane_id.trim();
+    if workspace_id.is_empty() || pane_id.is_empty() {
+        return Err("workspace_id and pane_id are required".to_string());
+    }
+    state.unsubscribe_screen(workspace_id, pane_id).await?;
+    Ok("Screen unsubscribed".to_string())
+}
+
+#[command]
+pub async fn publish_screen_delta(
+    payload: ScreenDeltaPayload,
     state: State<'_, WssClientState>,
 ) -> Result<String, String> {
     state
-        .send_session_close_request(&require_session_id(session_id)?)
+        .send_screen_delta(
+            payload.workspace_id.trim(),
+            payload.pane_id.trim(),
+            payload.session_id.trim(),
+            payload.seq,
+            payload.prev_seq,
+            &payload.data,
+        )
         .await?;
-    Ok("Remote session close requested".to_string())
+    Ok("Screen delta published".to_string())
+}
+
+#[command]
+pub async fn publish_screen_snapshot(
+    payload: ScreenSnapshotPayload,
+    state: State<'_, WssClientState>,
+) -> Result<String, String> {
+    state
+        .send_screen_snapshot(
+            payload.workspace_id.trim(),
+            payload.pane_id.trim(),
+            payload.session_id.trim(),
+            payload.snapshot_seq,
+            &payload.data,
+        )
+        .await?;
+    Ok("Screen snapshot published".to_string())
+}
+
+#[command]
+pub async fn request_screen_resync(
+    workspace_id: String,
+    pane_id: String,
+    last_seq: Option<i64>,
+    state: State<'_, WssClientState>,
+) -> Result<String, String> {
+    let workspace_id = workspace_id.trim();
+    let pane_id = pane_id.trim();
+    if workspace_id.is_empty() || pane_id.is_empty() {
+        return Err("workspace_id and pane_id are required".to_string());
+    }
+    state
+        .send_screen_resync_request(workspace_id, pane_id, last_seq.unwrap_or(0))
+        .await?;
+    Ok("Screen resync requested".to_string())
+}
+
+#[command]
+pub async fn ack_screen(
+    workspace_id: String,
+    pane_id: String,
+    ack_seq: i64,
+    state: State<'_, WssClientState>,
+) -> Result<String, String> {
+    let workspace_id = workspace_id.trim();
+    let pane_id = pane_id.trim();
+    if workspace_id.is_empty() || pane_id.is_empty() || ack_seq <= 0 {
+        return Err("workspace_id, pane_id and positive ack_seq are required".to_string());
+    }
+    state
+        .send_screen_ack(workspace_id, pane_id, ack_seq)
+        .await?;
+    Ok("Screen acknowledged".to_string())
+}
+
+#[command]
+pub async fn send_remote_input_v3(
+    workspace_id: String,
+    pane_id: String,
+    session_id: Option<String>,
+    data: String,
+    input_id: String,
+    state: State<'_, WssClientState>,
+) -> Result<String, String> {
+    if workspace_id.trim().is_empty() || pane_id.trim().is_empty() || input_id.trim().is_empty() {
+        return Err("workspace_id, pane_id and input_id are required".to_string());
+    }
+    state
+        .send_input_send(
+            workspace_id.trim(),
+            pane_id.trim(),
+            session_id.as_deref(),
+            &data,
+            input_id.trim(),
+        )
+        .await?;
+    Ok("Input sent".to_string())
+}
+
+#[command]
+pub async fn request_layout_action(
+    workspace_id: String,
+    action: String,
+    payload: Option<Value>,
+    state: State<'_, WssClientState>,
+) -> Result<String, String> {
+    if workspace_id.trim().is_empty() || action.trim().is_empty() {
+        return Err("workspace_id and action are required".to_string());
+    }
+    state
+        .send_layout_action_request(workspace_id.trim(), action.trim(), payload)
+        .await?;
+    Ok("Layout action requested".to_string())
 }
 
 #[derive(Debug, Clone, Serialize)]

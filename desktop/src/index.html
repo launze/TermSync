@@ -379,6 +379,26 @@
         .status-connected::before { background-color: #4ec9b0; }
         .status-disconnected::before { background-color: #f44747; }
         .status-connecting::before { background-color: #cca700; }
+        .peer-status {
+            min-width: 0;
+            max-width: 260px;
+            height: 24px;
+            padding: 0 8px;
+            border: 1px solid #3c3c3c;
+            border-radius: 6px;
+            background: #252526;
+            color: #bdbdbd;
+            font-size: 11px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            cursor: default;
+        }
+        .peer-status.has-online {
+            color: #b9efe3;
+            border-color: #315f58;
+            background: #12211f;
+        }
 
         /* Split Menu */
         .split-menu {
@@ -1117,6 +1137,7 @@
         <div class="titlebar-drag-region" id="titlebarDragRegion" data-tauri-drag-region aria-hidden="true" hidden></div>
         <div class="tab-bar-actions">
             <button class="tab-icon-btn connection-status status-local" id="connStatus" onclick="window.app.toggleConnection()" title="本地模式" aria-label="连接状态"></button>
+            <span class="peer-status" id="peerStatus" title="未连接对端">无对端</span>
             <button class="tab-icon-btn" onclick="window.app.pasteClipboardImagePath()" title="保存剪贴板图片并粘贴路径" aria-label="保存剪贴板图片并粘贴路径">▧</button>
             <button class="tab-icon-btn" onclick="window.app.toggleAiPanel()" title="AI 助手" aria-label="AI 助手">AI</button>
             <button class="tab-icon-btn" id="commandLibraryBtn" onclick="window.app.toggleCommandLibrary(event)" title="命令库" aria-label="命令库">⌘</button>
@@ -1398,6 +1419,7 @@
     <script src="./vendor/xterm/xterm.js"></script>
     <script src="./vendor/xterm/addon-fit.js"></script>
     <script src="./vendor/xterm/addon-web-links.js"></script>
+    <script src="./vendor/xterm/addon-serialize.js"></script>
     <script>
         window.addEventListener('error', (event) => {
             const message = '[TTY1] 页面错误: ' + event.message + ' @ ' + event.filename + ':' + event.lineno;
@@ -1419,6 +1441,7 @@
         const XtermTerminal = window.Terminal;
         const XtermFitAddon = window.FitAddon?.FitAddon;
         const XtermWebLinksAddon = window.WebLinksAddon?.WebLinksAddon;
+        const XtermSerializeAddon = window.SerializeAddon?.SerializeAddon;
         const IS_WINDOWS_DESKTOP = typeof invoke !== 'undefined' && /\bWindows\b/i.test(navigator.userAgent);
         const TERMINAL_FONT_FAMILY = '"Cascadia Mono", "Cascadia Code", "JetBrains Mono", "Maple Mono", "Sarasa Mono SC", "Microsoft YaHei Mono", "Consolas", "Courier New", monospace';
         const CONNECTION_STEP_LABELS = {
@@ -2464,10 +2487,16 @@
                 this.term = null;
                 this.fitAddon = null;
                 this.webLinksAddon = null;
+                this.serializeAddon = null;
                 this.resizeObserver = null;
                 this.resizeQueued = false;
                 this.lastCols = 0;
                 this.lastRows = 0;
+                this.lastSentResizeCols = 0;
+                this.lastSentResizeRows = 0;
+                this.inputSequence = 0;
+                this.lastInputFingerprint = null;
+                this.lastInputAt = 0;
                 this.pendingWrites = [
                     this.remote
                         ? '\x1b[38;2;78;201;176mTermSync 远程终端已连接\x1b[0m\r\n'
@@ -2478,8 +2507,10 @@
                 ];
             }
             setBackendReady(ready) {
-                this.backendReady = !!ready;
-                if (ready) this.queueResize();
+                const nextReady = !!ready;
+                const wasReady = this.backendReady;
+                this.backendReady = nextReady;
+                if (nextReady && !wasReady) this.queueResize();
             }
             setWorkingDirectory(cwd) {
                 this.cwd = cwd || null;
@@ -2545,6 +2576,18 @@
                     this.webLinksAddon = new XtermWebLinksAddon((event, url) => window.open(url, '_blank'));
                     this.term.loadAddon(this.webLinksAddon);
                 }
+                if (XtermSerializeAddon) {
+                    try {
+                        this.serializeAddon = new XtermSerializeAddon();
+                        this.term.loadAddon(this.serializeAddon);
+                    } catch (err) {
+                        this.serializeAddon = null;
+                        window.app?.debug('terminal:serialize-addon:failed', {
+                            paneId: this.paneId,
+                            error: String(err)
+                        });
+                    }
+                }
                 this.term.open(el);
 
                 this.term.onData((data) => {
@@ -2552,6 +2595,7 @@
                 });
 
                 this.term.attachCustomKeyEventHandler((event) => this.handleKeyEvent(event));
+                el.addEventListener('keydown', (event) => this.handleTerminalCanvasKeydown(event), true);
 
                 el.addEventListener('paste', (event) => {
                     const text = event.clipboardData?.getData('text');
@@ -2601,7 +2645,44 @@
                     return false;
                 }
 
+                const sequence = this.remote ? this.keyToTerminalSequence(event) : '';
+                if (sequence) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    this.sendRemoteKeySequence(sequence);
+                    return false;
+                }
+
                 return true;
+            }
+            handleTerminalCanvasKeydown(event) {
+                if (event.defaultPrevented || event.type !== 'keydown' || !this.term) return;
+                if (event.ctrlKey || event.metaKey || event.altKey) return;
+                if (event.target?.tagName === 'TEXTAREA') return;
+                const sequence = this.keyToTerminalSequence(event);
+                if (!sequence) return;
+                event.preventDefault();
+                event.stopPropagation();
+                if (this.remote) this.sendRemoteKeySequence(sequence);
+                else this.sendInput(sequence);
+            }
+            sendRemoteKeySequence(sequence) {
+                window.app?.setActivePane?.(this.paneId);
+                this.focusSoon();
+                this.sendInput(sequence).finally(() => this.focusSoon());
+            }
+            keyToTerminalSequence(event) {
+                if (!event || event.ctrlKey || event.metaKey || event.altKey) return '';
+                const sequences = {
+                    ArrowUp: '\x1b[A',
+                    ArrowDown: '\x1b[B',
+                    ArrowRight: '\x1b[C',
+                    ArrowLeft: '\x1b[D',
+                    Home: '\x1b[H',
+                    End: '\x1b[F',
+                    Tab: event.shiftKey ? '\x1b[Z' : '\t'
+                };
+                return sequences[event.key] || '';
             }
             writeRaw(text) {
                 if (this.term) this.term.write(text);
@@ -2620,6 +2701,7 @@
             focusSoon() {
                 this.focus();
                 setTimeout(() => this.focus(), 0);
+                requestAnimationFrame(() => this.focus());
             }
             async copySelection() {
                 if (!this.term || !this.term.hasSelection()) return;
@@ -2700,18 +2782,70 @@
                 }
                 return text;
             }
+            serializeScreenSnapshot(maxLines = 5000, maxChars = 256000) {
+                if (this.serializeAddon) {
+                    try {
+                        const scrollback = Math.max(0, Math.max(1, maxLines) - (this.term?.rows || 0));
+                        let vt = this.serializeAddon.serialize({
+                            scrollback,
+                            excludeModes: false,
+                            excludeAltBuffer: false
+                        }) || '';
+                        if (maxChars && vt.length > maxChars) {
+                            vt = vt.slice(vt.length - maxChars);
+                        }
+                        return '\x1b[2J\x1b[H' + vt;
+                    } catch (err) {
+                        window.app?.debug('terminal:serialize-snapshot:failed', {
+                            paneId: this.paneId,
+                            error: String(err)
+                        });
+                    }
+                }
+                const chunks = [];
+                if (this.term?.buffer?.active) {
+                    const buffer = this.term.buffer.active;
+                    const start = Math.max(0, buffer.length - Math.max(1, maxLines));
+                    for (let i = start; i < buffer.length; i++) {
+                        const line = buffer.getLine(i);
+                        if (!line) continue;
+                        chunks.push(line.translateToString(true));
+                    }
+                    let text = chunks.join('\r\n');
+                    if (maxChars && text.length > maxChars) text = text.slice(text.length - maxChars);
+                    return text ? '\x1b[2J\x1b[H' + text : '\x1b[2J\x1b[H';
+                }
+                if (this.pendingWrites.length) {
+                    let text = this.pendingWrites.join('');
+                    if (maxChars && text.length > maxChars) text = text.slice(text.length - maxChars);
+                    return text;
+                }
+                return '\x1b[2J\x1b[H';
+            }
             async sendText(text) {
                 if (!text || typeof invoke === 'undefined') return false;
+                if (this.shouldDropDuplicateInput(text)) return true;
                 if (!this.backendReady) {
                     if (this.remote) return false;
                     const restored = await window.app?.ensureTerminalBackendReady(this.paneId);
                     if (!restored) return false;
                 }
                 try {
-                    await invoke('send_input', {
-                        sessionId: this.sessionId,
-                        input: text
-                    });
+                    if (this.remote) {
+                        await invoke('send_remote_input_v3', {
+                            workspaceId: window.app?.v3WorkspaceId || window.app?.ownerWorkspaceId?.() || '',
+                            paneId: window.app?.remotePaneIdForLocal?.(this.paneId) || String(this.paneId),
+                            sessionId: this.sessionId,
+                            data: text,
+                            inputId: this.nextInputId(text)
+                        });
+                    } else {
+                        await invoke('send_input', {
+                            sessionId: this.sessionId,
+                            input: text,
+                            inputId: this.nextInputId(text)
+                        });
+                    }
                     this.focus();
                     return true;
                 } catch (err) {
@@ -2721,7 +2855,8 @@
                         try {
                             await invoke('send_input', {
                                 sessionId: this.sessionId,
-                                input: text
+                                input: text,
+                                inputId: this.nextInputId(text)
                             });
                             this.focus();
                             return true;
@@ -2736,21 +2871,60 @@
             }
             async sendInput(data) {
                 if (!data || typeof invoke === 'undefined') return false;
+                if (this.shouldDropDuplicateInput(data)) return true;
                 if (!this.backendReady) {
                     if (this.remote) return false;
                     const restored = await window.app?.ensureTerminalBackendReady(this.paneId);
                     if (!restored) return false;
                 }
                 try {
-                    await invoke('send_input', {
-                        sessionId: this.sessionId,
-                        input: data
-                    });
+                    if (this.remote) {
+                        await invoke('send_remote_input_v3', {
+                            workspaceId: window.app?.v3WorkspaceId || window.app?.ownerWorkspaceId?.() || '',
+                            paneId: window.app?.remotePaneIdForLocal?.(this.paneId) || String(this.paneId),
+                            sessionId: this.sessionId,
+                            data,
+                            inputId: this.nextInputId(data)
+                        });
+                    } else {
+                        await invoke('send_input', {
+                            sessionId: this.sessionId,
+                            input: data,
+                            inputId: this.nextInputId(data)
+                        });
+                    }
+                    this.focusSoon();
                     return true;
                 } catch (err) {
                     this.appendOutput('发送到本地终端失败: ' + err, true);
                     return false;
                 }
+            }
+            shouldDropDuplicateInput(data) {
+                if (!data || data.length <= 1 || !data.endsWith('\r')) return false;
+                const now = Date.now();
+                const fingerprint = this.sessionId + '\n' + data;
+                if (this.lastInputFingerprint === fingerprint && now - this.lastInputAt < 8000) {
+                    window.app?.debug('terminal:input:duplicate-local-drop', {
+                        paneId: this.paneId,
+                        sessionId: this.sessionId,
+                        bytes: data.length
+                    });
+                    return true;
+                }
+                this.lastInputFingerprint = fingerprint;
+                this.lastInputAt = now;
+                return false;
+            }
+            nextInputId(data) {
+                this.inputSequence += 1;
+                return [
+                    this.paneId,
+                    this.sessionId,
+                    Date.now(),
+                    this.inputSequence,
+                    data.length
+                ].join(':');
             }
             selectAll() {
                 this.term?.selectAll();
@@ -2775,7 +2949,11 @@
                         document.getElementById('statusSize').textContent = dims.cols + 'x' + dims.rows;
                     }
 
+                    if (this.remote) return;
                     if (!this.backendReady || typeof invoke === 'undefined') return;
+                    if (this.lastSentResizeCols === dims.cols && this.lastSentResizeRows === dims.rows) return;
+                    this.lastSentResizeCols = dims.cols;
+                    this.lastSentResizeRows = dims.rows;
                     try {
                         await invoke('resize_terminal_cmd', {
                             sessionId: this.sessionId,
@@ -2814,6 +2992,7 @@
                 this.activePaneId = null;
                 this.nextTabId = 0;
                 this.serverConnected = false;
+                this.serverDeviceId = '';
                 this.reconnectTimer = null;
                 this.reconnectAttempts = 0;
                 this.contextMenuTarget = null;
@@ -2831,10 +3010,34 @@
                 this.remoteReplayTimers = new Map();
                 this.sessionPaneMap = new Map();
                 this.remoteSessions = new Map();
+                this.remoteTabMap = new Map();
+                this.remotePaneMap = new Map();
+                this.localPaneRemoteMap = new Map();
+                this.remoteSubscribedSessions = new Set();
+                this.remoteReplayRequestedSessions = new Set();
+                this.v3WorkspaceId = '';
+                this.v3LayoutVersion = 0;
+                this.v3ScreenSeq = new Map();
+                this.v3OwnerScreenSeq = new Map();
+                this.v3OwnerDeltaBuffers = new Map();
+                this.v3OwnerDeltaTimers = new Map();
+                this.v3ViewerScreenSeq = new Map();
+                this.v3SnapshotTimers = new Map();
+                this.v3SnapshotPublishedSeq = new Map();
+                this.v3SnapshotLastAt = new Map();
+                this.v3ResyncTimers = new Map();
+                this.v3AckLastSeq = new Map();
+                this.v3AckTimers = new Map();
+                this.v3SubscribedWorkspaces = new Set();
+                this.v3SubscribedPanes = new Set();
+                this.v3OwnerInputIds = new Map();
+                this.connectedPeers = [];
                 this.commandCatalog = this.loadCommandCatalog();
                 this.commandLibrary = buildCommandLibraryUiState(this.commandCatalog);
                 this.savedTabs = this.loadSavedTabs();
                 this.commandInput = '';
+                this.lastSubmittedCommandKey = '';
+                this.lastSubmittedCommandAt = 0;
                 this.commandLibraryOpen = false;
                 this.selectedCommandSectionKey = COMMAND_PANEL_DEFAULT_SECTION_KEY;
                 this.titleEditState = null;
@@ -2925,6 +3128,362 @@
 
             deviceTypeForCurrentMode() {
                 return this.isReceiverMode() ? 'pc_receiver' : 'desktop';
+            }
+
+            ownerWorkspaceId() {
+                const pairedDesktopId = (this.settings.get('pairedDesktopId') || '').trim();
+                if (this.isReceiverMode() && pairedDesktopId) return pairedDesktopId + ':default';
+                const deviceId = (this.serverDeviceId || this.settings.get('deviceId') || '').trim();
+                return deviceId ? deviceId + ':default' : 'default';
+            }
+
+            buildV3LayoutSnapshot() {
+                const tabs = Array.from(this.tabs.values()).map((tab, tabIndex) => ({
+                    tab_id: String(tab.id),
+                    title: normalizeEditableTitle(tab.title, defaultTabTitle(tab.id)),
+                    order: tabIndex,
+                    active_pane_id: String(tab.panes.has(this.activePaneId) ? this.activePaneId : Array.from(tab.panes)[0]),
+                    root: this.splitTree.cloneNode(tab.root),
+                    panes: Array.from(tab.panes).map((paneId, paneIndex) => {
+                        const terminal = this.terminals.get(paneId);
+                        const state = this.sessionActivity.get(this.sessionIdForPane(paneId)) || {};
+                        return {
+                            pane_id: String(paneId),
+                            session_id: this.sessionIdForPane(paneId),
+                            title: this.getPaneTitle(paneId, tab),
+                            order: paneIndex,
+                            status: terminal?.backendReady === false ? 'offline' : 'active',
+                            cols: terminal?.lastCols || 80,
+                            rows: terminal?.lastRows || 24,
+                            cwd: terminal?.cwd || '',
+                            task_state: state.taskState || 'idle',
+                            activity: state.activity || '',
+                            preview: state.preview || ''
+                        };
+                    })
+                }));
+                return {
+                    workspace_id: this.ownerWorkspaceId(),
+                    owner_device_id: this.serverDeviceId || '',
+                    layout_version: this.v3LayoutVersion,
+                    active_tab_id: this.activeTabId === null ? '' : String(this.activeTabId),
+                    tabs,
+                    updated_at: Date.now()
+                };
+            }
+
+            async publishV3LayoutSnapshot(reason = '') {
+                if (this.isReceiverMode() || !this.serverConnected || typeof invoke === 'undefined') return;
+                this.v3LayoutVersion += 1;
+                const workspaceId = this.ownerWorkspaceId();
+                const snapshot = this.buildV3LayoutSnapshot();
+                try {
+                    await invoke('publish_layout_snapshot', {
+                        workspaceId,
+                        snapshot,
+                        layoutVersion: this.v3LayoutVersion
+                    });
+                    this.debug('v3:layout:snapshot:sent', { reason, workspaceId, version: this.v3LayoutVersion });
+                } catch (err) {
+                    this.debug('v3:layout:snapshot:failed', { reason, error: String(err) });
+                }
+            }
+
+            async publishV3LayoutPatch(reason = '') {
+                if (this.isReceiverMode() || !this.serverConnected || typeof invoke === 'undefined') return;
+                this.v3LayoutVersion += 1;
+                const workspaceId = this.ownerWorkspaceId();
+                const snapshot = this.buildV3LayoutSnapshot();
+                try {
+                    await invoke('publish_layout_patch', {
+                        workspaceId,
+                        snapshot,
+                        layoutVersion: this.v3LayoutVersion,
+                        reason: reason || 'layout_change'
+                    });
+                    this.debug('v3:layout:patch:sent', { reason, workspaceId, version: this.v3LayoutVersion });
+                } catch (err) {
+                    this.debug('v3:layout:patch:failed', { reason, error: String(err) });
+                }
+            }
+
+            async subscribeV3Workspace(workspaceId = this.ownerWorkspaceId()) {
+                if (!this.isReceiverMode() || !workspaceId || typeof invoke === 'undefined') return;
+                if (this.v3SubscribedWorkspaces.has(workspaceId)) return;
+                this.v3SubscribedWorkspaces.add(workspaceId);
+                try {
+                    await invoke('subscribe_workspace', { workspaceId });
+                    this.v3WorkspaceId = workspaceId;
+                    this.debug('v3:workspace:subscribe', { workspaceId });
+                } catch (err) {
+                    this.v3SubscribedWorkspaces.delete(workspaceId);
+                    this.showToast('订阅远程工作区失败: ' + err, 'error');
+                }
+            }
+
+            v3ScreenKey(workspaceId, paneId) {
+                return JSON.stringify([String(workspaceId || ''), String(paneId || '')]);
+            }
+
+            v3PaneIdFromScreenKey(key) {
+                try {
+                    const parts = JSON.parse(key);
+                    return String(parts?.[1] || '');
+                } catch (_) {
+                    const legacy = String(key || '').split(':');
+                    return legacy[legacy.length - 1] || '';
+                }
+            }
+
+            remotePaneKey(workspaceId, paneId) {
+                return JSON.stringify([String(workspaceId || this.v3WorkspaceId || ''), String(paneId || '')]);
+            }
+
+            localPaneIdForRemote(workspaceId, paneId) {
+                const key = this.remotePaneKey(workspaceId, paneId);
+                return this.remotePaneMap.get(key) ?? null;
+            }
+
+            remotePaneIdForLocal(localPaneId) {
+                return this.localPaneRemoteMap.get(Number(localPaneId)) || String(localPaneId || '');
+            }
+
+            ensureLocalPaneIdForRemote(workspaceId, remotePaneId) {
+                const key = this.remotePaneKey(workspaceId, remotePaneId);
+                const existing = this.remotePaneMap.get(key);
+                if (Number.isFinite(existing) && existing > 0) return existing;
+
+                const numericRemotePaneId = Number(remotePaneId);
+                let localPaneId = Number.isFinite(numericRemotePaneId) && numericRemotePaneId > 0 && !this.terminals.has(numericRemotePaneId) && !this.splitTree.panes.has(numericRemotePaneId)
+                    ? numericRemotePaneId
+                    : null;
+                if (localPaneId === null) {
+                    localPaneId = this.splitTree.createLeaf().paneId;
+                }
+                this.remotePaneMap.set(key, localPaneId);
+                this.localPaneRemoteMap.set(localPaneId, String(remotePaneId));
+                return localPaneId;
+            }
+
+            forgetRemotePaneMapping(workspaceId, remotePaneId, localPaneId) {
+                if (remotePaneId) this.remotePaneMap.delete(this.remotePaneKey(workspaceId, remotePaneId));
+                if (localPaneId !== null && localPaneId !== undefined) this.localPaneRemoteMap.delete(Number(localPaneId));
+            }
+
+            async subscribeV3Screen(workspaceId, paneId) {
+                if (!this.isReceiverMode() || !workspaceId || !paneId || typeof invoke === 'undefined') return;
+                const key = this.v3ScreenKey(workspaceId, paneId);
+                if (this.v3SubscribedPanes.has(key)) return;
+                this.v3SubscribedPanes.add(key);
+                try {
+                    await invoke('subscribe_screen', { workspaceId, paneId: String(paneId) });
+                } catch (err) {
+                    this.v3SubscribedPanes.delete(key);
+                    this.debug('v3:screen:subscribe:failed', { workspaceId, paneId, error: String(err) });
+                }
+            }
+
+            unsubscribeV3Screen(workspaceId, paneId) {
+                if (!this.isReceiverMode() || !workspaceId || !paneId || typeof invoke === 'undefined') return;
+                invoke('unsubscribe_screen', { workspaceId, paneId: String(paneId) }).catch((err) => {
+                    this.debug('v3:screen:unsubscribe:failed', { workspaceId, paneId, error: String(err) });
+                });
+            }
+
+            desiredVisibleV3ScreenKeys(workspaceId = this.v3WorkspaceId || this.ownerWorkspaceId()) {
+                const keys = new Set();
+                if (!this.isReceiverMode() || !workspaceId) return keys;
+                const tab = this.tabs.get(this.activeTabId);
+                if (!tab?.remoteKey) return keys;
+                for (const localPaneId of tab.panes || []) {
+                    const remotePaneId = this.remotePaneIdForLocal(localPaneId);
+                    if (remotePaneId) keys.add(this.v3ScreenKey(workspaceId, remotePaneId));
+                }
+                return keys;
+            }
+
+            syncVisibleV3ScreenSubscriptions(workspaceId = this.v3WorkspaceId || this.ownerWorkspaceId()) {
+                if (!this.isReceiverMode() || !workspaceId) return;
+                const desired = this.desiredVisibleV3ScreenKeys(workspaceId);
+                for (const key of Array.from(this.v3SubscribedPanes)) {
+                    if (desired.has(key)) continue;
+                    const paneId = this.v3PaneIdFromScreenKey(key);
+                    this.cleanupV3ScreenState(workspaceId, paneId);
+                }
+                for (const key of desired) {
+                    const paneId = this.v3PaneIdFromScreenKey(key);
+                    this.subscribeV3Screen(workspaceId, paneId);
+                }
+            }
+
+            cleanupV3ScreenState(workspaceId, paneId) {
+                const key = this.v3ScreenKey(workspaceId || this.v3WorkspaceId || '', paneId);
+                const paneKey = String(paneId);
+                if (this.v3SubscribedPanes.has(key)) {
+                    this.unsubscribeV3Screen(workspaceId || this.v3WorkspaceId || '', paneKey);
+                }
+                this.v3SubscribedPanes.delete(key);
+                this.v3ViewerScreenSeq.delete(key);
+                this.v3AckLastSeq.delete(key);
+                const ackTimer = this.v3AckTimers.get(key);
+                if (ackTimer) clearTimeout(ackTimer);
+                this.v3AckTimers.delete(key);
+                this.v3OwnerDeltaBuffers.delete(paneKey);
+                const deltaTimer = this.v3OwnerDeltaTimers.get(paneKey);
+                if (deltaTimer) clearTimeout(deltaTimer);
+                this.v3OwnerDeltaTimers.delete(paneKey);
+                this.v3OwnerScreenSeq.delete(paneKey);
+                this.v3SnapshotPublishedSeq.delete(paneKey);
+                this.v3SnapshotLastAt.delete(paneKey);
+                const snapshotTimer = this.v3SnapshotTimers.get(paneKey);
+                if (snapshotTimer) clearTimeout(snapshotTimer);
+                this.v3SnapshotTimers.delete(paneKey);
+            }
+
+            scheduleV3ScreenDelta(paneId, sessionId, data) {
+                if (this.isReceiverMode() || !this.serverConnected || typeof invoke === 'undefined') return;
+                if (!sessionId || !data) return;
+                const paneKey = String(paneId);
+                const existing = this.v3OwnerDeltaBuffers.get(paneKey);
+                if (existing) {
+                    existing.data += data;
+                    existing.sessionId = sessionId;
+                } else {
+                    this.v3OwnerDeltaBuffers.set(paneKey, { sessionId, data });
+                }
+                if (this.v3OwnerDeltaTimers.has(paneKey)) return;
+                const timer = setTimeout(() => {
+                    this.v3OwnerDeltaTimers.delete(paneKey);
+                    this.publishV3ScreenDelta(paneKey);
+                }, 32);
+                this.v3OwnerDeltaTimers.set(paneKey, timer);
+            }
+
+            async publishV3ScreenDelta(paneId) {
+                const paneKey = String(paneId);
+                const pending = this.v3OwnerDeltaBuffers.get(paneKey);
+                this.v3OwnerDeltaBuffers.delete(paneKey);
+                if (!pending?.sessionId || !pending.data || this.isReceiverMode() || !this.serverConnected || typeof invoke === 'undefined') return;
+                try {
+                    const prevSeq = this.v3OwnerScreenSeq.get(paneKey) || 0;
+                    const seq = prevSeq + 1;
+                    this.v3OwnerScreenSeq.set(paneKey, seq);
+                    await invoke('publish_screen_delta', {
+                        payload: {
+                            workspace_id: this.ownerWorkspaceId(),
+                            pane_id: paneKey,
+                            session_id: pending.sessionId,
+                            seq,
+                            prev_seq: prevSeq,
+                            data: pending.data
+                        }
+                    });
+                    this.scheduleV3ScreenSnapshot(paneKey, 'output');
+                } catch (err) {
+                    this.debug('terminal:relay-output:failed', {
+                        paneId: paneKey,
+                        sessionId: pending.sessionId,
+                        bytes: pending.data.length,
+                        error: String(err)
+                    });
+                }
+            }
+
+            async publishV3ScreenSnapshot(paneId, reason = '') {
+                if (this.isReceiverMode() || !this.serverConnected || typeof invoke === 'undefined') return;
+                const paneIdText = String(paneId);
+                const terminal = this.terminals.get(Number(paneId));
+                if (!terminal || !terminal.sessionId) return;
+                const seq = this.v3OwnerScreenSeq.get(paneIdText) || 0;
+                const lastSeq = this.v3SnapshotPublishedSeq.get(paneIdText) || -1;
+                const lastAt = this.v3SnapshotLastAt.get(paneIdText) || 0;
+                if (reason !== 'resync-request' && seq === lastSeq && Date.now() - lastAt < 5000) return;
+                try {
+                    await invoke('publish_screen_snapshot', {
+                        payload: {
+                            workspace_id: this.ownerWorkspaceId(),
+                            pane_id: paneIdText,
+                            session_id: terminal.sessionId,
+                            snapshot_seq: seq,
+                            data: terminal.serializeScreenSnapshot()
+                        }
+                    });
+                    this.v3SnapshotPublishedSeq.set(paneIdText, seq);
+                    this.v3SnapshotLastAt.set(paneIdText, Date.now());
+                    this.debug('v3:screen:snapshot:sent', { paneId: paneIdText, seq, reason });
+                } catch (err) {
+                    this.debug('v3:screen:snapshot:failed', { paneId: paneIdText, reason, error: String(err) });
+                }
+            }
+
+            scheduleV3ScreenSnapshot(paneId, reason = '') {
+                if (this.isReceiverMode() || !this.serverConnected || typeof invoke === 'undefined') return;
+                const paneIdText = String(paneId);
+                const seq = this.v3OwnerScreenSeq.get(paneIdText) || 0;
+                const lastSeq = this.v3SnapshotPublishedSeq.get(paneIdText) || -1;
+                const lastAt = this.v3SnapshotLastAt.get(paneIdText) || 0;
+                if (reason !== 'resync-request' && seq === lastSeq) return;
+                if (reason !== 'resync-request' && Date.now() - lastAt < 5000) return;
+                if (this.v3SnapshotTimers.has(paneIdText)) return;
+                const timer = setTimeout(() => {
+                    this.v3SnapshotTimers.delete(paneIdText);
+                    this.publishV3ScreenSnapshot(paneIdText, reason);
+                }, reason === 'resync-request' ? 0 : 500);
+                this.v3SnapshotTimers.set(paneIdText, timer);
+            }
+
+            async requestV3ScreenResync(workspaceId, paneId, lastSeq, reason = '') {
+                if (!this.isReceiverMode() || !workspaceId || !paneId || typeof invoke === 'undefined') return;
+                const key = this.v3ScreenKey(workspaceId, paneId);
+                const now = Date.now();
+                const lastAt = this.v3ResyncTimers.get(key) || 0;
+                if (now - lastAt < 1000) return;
+                this.v3ResyncTimers.set(key, now);
+                try {
+                    await invoke('request_screen_resync', {
+                        workspaceId,
+                        paneId: String(paneId),
+                        lastSeq: Number(lastSeq) || 0
+                    });
+                    this.debug('v3:screen:resync:request', { workspaceId, paneId, lastSeq, reason });
+                } catch (err) {
+                    this.debug('v3:screen:resync:failed', { workspaceId, paneId, reason, error: String(err) });
+                }
+            }
+
+            ackV3Screen(workspaceId, paneId, ackSeq) {
+                if (!this.isReceiverMode() || !workspaceId || !paneId || !ackSeq || typeof invoke === 'undefined') return;
+                const key = this.v3ScreenKey(workspaceId, paneId);
+                const lastAck = this.v3AckLastSeq.get(key) || 0;
+                if (ackSeq <= lastAck) return;
+                this.v3AckLastSeq.set(key, ackSeq);
+                if (this.v3AckTimers.has(key)) return;
+                const timer = setTimeout(async () => {
+                    this.v3AckTimers.delete(key);
+                    const seq = this.v3AckLastSeq.get(key) || 0;
+                    if (!seq) return;
+                    try {
+                        await invoke('ack_screen', {
+                            workspaceId,
+                            paneId: String(paneId),
+                            ackSeq: seq
+                        });
+                    } catch (err) {
+                        this.debug('v3:screen:ack:failed', { workspaceId, paneId, ackSeq: seq, error: String(err) });
+                    }
+                }, 150);
+                this.v3AckTimers.set(key, timer);
+            }
+
+            decodeBase64Utf8(value) {
+                if (!value) return '';
+                try {
+                    const binary = atob(String(value));
+                    const bytes = Uint8Array.from(binary, (ch) => ch.charCodeAt(0));
+                    return new TextDecoder().decode(bytes);
+                } catch (_) {
+                    try { return atob(String(value)); } catch (err) { return ''; }
+                }
             }
 
             hideConnectionGuide() {
@@ -3325,6 +3884,17 @@
                     this.showToast('当前终端尚未就绪，请稍后再试', 'warning');
                     return;
                 }
+                const commandKey = terminal.sessionId + '\n' + normalized;
+                const now = Date.now();
+                if (this.lastSubmittedCommandKey === commandKey && now - this.lastSubmittedCommandAt < 8000) {
+                    this.debug('command:submit:duplicate-drop', {
+                        sessionId: terminal.sessionId,
+                        command: normalized
+                    });
+                    return;
+                }
+                this.lastSubmittedCommandKey = commandKey;
+                this.lastSubmittedCommandAt = now;
                 const ok = await terminal.sendText(normalized + '\r');
                 if (!ok) {
                     this.showToast('发送命令失败', 'error');
@@ -4778,10 +5348,21 @@
                 });
             }
 
-            updateTabTitle(tabId, title) {
+            updateTabTitle(tabId, title, options = {}) {
                 const tab = this.tabs.get(tabId);
                 if (!tab) return;
                 const normalized = normalizeEditableTitle(title, defaultTabTitle(tabId));
+                if (this.isReceiverMode() && options.remoteSync !== false) {
+                    const firstPaneId = Array.from(tab.panes)[0];
+                    const terminal = this.terminals.get(firstPaneId);
+                    this.sendRemoteWorkspaceAction('rename_tab', {
+                        tab_id: String(tab.remoteTabId || tabId),
+                        pane_id: this.remotePaneIdForLocal(firstPaneId),
+                        source_session_id: terminal?.sessionId || '',
+                        title: normalized
+                    }, normalized);
+                    return;
+                }
                 if (tab.title === normalized) {
                     tab.titleMode = 'manual';
                     this.renderTabs();
@@ -4795,10 +5376,20 @@
                 this.syncSessionTitlesForTab(tab);
             }
 
-            updatePaneTitle(paneId, title) {
+            updatePaneTitle(paneId, title, options = {}) {
                 const tab = this.findTabByPaneId(paneId);
                 if (!tab) return;
-                this.setPaneTitleValue(tab, paneId, title);
+                const normalized = normalizeEditableTitle(title, defaultPaneTitle(paneId));
+                if (this.isReceiverMode() && options.remoteSync !== false) {
+                    const terminal = this.terminals.get(paneId);
+                    this.sendRemoteWorkspaceAction('rename_pane', {
+                        pane_id: this.remotePaneIdForLocal(paneId),
+                        source_session_id: terminal?.sessionId || '',
+                        title: normalized
+                    }, normalized);
+                    return;
+                }
+                this.setPaneTitleValue(tab, paneId, normalized);
                 this.updatePaneTitleElement(paneId, tab);
                 if (this.aiPanelOpen) this.updateAiContextPreview();
                 this.scheduleWorkspaceSave();
@@ -4874,6 +5465,17 @@
                 if (!String(sessionId).startsWith('local-')) return null;
                 const paneId = parseInt(String(sessionId).slice(6), 10);
                 return Number.isFinite(paneId) ? paneId : null;
+            }
+
+            paneIdFromV3MessagePaneId(paneId, sessionId = '') {
+                const paneText = String(paneId || '').trim();
+                if (paneText) {
+                    const mapped = this.localPaneIdForRemote(this.v3WorkspaceId || this.ownerWorkspaceId(), paneText);
+                    if (mapped !== null && mapped !== undefined) return mapped;
+                    const numeric = Number(paneText);
+                    if (Number.isFinite(numeric) && this.terminals.has(numeric)) return numeric;
+                }
+                return sessionId ? this.paneIdFromSession(sessionId) : null;
             }
 
             sessionTitleForRecovery(paneId) {
@@ -5153,11 +5755,28 @@
                     tab_id: String(tab.id),
                     tab_title: normalizeEditableTitle(tab.title, defaultTabTitle(tab.id)),
                     tab_order: Array.from(this.tabs.keys()).indexOf(tab.id),
+                    root: this.splitTree.cloneNode(tab.root),
                     pane_id: String(paneId),
                     pane_title: this.getSessionTitleForPane(paneId, tab),
                     pane_order: order,
                     pane_count: paneIds.length
                 };
+            }
+
+            getActiveSessionSyncPayload() {
+                const sessions = [];
+                for (const [paneId, terminal] of this.terminals.entries()) {
+                    if (!terminal || terminal.remote) continue;
+                    const tab = this.findTabByPaneId(paneId);
+                    sessions.push({
+                        session_id: this.sessionIdForPane(paneId),
+                        title: this.getSessionTitleForPane(paneId, tab) || defaultPaneTitle(paneId),
+                        cols: terminal.lastCols || 80,
+                        rows: terminal.lastRows || 24,
+                        layout: this.buildSessionLayoutMeta(paneId, tab)
+                    });
+                }
+                return sessions;
             }
 
             scheduleSessionMetaSend(sessionId, immediate) {
@@ -5194,14 +5813,7 @@
                 const nextKey = JSON.stringify(payload);
                 if (!force && nextKey === state.lastSentKey) return;
                 try {
-                    await invoke('update_session_meta', {
-                        sessionId: sessionId,
-                        title: payload.title,
-                        activity: payload.activity,
-                        preview: payload.preview,
-                        taskState: payload.taskState,
-                        layout: payload.layout
-                    });
+                    await this.publishV3LayoutPatch('meta:' + sessionId);
                     state.lastSentKey = nextKey;
                     this.debug('session:meta:sent', {
                         sessionId: sessionId,
@@ -5224,45 +5836,685 @@
                 }
             }
 
-            async requestRemoteSessionList() {
+            async syncActiveSessionsWithLayout() {
+                if (this.isReceiverMode() || !this.serverConnected || typeof invoke === 'undefined') return;
+                try {
+                    await this.publishV3LayoutPatch('sync-active-layout');
+                    await this.syncAllSessionActivity();
+                } catch (err) {
+                    console.warn('Sync active sessions with layout failed:', err);
+                }
+            }
+
+            async refreshRemoteWorkspaces() {
                 if (!this.isReceiverMode() || typeof invoke === 'undefined' || !this.serverConnected) return;
                 try {
-                    await invoke('request_session_list');
+                    await this.subscribeV3Workspace();
                 } catch (err) {
-                    console.warn('Request remote session list failed:', err);
+                    console.warn('Refresh remote workspace failed:', err);
                     this.showToast('刷新远程终端列表失败: ' + err, 'error');
                 }
             }
 
             async subscribeRemoteSession(sessionId) {
-                if (!sessionId || typeof invoke === 'undefined') return;
-                try {
-                    await invoke('subscribe_session', { sessionId });
-                    await invoke('request_terminal_replay', { sessionId });
-                } catch (err) {
-                    console.warn('Subscribe remote session failed:', err);
-                    this.debug('remote:subscribe:failed', { sessionId, error: String(err) });
+                if (!sessionId) return;
+                const paneId = this.paneIdFromSession(sessionId);
+                if (paneId !== null) await this.subscribeV3Screen(this.v3WorkspaceId || this.ownerWorkspaceId(), String(paneId));
+            }
+
+            applyV3LayoutSnapshot(workspaceId, payload) {
+                const snapshot = payload?.snapshot || payload || {};
+                const tabs = Array.isArray(snapshot.tabs) ? snapshot.tabs : [];
+                const ownerId = snapshot.owner_device_id || this.settings.get('pairedDesktopId') || 'desktop';
+                this.v3WorkspaceId = workspaceId || snapshot.workspace_id || this.v3WorkspaceId;
+                this.debug('v3:layout:snapshot:apply', {
+                    workspaceId: this.v3WorkspaceId,
+                    tabs: tabs.length
+                });
+                if (!tabs.length) {
+                    for (const tab of Array.from(this.tabs.values())) {
+                        if (tab.remoteKey) this.closeTab(tab.id, { remoteSync: false, allowEmpty: true });
+                    }
+                    this.remoteSessions.clear();
+                    this.remoteTabMap.clear();
+                    for (const key of Array.from(this.v3SubscribedPanes)) {
+                        const paneId = this.v3PaneIdFromScreenKey(key);
+                        this.cleanupV3ScreenState(this.v3WorkspaceId, paneId);
+                    }
+                    this.renderTabs();
+                    this.updateStatusBar();
+                    return;
+                }
+
+                if (this.titleEditState) this.finishTitleEdit(false);
+                const seenSessionIds = new Set();
+                const seenPaneIds = new Set();
+                const seenTabKeys = new Set();
+                const touchedTabs = [];
+                const sortedTabs = tabs.slice().sort((a, b) => {
+                    const ao = Number.isFinite(Number(a?.order)) ? Number(a.order) : Number.MAX_SAFE_INTEGER;
+                    const bo = Number.isFinite(Number(b?.order)) ? Number(b.order) : Number.MAX_SAFE_INTEGER;
+                    return ao - bo || String(a?.tab_id || a?.id || '').localeCompare(String(b?.tab_id || b?.id || ''));
+                });
+
+                for (const tabInfo of sortedTabs) {
+                    const tabKey = this.remoteTabKeyForV3Tab(ownerId, tabInfo);
+                    seenTabKeys.add(tabKey);
+                    const tab = this.applyV3RemoteTabSnapshot(ownerId, this.v3WorkspaceId, tabInfo);
+                    if (tab) touchedTabs.push(tab);
+                    for (const paneInfo of Array.isArray(tabInfo.panes) ? tabInfo.panes : []) {
+                        const paneIdText = String(paneInfo?.pane_id || '').trim();
+                        const sessionId = String(paneInfo?.session_id || (paneIdText ? 'remote-' + paneIdText : '')).trim();
+                        if (sessionId) seenSessionIds.add(sessionId);
+                        if (paneIdText) seenPaneIds.add(paneIdText);
+                    }
+                }
+
+                for (const [sessionId] of Array.from(this.remoteSessions.entries())) {
+                    if (!seenSessionIds.has(sessionId)) this.remoteSessions.delete(sessionId);
+                }
+                for (const [key, tabId] of Array.from(this.remoteTabMap.entries())) {
+                    if (!seenTabKeys.has(key)) {
+                        this.remoteTabMap.delete(key);
+                        const tab = this.tabs.get(tabId);
+                        if (tab?.remoteKey === key) this.closeTab(tabId, { remoteSync: false, allowEmpty: true });
+                    }
+                }
+                for (const key of Array.from(this.v3SubscribedPanes)) {
+                    const paneId = this.v3PaneIdFromScreenKey(key);
+                    if (!seenPaneIds.has(paneId)) this.cleanupV3ScreenState(this.v3WorkspaceId, paneId);
+                }
+
+                this.rebuildSplitTreeRegistry();
+                const activeTabKey = String(snapshot.active_tab_id || '');
+                const desiredActiveTab = touchedTabs.find((tab) => String(tab.remoteKey || '').endsWith(':' + activeTabKey))
+                    || touchedTabs.find((tab) => tab.panes.has(this.activePaneId))
+                    || touchedTabs[0];
+                if (desiredActiveTab) this.activeTabId = desiredActiveTab.id;
+
+                this.renderTabs();
+                this.renderActiveTab();
+                const activeTab = this.tabs.get(this.activeTabId);
+                if (activeTab) {
+                    const activePaneText = String(sortedTabs.find((item) => this.remoteTabKeyForV3Tab(ownerId, item) === activeTab.remoteKey)?.active_pane_id || '');
+                    const activePane = this.localPaneIdForRemote(this.v3WorkspaceId, activePaneText) ?? Number(activePaneText);
+                    const focusPaneId = Number.isFinite(activePane) && activeTab.panes.has(activePane)
+                        ? activePane
+                        : activeTab.panes.has(this.activePaneId)
+                            ? this.activePaneId
+                            : Array.from(activeTab.panes)[0];
+                    if (focusPaneId !== null && focusPaneId !== undefined) this.setActivePane(focusPaneId);
+                }
+                this.syncVisibleV3ScreenSubscriptions(this.v3WorkspaceId);
+                this.updateStatusBar();
+            }
+
+            applyV3ScreenMessage(message) {
+                const paneIdText = String(message.pane_id || message.payload?.pane_id || '');
+                const workspaceId = String(message.workspace_id || this.v3WorkspaceId || '');
+                const paneId = this.localPaneIdForRemote(workspaceId, paneIdText) ?? Number(paneIdText);
+                const sessionId = message.session_id || this.terminals.get(paneId)?.sessionId || '';
+                const terminal = Number.isFinite(paneId) ? this.terminals.get(paneId) : null;
+                if (!terminal) return;
+                const data = this.decodeBase64Utf8(message.payload?.data || '');
+                if (!data) return;
+                const seqKey = this.v3ScreenKey(workspaceId, paneIdText);
+                if (message.type === 'screen.snapshot') {
+                    terminal.term?.clear?.();
+                    this.replayBuffers.set(sessionId, '');
+                    const snapshotSeq = Number(message.payload?.snapshot_seq || message.payload?.seq || 0);
+                    this.v3ViewerScreenSeq.set(seqKey, snapshotSeq);
+                    if (snapshotSeq > 0) this.ackV3Screen(workspaceId, paneIdText, snapshotSeq);
+                } else {
+                    const seq = Number(message.payload?.seq || 0);
+                    const prevSeq = Number(message.payload?.prev_seq || 0);
+                    const lastSeq = this.v3ViewerScreenSeq.get(seqKey) || 0;
+                    if (lastSeq > 0 && prevSeq !== lastSeq) {
+                        this.debug('v3:screen:seq-gap', { workspaceId, paneId: paneIdText, lastSeq, prevSeq, seq });
+                        this.requestV3ScreenResync(workspaceId, paneIdText, lastSeq, 'seq-gap');
+                        return;
+                    }
+                    if (seq > 0 && seq <= lastSeq) {
+                        this.debug('v3:screen:duplicate-delta', { workspaceId, paneId: paneIdText, lastSeq, seq });
+                        return;
+                    }
+                    if (seq > 0) this.v3ViewerScreenSeq.set(seqKey, seq);
+                    if (seq > 0) this.ackV3Screen(workspaceId, paneIdText, seq);
+                }
+                terminal.appendChunk(data);
+                if (sessionId) {
+                    this.appendReplayBuffer(sessionId, data);
+                    this.applySessionOutput(sessionId, data, null);
                 }
             }
 
-            async handleSessionListResponse(payload) {
-                const sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
-                this.debug('remote:session-list', { count: sessions.length });
-                for (const session of sessions) {
-                    if (!session?.session_id) continue;
-                    await this.openOrUpdateRemoteSession(session);
-                    await this.subscribeRemoteSession(session.session_id);
+            async handleV3InputSend(message) {
+                const paneId = this.paneIdFromV3MessagePaneId(message.pane_id || message.payload?.pane_id, message.session_id);
+                const sessionId = message.session_id || (Number.isFinite(paneId) ? this.sessionIdForPane(paneId) : '');
+                const terminal = Number.isFinite(paneId) ? this.terminals.get(paneId) : null;
+                const data = this.decodeBase64Utf8(message.payload?.data || '');
+                const inputId = String(message.payload?.input_id || message.id || '');
+                if (!terminal || !sessionId || !data || typeof invoke === 'undefined') return;
+                if (inputId && this.shouldDropOwnerInput(inputId)) {
+                    this.debug('v3:input:duplicate-owner-drop', { paneId, sessionId, inputId });
+                    return;
                 }
-                if (sessions.length === 0 && this.isReceiverMode()) {
-                    const terminal = this.terminals.get(this.activePaneId);
-                    if (terminal && terminal.remote && !terminal.backendReady) {
-                        terminal.appendOutput('当前没有可见的远程终端。可点击 + 请求发送端新建终端。', false);
+                try {
+                    await invoke('send_input', {
+                        sessionId,
+                        input: data,
+                        inputId
+                    });
+                } catch (err) {
+                    this.debug('v3:input:apply:failed', { sessionId, error: String(err) });
+                }
+            }
+
+            shouldDropOwnerInput(inputId) {
+                const now = Date.now();
+                for (const [key, seenAt] of Array.from(this.v3OwnerInputIds.entries())) {
+                    if (now - seenAt > 60000) this.v3OwnerInputIds.delete(key);
+                }
+                if (this.v3OwnerInputIds.has(inputId)) return true;
+                this.v3OwnerInputIds.set(inputId, now);
+                return false;
+            }
+
+            handleV3LayoutActionRequest(message) {
+                const action = String(message.payload?.action || '');
+                const body = message.payload || {};
+                if (action === 'new_tab') {
+                    this.createNewTab(undefined, { title: body.title || '远程终端' });
+                    this.publishV3LayoutPatch('action:new_tab');
+                    return;
+                }
+                if (action === 'close_pane') {
+                    const paneId = this.paneIdFromV3MessagePaneId(body.pane_id || message.pane_id, body.session_id || message.session_id);
+                    if (Number.isFinite(paneId)) {
+                        this.removePaneLocally(paneId, { remoteSync: false, allowEmpty: true });
+                        this.publishV3LayoutPatch('action:close_pane');
+                    }
+                    return;
+                }
+                if (action === 'split_pane' || action === 'split') {
+                    const sourcePaneId = this.paneIdFromV3MessagePaneId(
+                        body.source_pane_id || body.sourcePaneId || message.pane_id || this.activePaneId,
+                        body.source_session_id || body.session_id || message.session_id
+                    );
+                    if (Number.isFinite(sourcePaneId)) {
+                        this.splitMenuTarget = sourcePaneId;
+                        this.splitPane(body.direction || 'right', { remoteSync: false });
+                        this.publishV3LayoutPatch('action:split_pane');
+                    }
+                    return;
+                }
+                if (action === 'rename_tab') {
+                    const requestedTabId = String(body.tab_id || '').trim();
+                    const tab = Array.from(this.tabs.values()).find((item) =>
+                        String(item.id) === requestedTabId || String(item.remoteTabId || '') === requestedTabId
+                    ) || this.tabs.get(this.activeTabId);
+                    if (tab) {
+                        this.updateTabTitle(tab.id, body.title || '远程终端', { remoteSync: false });
+                        this.publishV3LayoutPatch('action:rename_tab');
+                    }
+                    return;
+                }
+                if (action === 'rename_pane') {
+                    const paneId = this.paneIdFromV3MessagePaneId(body.pane_id || message.pane_id, body.session_id || message.session_id);
+                    if (Number.isFinite(paneId)) {
+                        this.updatePaneTitle(paneId, body.title || defaultPaneTitle(paneId), { remoteSync: false });
+                        this.publishV3LayoutPatch('action:rename_pane');
                     }
                 }
             }
 
+            applyRemoteSessionListLayout(sessions) {
+                const validSessions = sessions
+                    .filter((session) => session?.session_id)
+                    .slice()
+                    .sort((a, b) => {
+                        const at = Number.isFinite(Number(a.layout?.tab_order)) ? Number(a.layout.tab_order) : Number.MAX_SAFE_INTEGER;
+                        const bt = Number.isFinite(Number(b.layout?.tab_order)) ? Number(b.layout.tab_order) : Number.MAX_SAFE_INTEGER;
+                        const ap = Number.isFinite(Number(a.layout?.pane_order)) ? Number(a.layout.pane_order) : Number.MAX_SAFE_INTEGER;
+                        const bp = Number.isFinite(Number(b.layout?.pane_order)) ? Number(b.layout.pane_order) : Number.MAX_SAFE_INTEGER;
+                        return at - bt || ap - bp || String(a.session_id).localeCompare(String(b.session_id));
+                    });
+                const touchedTabs = new Map();
+
+                for (const snapshot of validSessions) {
+                    const sessionId = String(snapshot.session_id);
+                    this.remoteSessions.set(sessionId, snapshot);
+                    let paneId = this.paneIdFromSession(sessionId);
+                    let tab = paneId === null ? null : this.findTabByPaneId(paneId);
+                    if (!tab) {
+                        tab = this.ensureRemoteTab(snapshot);
+                    }
+                    paneId = this.ensureRemotePaneForSnapshot(tab, snapshot);
+                    if (paneId === null || paneId === undefined) continue;
+                    this.sessionPaneMap.set(sessionId, paneId);
+                    const terminal = this.terminals.get(paneId);
+                    if (terminal) {
+                        terminal.remote = true;
+                        terminal.sessionId = sessionId;
+                        terminal.setBackendReady(snapshot.status !== 'closed');
+                    }
+                    touchedTabs.set(tab.id, tab);
+                }
+
+                for (const tab of touchedTabs.values()) {
+                    const snapshotsForTab = validSessions.filter((snapshot) => this.remoteTabMap.get(this.remoteTabKeyForSnapshot(snapshot)) === tab.id);
+                    const rootSnapshot = snapshotsForTab.find((snapshot) => snapshot.layout?.root) || snapshotsForTab[0];
+                    if (rootSnapshot) {
+                        this.applyRemoteTabLayout(tab, rootSnapshot);
+                    }
+                    for (const snapshot of snapshotsForTab) {
+                        this.applyRemoteSessionMetadata(snapshot);
+                    }
+                }
+                this.updateStatusBar();
+            }
+
             snapshotFromServerPayload(payload) {
                 return payload?.snapshot || payload || null;
+            }
+
+            remoteTabKeyForSnapshot(snapshot) {
+                const ownerId = String(snapshot?.owner_id || this.settings.get('pairedDesktopId') || 'desktop');
+                const layoutTabId = String(snapshot?.layout?.tab_id || '').trim();
+                if (layoutTabId) return ownerId + ':' + layoutTabId;
+                return ownerId + ':session:' + String(snapshot?.session_id || '');
+            }
+
+            normalizeRemoteLayoutRoot(node, allowedPaneIds) {
+                if (!node || typeof node !== 'object') return null;
+                if (node.type === 'leaf') {
+                    const rawPaneId = node.pane_id ?? node.paneId;
+                    const paneId = this.localPaneIdForRemote(this.v3WorkspaceId, String(rawPaneId)) ?? Number(rawPaneId);
+                    if (!allowedPaneIds.has(paneId)) return null;
+                    return {
+                        type: 'leaf',
+                        paneId,
+                        size: typeof node.size === 'number' ? node.size : 1
+                    };
+                }
+                const children = (node.children || [])
+                    .map((child) => this.normalizeRemoteLayoutRoot(child, allowedPaneIds))
+                    .filter(Boolean);
+                if (children.length === 0) return null;
+                if (children.length === 1) return children[0];
+                return {
+                    type: node.type === 'vertical' ? 'vertical' : 'horizontal',
+                    size: typeof node.size === 'number' ? node.size : 1,
+                    children
+                };
+            }
+
+            remoteTabKeyForV3Tab(ownerId, tabInfo) {
+                const tabId = String(tabInfo?.tab_id || tabInfo?.id || '').trim();
+                return String(ownerId || this.settings.get('pairedDesktopId') || 'desktop') + ':' + (tabId || 'tab');
+            }
+
+            normalizeV3RemoteRoot(tabInfo, paneIds) {
+                const allowedPaneIds = new Set(paneIds);
+                let root = this.normalizeRemoteLayoutRoot(tabInfo?.root, allowedPaneIds);
+                if (root) return root;
+                const ordered = paneIds.slice().sort((a, b) => a - b);
+                if (ordered.length <= 0) return null;
+                if (ordered.length === 1) return { type: 'leaf', paneId: ordered[0], size: 1 };
+                return {
+                    type: 'horizontal',
+                    size: 1,
+                    children: ordered.map((paneId) => ({ type: 'leaf', paneId, size: 1 }))
+                };
+            }
+
+            snapshotLikeFromV3Pane(ownerId, tabInfo, paneInfo) {
+                const paneIdText = String(paneInfo?.pane_id || '').trim();
+                const sessionId = String(paneInfo?.session_id || (paneIdText ? 'remote-' + paneIdText : '')).trim();
+                return {
+                    session_id: sessionId,
+                    owner_id: ownerId || '',
+                    title: paneInfo?.title || tabInfo?.title || '远程终端',
+                    cols: paneInfo?.cols || 80,
+                    rows: paneInfo?.rows || 24,
+                    status: paneInfo?.status || 'active',
+                    task_state: paneInfo?.task_state || 'idle',
+                    preview: paneInfo?.preview || '',
+                    activity: paneInfo?.activity || '',
+                    layout: {
+                        tab_id: String(tabInfo?.tab_id || tabInfo?.id || 'tab'),
+                        tab_title: tabInfo?.title || '远程终端',
+                        pane_id: paneIdText,
+                        pane_title: paneInfo?.title || '远程终端',
+                        root: tabInfo?.root || null
+                    }
+                };
+            }
+
+            ensureV3RemoteTab(ownerId, tabInfo) {
+                const key = this.remoteTabKeyForV3Tab(ownerId, tabInfo);
+                let tabId = this.remoteTabMap.get(key);
+                let tab = tabId ? this.tabs.get(tabId) : null;
+                const desiredNumericId = Number(tabInfo?.tab_id ?? tabInfo?.id);
+                const title = normalizeEditableTitle(tabInfo?.title, '远程终端');
+
+                if (!tab && (this.shouldReuseRemotePlaceholder() || this.findReusableRemotePlaceholderTab())) {
+                    tab = this.findReusableRemotePlaceholderTab() || this.tabs.get(this.activeTabId || Array.from(this.tabs.keys())[0]);
+                    if (tab) {
+                        tabId = tab.id;
+                        for (const paneId of Array.from(tab.panes || [])) {
+                            const terminal = this.terminals.get(paneId);
+                            if (terminal?.sessionId) this.sessionPaneMap.delete(terminal.sessionId);
+                            this.forgetRemotePaneMapping(this.v3WorkspaceId, this.remotePaneIdForLocal(paneId), paneId);
+                            terminal?.dispose();
+                            this.terminals.delete(paneId);
+                            this.splitTree.panes.delete(paneId);
+                            this.splitTree.forgetPane(paneId);
+                            this.forgetSessionActivity(paneId);
+                        }
+                        tab.panes = new Set();
+                        tab.paneTitles = new Map();
+                        tab.paneTitleModes = new Map();
+                        tab.root = null;
+                        tab.title = title;
+                        tab.titleMode = 'auto';
+                        tab.remoteKey = key;
+                        this.remoteTabMap.set(key, tabId);
+                    }
+                }
+
+                if (!tab) {
+                    tabId = Number.isFinite(desiredNumericId) && desiredNumericId > 0 && !this.tabs.has(desiredNumericId)
+                        ? desiredNumericId
+                        : ++this.nextTabId;
+                    const root = this.splitTree.createLeaf();
+                    const paneId = root.paneId;
+                    tab = {
+                        id: tabId,
+                        title,
+                        titleMode: 'auto',
+                        root,
+                        panes: new Set([paneId]),
+                        paneTitles: new Map([[paneId, defaultPaneTitle(paneId)]]),
+                        paneTitleModes: new Map([[paneId, 'auto']]),
+                        attention: false,
+                        remoteKey: key
+                    };
+                    this.tabs.set(tabId, tab);
+                    this.remoteTabMap.set(key, tabId);
+                    this.nextTabId = Math.max(this.nextTabId, tabId);
+                }
+
+                tab.title = title;
+                tab.titleMode = 'auto';
+                tab.remoteKey = key;
+                tab.remoteTabId = String(tabInfo?.tab_id || tabInfo?.id || '');
+                this.remoteTabMap.set(key, tab.id);
+                return tab;
+            }
+
+            applyV3RemoteTabSnapshot(ownerId, workspaceId, tabInfo) {
+                const panes = Array.isArray(tabInfo?.panes) ? tabInfo.panes : [];
+                const validPanes = panes
+                    .map((paneInfo, index) => ({
+                        info: paneInfo,
+                        order: Number.isFinite(Number(paneInfo?.order)) ? Number(paneInfo.order) : index,
+                        remotePaneId: String(paneInfo?.pane_id || '').trim()
+                    }))
+                    .filter((item) => item.remotePaneId)
+                    .map((item) => ({
+                        ...item,
+                        paneId: this.ensureLocalPaneIdForRemote(workspaceId, item.remotePaneId)
+                    }))
+                    .filter((item) => Number.isFinite(item.paneId) && item.paneId > 0)
+                    .sort((a, b) => a.order - b.order || a.paneId - b.paneId);
+                if (!validPanes.length) return null;
+
+                const tab = this.ensureV3RemoteTab(ownerId, tabInfo);
+                const nextPaneIds = new Set(validPanes.map((item) => item.paneId));
+
+                for (const paneId of Array.from(tab.panes)) {
+                    if (nextPaneIds.has(paneId)) continue;
+                    const terminal = this.terminals.get(paneId);
+                    const remotePaneId = this.remotePaneIdForLocal(paneId);
+                    if (terminal?.sessionId) {
+                        this.remoteSessions.delete(terminal.sessionId);
+                        this.sessionPaneMap.delete(terminal.sessionId);
+                    }
+                    this.cleanupV3ScreenState(workspaceId, remotePaneId);
+                    terminal?.dispose();
+                    this.terminals.delete(paneId);
+                    this.splitTree.panes.delete(paneId);
+                    this.splitTree.forgetPane(paneId);
+                    tab.panes.delete(paneId);
+                    tab.paneTitles?.delete(paneId);
+                    tab.paneTitleModes?.delete(paneId);
+                    this.forgetSessionActivity(paneId);
+                    this.forgetRemotePaneMapping(workspaceId, remotePaneId, paneId);
+                }
+
+                for (const item of validPanes) {
+                    const paneInfo = item.info;
+                    const paneId = item.paneId;
+                    const paneIdText = item.remotePaneId;
+                    const sessionId = String(paneInfo.session_id || 'remote-' + paneIdText);
+                    const snapshotLike = this.snapshotLikeFromV3Pane(ownerId, tabInfo, paneInfo);
+                    if (!this.splitTree.panes.has(paneId)) {
+                        this.splitTree.panes.set(paneId, { type: 'leaf', paneId, size: 1 });
+                        this.splitTree.nextPaneId = Math.max(this.splitTree.nextPaneId, paneId + 1);
+                    }
+                    this.remoteSessions.set(sessionId, snapshotLike);
+                    this.sessionPaneMap.set(sessionId, paneId);
+                    tab.panes.add(paneId);
+                    this.setPaneTitleValue(tab, paneId, paneInfo.title || defaultPaneTitle(paneId), 'auto');
+
+                    let terminal = this.terminals.get(paneId);
+                    if (!terminal) {
+                        terminal = new LocalTerminal(paneId, this.settings.get('shell'), {
+                            remote: true,
+                            sessionId
+                        });
+                        this.terminals.set(paneId, terminal);
+                    } else if (terminal.sessionId && terminal.sessionId !== sessionId) {
+                        this.sessionPaneMap.delete(terminal.sessionId);
+                    }
+                    terminal.remote = true;
+                    terminal.sessionId = sessionId;
+                    terminal.pendingWrites = [];
+                    terminal.setBackendReady(paneInfo.status !== 'closed');
+                    this.applyRemoteSessionMetadata(snapshotLike);
+                }
+
+                const root = this.normalizeV3RemoteRoot(tabInfo, Array.from(nextPaneIds));
+                if (root) tab.root = root;
+                tab.panes = new Set(this.splitTree.collectPaneIds(tab.root).filter((paneId) => nextPaneIds.has(paneId)));
+                for (const paneId of nextPaneIds) {
+                    if (!tab.panes.has(paneId)) tab.panes.add(paneId);
+                }
+                return tab;
+            }
+
+            remoteLayoutSignature(root) {
+                const normalize = (node) => {
+                    if (!node || typeof node !== 'object') return null;
+                    if (node.type === 'leaf') {
+                        return {
+                            type: 'leaf',
+                            paneId: Number(node.paneId) || 0,
+                            size: Math.round((Number(node.size) || 1) * 10000) / 10000
+                        };
+                    }
+                    return {
+                        type: node.type === 'vertical' ? 'vertical' : 'horizontal',
+                        size: Math.round((Number(node.size) || 1) * 10000) / 10000,
+                        children: (node.children || []).map(normalize).filter(Boolean)
+                    };
+                };
+                return JSON.stringify(normalize(root));
+            }
+
+            shouldReuseRemotePlaceholder() {
+                return this.isReceiverMode()
+                    && this.tabs.size === 1
+                    && this.terminals.size === 1
+                    && Array.from(this.terminals.values())[0]?.remote
+                    && !Array.from(this.terminals.values())[0]?.backendReady;
+            }
+
+            findReusableRemotePlaceholderTab() {
+                if (!this.isReceiverMode()) return null;
+                for (const tab of Array.from(this.tabs.values()).reverse()) {
+                    if (tab.remoteKey) continue;
+                    if (tab.panes.size !== 1) continue;
+                    const paneId = Array.from(tab.panes)[0];
+                    const terminal = this.terminals.get(paneId);
+                    if (terminal?.remote && !terminal.backendReady) return tab;
+                }
+                return null;
+            }
+
+            ensureRemoteTab(snapshot) {
+                const key = this.remoteTabKeyForSnapshot(snapshot);
+                let tabId = this.remoteTabMap.get(key);
+                let tab = tabId ? this.tabs.get(tabId) : null;
+                const title = snapshot.layout?.tab_title || snapshot.title || '远程终端';
+
+                if (!tab && (this.shouldReuseRemotePlaceholder() || this.findReusableRemotePlaceholderTab())) {
+                    tab = this.findReusableRemotePlaceholderTab() || this.tabs.get(this.activeTabId || Array.from(this.tabs.keys())[0]);
+                    if (tab) {
+                        tabId = tab.id;
+                        tab.title = normalizeEditableTitle(title, '远程终端');
+                        tab.remoteKey = key;
+                        this.remoteTabMap.set(key, tabId);
+                    }
+                }
+
+                if (!tab) {
+                    tabId = ++this.nextTabId;
+                    const root = this.splitTree.createLeaf();
+                    const paneId = root.paneId;
+                    tab = {
+                        id: tabId,
+                        title: normalizeEditableTitle(title, defaultTabTitle(tabId)),
+                        titleMode: 'auto',
+                        root,
+                        panes: new Set([paneId]),
+                        paneTitles: new Map([[paneId, normalizeEditableTitle(snapshot.title, defaultPaneTitle(paneId))]]),
+                        paneTitleModes: new Map([[paneId, 'auto']]),
+                        attention: false,
+                        remoteKey: key
+                    };
+                    this.tabs.set(tabId, tab);
+                    this.terminals.set(paneId, new LocalTerminal(paneId, this.settings.get('shell'), {
+                        remote: true,
+                        sessionId: snapshot.session_id || ('remote-' + paneId)
+                    }));
+                    this.activeTabId = tabId;
+                    this.remoteTabMap.set(key, tabId);
+                }
+
+                return tab;
+            }
+
+            ensureRemotePaneForSnapshot(tab, snapshot) {
+                const layoutPaneId = Number(snapshot.layout?.pane_id);
+                let paneId = Number.isFinite(layoutPaneId) && layoutPaneId > 0 ? layoutPaneId : null;
+                if (paneId === null) {
+                    paneId = this.paneIdFromSession(snapshot.session_id);
+                }
+                if (paneId === null || paneId === undefined) {
+                    paneId = tab.panes.size === 1
+                        ? Array.from(tab.panes)[0]
+                        : this.splitTree.createLeaf().paneId;
+                }
+
+                if (!this.splitTree.panes.has(paneId)) {
+                    this.splitTree.panes.set(paneId, { type: 'leaf', paneId, size: 1 });
+                    this.splitTree.nextPaneId = Math.max(this.splitTree.nextPaneId, paneId + 1);
+                }
+                for (const existingPaneId of Array.from(tab.panes)) {
+                    const existingTerminal = this.terminals.get(existingPaneId);
+                    if (existingPaneId !== paneId && existingTerminal?.remote && !existingTerminal.backendReady) {
+                        this.sessionPaneMap.delete(existingTerminal.sessionId);
+                        existingTerminal.dispose();
+                        this.terminals.delete(existingPaneId);
+                        this.splitTree.panes.delete(existingPaneId);
+                        this.splitTree.forgetPane(existingPaneId);
+                        tab.panes.delete(existingPaneId);
+                        tab.paneTitles?.delete(existingPaneId);
+                        tab.paneTitleModes?.delete(existingPaneId);
+                    }
+                }
+                tab.panes.add(paneId);
+
+                const title = snapshot.layout?.pane_title || snapshot.title || defaultPaneTitle(paneId);
+                this.setPaneTitleValue(tab, paneId, title, 'auto');
+
+                let terminal = this.terminals.get(paneId);
+                if (!terminal) {
+                    terminal = new LocalTerminal(paneId, this.settings.get('shell'), {
+                        remote: true,
+                        sessionId: snapshot.session_id
+                    });
+                    this.terminals.set(paneId, terminal);
+                } else if (terminal.sessionId && terminal.sessionId !== snapshot.session_id) {
+                    this.sessionPaneMap.delete(terminal.sessionId);
+                }
+                terminal.remote = true;
+                terminal.sessionId = snapshot.session_id;
+                terminal.pendingWrites = [];
+                return paneId;
+            }
+
+            applyRemoteTabLayout(tab, snapshot) {
+                const allowedPaneIds = new Set(tab.panes);
+                let root = this.normalizeRemoteLayoutRoot(snapshot.layout?.root, allowedPaneIds);
+                if (!root) {
+                    const ordered = Array.from(tab.panes).sort((a, b) => a - b);
+                    root = ordered.length === 1
+                        ? { type: 'leaf', paneId: ordered[0], size: 1 }
+                        : {
+                            type: 'horizontal',
+                            size: 1,
+                            children: ordered.map((paneId) => ({ type: 'leaf', paneId, size: 1 }))
+                        };
+                }
+                const nextSignature = this.remoteLayoutSignature(root);
+                const currentSignature = this.remoteLayoutSignature(tab.root);
+                if (nextSignature === currentSignature) return false;
+                tab.root = root;
+                this.splitTree.rebuildRegistry(Array.from(this.tabs.values()).map((item) => item.root).filter(Boolean));
+                if (tab.id === this.activeTabId) {
+                    this.renderActiveTab();
+                }
+                this.renderTabs();
+                return true;
+            }
+
+            applyRemoteSessionMetadata(snapshot) {
+                if (!snapshot?.session_id) return;
+                const sessionId = String(snapshot.session_id);
+                const paneId = this.paneIdFromSession(sessionId);
+                if (paneId === null) return;
+                const title = snapshot.title || '远程终端';
+                const tab = this.findTabByPaneId(paneId);
+                if (tab) {
+                    const nextTabTitle = normalizeEditableTitle(snapshot.layout?.tab_title || title, title);
+                    const nextPaneTitle = normalizeEditableTitle(snapshot.layout?.pane_title || title, defaultPaneTitle(paneId));
+                    const titleChanged = tab.title !== nextTabTitle || this.getPaneTitle(paneId, tab) !== nextPaneTitle;
+                    if (titleChanged) {
+                        tab.title = nextTabTitle;
+                        this.setPaneTitleValue(tab, paneId, nextPaneTitle, 'auto');
+                        this.renderTabs();
+                    }
+                    if (tab.id === this.activeTabId) this.syncPaneTitleElements(tab);
+                }
+                const state = this.ensureSessionActivity(paneId, title);
+                state.title = title;
+                state.activity = snapshot.activity || state.activity || '远程终端已就绪';
+                state.preview = snapshot.preview || state.preview || '';
+                state.taskState = snapshot.task_state || state.taskState || 'idle';
+                state.lastUpdatedAt = Date.now();
             }
 
             async openOrUpdateRemoteSession(snapshot) {
@@ -5270,32 +6522,11 @@
                 const sessionId = String(snapshot.session_id);
                 this.remoteSessions.set(sessionId, snapshot);
                 let paneId = this.paneIdFromSession(sessionId);
-                const title = snapshot.title || '远程终端';
 
                 if (paneId === null) {
-                    const shouldReuseOnlyPane = this.isReceiverMode()
-                        && this.tabs.size === 1
-                        && this.terminals.size === 1
-                        && Array.from(this.terminals.values())[0]?.remote
-                        && !Array.from(this.terminals.values())[0]?.backendReady;
-                    if (shouldReuseOnlyPane) {
-                        paneId = this.activePaneId || Array.from(this.terminals.keys())[0];
-                        const terminal = this.terminals.get(paneId);
-                        if (terminal) {
-                            terminal.remote = true;
-                            terminal.sessionId = sessionId;
-                            terminal.pendingWrites = [];
-                        }
-                    } else {
-                        const tabId = this.createNewTab(undefined, {
-                            title,
-                            paneTitle: title,
-                            remoteSessionId: sessionId,
-                            skipRequestRemoteCreate: true
-                        });
-                        const tab = this.tabs.get(tabId);
-                        paneId = tab ? Array.from(tab.panes)[0] : null;
-                    }
+                    const tab = this.ensureRemoteTab(snapshot);
+                    paneId = this.ensureRemotePaneForSnapshot(tab, snapshot);
+                    this.applyRemoteTabLayout(tab, snapshot);
                 }
 
                 if (paneId === null || paneId === undefined) return null;
@@ -5305,23 +6536,11 @@
                     terminal.remote = true;
                     terminal.sessionId = sessionId;
                     terminal.setBackendReady(snapshot.status !== 'closed');
-                    terminal.queueResize();
                 }
 
                 const tab = this.findTabByPaneId(paneId);
-                if (tab) {
-                    tab.title = normalizeEditableTitle(snapshot.layout?.tab_title || title, title);
-                    this.setPaneTitleValue(tab, paneId, snapshot.layout?.pane_title || title, 'auto');
-                    this.renderTabs();
-                    if (tab.id === this.activeTabId) this.syncPaneTitleElements(tab);
-                }
-
-                const state = this.ensureSessionActivity(paneId, title);
-                state.title = title;
-                state.activity = snapshot.activity || state.activity || '远程终端已就绪';
-                state.preview = snapshot.preview || state.preview || '';
-                state.taskState = snapshot.task_state || state.taskState || 'idle';
-                state.lastUpdatedAt = Date.now();
+                if (tab) this.applyRemoteTabLayout(tab, snapshot);
+                this.applyRemoteSessionMetadata(snapshot);
                 this.updateStatusBar();
                 return paneId;
             }
@@ -5329,11 +6548,11 @@
             handleRemoteSessionClosed(sessionId) {
                 const paneId = this.paneIdFromSession(sessionId);
                 if (paneId === null) return;
-                const terminal = this.terminals.get(paneId);
-                terminal?.setBackendReady(false);
-                terminal?.appendOutput('远程终端已关闭。', true);
-                document.getElementById('indicator-' + paneId)?.classList.add('disconnected');
+                this.cleanupV3ScreenState(this.v3WorkspaceId, paneId);
                 this.remoteSessions.delete(sessionId);
+                this.remoteSubscribedSessions.delete(sessionId);
+                this.remoteReplayRequestedSessions.delete(sessionId);
+                this.removePaneLocally(paneId, { remoteSync: false, allowEmpty: true });
             }
 
             async setupTauriListeners() {
@@ -5360,18 +6579,8 @@
                     if (payload.session_id && payload.data) {
                         this.applySessionOutput(payload.session_id, payload.data, null);
                     }
-                    if (payload.session_id && payload.data && typeof invoke !== 'undefined') {
-                        try {
-                            await invoke('relay_terminal_output', {
-                                sessionId: payload.session_id,
-                                data: payload.data
-                            });
-                        } catch (err) {
-                            this.debug('terminal:relay-output:failed', {
-                                sessionId: payload.session_id,
-                                error: String(err)
-                            });
-                        }
+                    if (payload.session_id && payload.data) {
+                        this.scheduleV3ScreenDelta(paneId, payload.session_id, payload.data);
                     }
                 });
 
@@ -5421,6 +6630,7 @@
                 if (state === 'connected') {
                     this.connectionPending = false;
                     this.serverConnected = true;
+                    this.serverDeviceId = payload.device_id || this.serverDeviceId || '';
                     this.manualDisconnect = false;
                     this.reconnectAttempts = 0;
                     if (this.reconnectTimer) {
@@ -5440,10 +6650,9 @@
                         autoHideMs: 2200
                     });
                     if (this.isReceiverMode()) {
-                        await this.requestRemoteSessionList();
+                        await this.subscribeV3Workspace();
                     } else {
-                        try { await invoke('sync_active_sessions'); } catch (e) { console.warn('Sync sessions failed:', e); }
-                        await this.syncAllSessionActivity();
+                        await this.publishV3LayoutSnapshot('connected');
                     }
                     if (payload.message) this.showToast(payload.message, 'success');
                     else this.showToast('已连接到服务器', 'success');
@@ -5453,6 +6662,9 @@
                 const wasConnected = this.serverConnected;
                 this.connectionPending = false;
                 this.serverConnected = false;
+                this.connectedPeers = [];
+                this.remoteSubscribedSessions.clear();
+                this.remoteReplayRequestedSessions.clear();
                 this.updateConnectionStatus(this.manualDisconnect ? 'local' : 'disconnected');
                 this.updateStatusBar();
 
@@ -5516,106 +6728,44 @@
                     sessionId: payload.session_id || null,
                     payload: payload.payload || null
                 });
-                if (payload.type === 'session.list_res') {
-                    this.handleSessionListResponse(payload.payload || {});
-                    return;
-                }
-                if (payload.type === 'session.state') {
-                    const snapshot = this.snapshotFromServerPayload(payload.payload || {});
-                    if (this.isReceiverMode() && snapshot?.session_id) {
-                        this.openOrUpdateRemoteSession(snapshot);
+                if (payload.type === 'workspace.list_res') {
+                    const workspaces = Array.isArray(payload.payload?.workspaces) ? payload.payload.workspaces : [];
+                    const first = workspaces[0];
+                    if (this.isReceiverMode() && first?.workspace_id) {
+                        this.subscribeV3Workspace(String(first.workspace_id));
                     }
                     return;
                 }
-                if (payload.type === 'terminal.output' && this.isReceiverMode()) {
-                    const sessionId = payload.session_id || null;
-                    const data = payload.payload?.data || '';
-                    const paneId = this.paneIdFromSession(sessionId);
-                    const terminal = paneId === null ? null : this.terminals.get(paneId);
-                    if (terminal) terminal.appendChunk(data);
-                    if (sessionId && data) {
-                        this.appendReplayBuffer(sessionId, data);
-                        this.applySessionOutput(sessionId, data, null);
+                if (payload.type === 'layout.snapshot') {
+                    if (this.isReceiverMode()) this.applyV3LayoutSnapshot(payload.workspace_id || this.v3WorkspaceId, payload.payload || {});
+                    return;
+                }
+                if (payload.type === 'layout.patch') {
+                    if (this.isReceiverMode() && payload.payload?.snapshot) {
+                        this.applyV3LayoutSnapshot(payload.workspace_id || this.v3WorkspaceId, payload.payload || {});
                     }
                     return;
                 }
-                if (payload.type === 'terminal.replay' && this.isReceiverMode()) {
-                    const sessionId = payload.session_id || null;
-                    const data = payload.payload?.data || '';
-                    const paneId = this.paneIdFromSession(sessionId);
-                    const terminal = paneId === null ? null : this.terminals.get(paneId);
-                    if (terminal && data) {
-                        if (!this.remoteReplayTimers.has(sessionId)) {
-                            terminal.term?.clear?.();
-                            this.replayBuffers.set(sessionId, '');
-                        } else {
-                            clearTimeout(this.remoteReplayTimers.get(sessionId));
-                        }
-                        terminal.appendChunk(data);
-                        this.remoteReplayTimers.set(sessionId, setTimeout(() => {
-                            this.remoteReplayTimers.delete(sessionId);
-                        }, 250));
-                    }
-                    if (sessionId && data) this.appendReplayBuffer(sessionId, data);
+                if (payload.type === 'screen.snapshot' || payload.type === 'screen.delta') {
+                    if (this.isReceiverMode()) this.applyV3ScreenMessage(payload);
                     return;
                 }
-                if (payload.type === 'session.close' && this.isReceiverMode()) {
-                    this.handleRemoteSessionClosed(payload.session_id || null);
+                if (payload.type === 'screen.resync_request' && !this.isReceiverMode()) {
+                    const paneId = payload.pane_id || payload.payload?.pane_id || '';
+                    if (paneId) this.publishV3ScreenSnapshot(paneId, 'resync-request');
                     return;
                 }
-                if (payload.type === 'session.create_request') {
-                    const requestedTitle = payload.payload && payload.payload.title
-                        ? String(payload.payload.title)
-                        : undefined;
-                    this.createNewTab(undefined, requestedTitle ? { title: requestedTitle } : {});
-                    this.showToast('手机端请求已新建终端', 'success');
+                if (payload.type === 'input.send' && !this.isReceiverMode()) {
+                    this.handleV3InputSend(payload);
                     return;
                 }
-                if (payload.type === 'session.close_request') {
-                    const sessionId = payload.session_id || null;
-                    const paneId = this.paneIdFromSession(sessionId);
-                    if (paneId !== null) {
-                        this.closePane(paneId);
-                        this.showToast('手机端请求已关闭终端', 'success');
-                    }
+                if (payload.type === 'layout.action_request' && !this.isReceiverMode()) {
+                    this.handleV3LayoutActionRequest(payload);
                     return;
                 }
-                if (payload.type === 'terminal.replay_request') {
-                    const sessionId = payload.session_id || null;
-                    const targetDeviceId = payload.payload && payload.payload.target_device_id
-                        ? String(payload.payload.target_device_id)
-                        : '';
-                    console.log('收到终端回放请求:', { sessionId, targetDeviceId });
-                    if (sessionId && targetDeviceId && typeof invoke !== 'undefined') {
-                        const data = this.getReplayBuffer(sessionId);
-                        console.log('获取到的回放数据长度:', data.length);
-                        const chunks = this.splitReplayBuffer(data);
-                        (async () => {
-                            for (let index = chunks.length - 1; index >= 0; index--) {
-                                const chunk = chunks[index];
-                                await invoke('relay_terminal_replay', {
-                                    sessionId: sessionId,
-                                    targetDeviceId: targetDeviceId,
-                                    data: chunk
-                                });
-                            }
-                            this.debug('terminal:replay:sent', {
-                                sessionId: sessionId,
-                                targetDeviceId: targetDeviceId,
-                                bytes: data.length,
-                                chunks: chunks.length
-                            });
-                            console.log('回放数据发送成功');
-                        })().catch((err) => {
-                            console.warn('Relay terminal replay failed:', err);
-                            this.debug('terminal:replay:send-failed', {
-                                sessionId: sessionId,
-                                error: String(err)
-                            });
-                        });
-                    } else {
-                        console.warn('回放请求参数不完整:', { sessionId, targetDeviceId, invoke: typeof invoke });
-                    }
+                if (payload.type === 'device.peer_state') {
+                    this.handlePeerState(payload.payload || {});
+                    return;
                 }
                 if (payload.type === 'error' && payload.payload && payload.payload.message) {
                     this.showToast(payload.payload.message, 'error');
@@ -5758,7 +6908,7 @@
                         '已绑定发送端: ' + (pairing.desktop_name || pairing.desktop_id || '未知发送端');
                     this.updateClientModeVisibility();
                     this.showToast('已绑定发送端: ' + (pairing.desktop_name || 'PC 发送端'), 'success');
-                    if (this.serverConnected) await this.requestRemoteSessionList();
+                    if (this.serverConnected) await this.refreshRemoteWorkspaces();
                 } catch (err) {
                     this.showToast('绑定发送端失败: ' + err, 'error');
                 }
@@ -5881,9 +7031,18 @@
                 const sessionId = this.sessionIdForPane(paneId);
                 try {
                     if (terminal?.remote) {
-                        await invoke('request_remote_session_close', { sessionId });
+                        await invoke('request_layout_action', {
+                            workspaceId: this.v3WorkspaceId || this.ownerWorkspaceId(),
+                            action: 'close_pane',
+                            payload: {
+                                action: 'close_pane',
+                                pane_id: this.remotePaneIdForLocal(paneId),
+                                session_id: sessionId
+                            }
+                        });
                     } else {
                         await invoke('close_session', { sessionId });
+                        await this.publishV3LayoutPatch('close-session');
                     }
                 } catch (err) {
                     console.warn('Close backend session failed:', err);
@@ -5942,6 +7101,14 @@
 
             createNewTab(initPaneId, options = {}) {
                 if (this.isReceiverMode() && !options.remoteSessionId && !options.placeholderRemote) {
+                    const firstPaneId = this.splitTree.createLeaf().paneId;
+                    const pendingTitle = options.title || '远程终端';
+                    this.createNewTab(firstPaneId, {
+                        title: pendingTitle,
+                        paneTitle: '等待发送端创建',
+                        placeholderRemote: true,
+                        skipRemoteRequest: true
+                    });
                     this.requestRemoteTerminalCreate(options.title);
                     return null;
                 }
@@ -5986,10 +7153,24 @@
                 return tabId;
             }
 
-            async requestRemoteTerminalCreate(title) {
+            buildRemoteCreateLayout(action, extra = {}) {
+                const activeTerminal = this.terminals.get(extra.sourcePaneId || this.activePaneId);
+                const tab = activeTerminal ? this.findTabByPaneId(activeTerminal.paneId) : this.tabs.get(this.activeTabId);
+                const sourcePaneId = extra.sourcePaneId || activeTerminal?.paneId || this.activePaneId;
+                return {
+                    action,
+                    source_session_id: activeTerminal?.sessionId || '',
+                    source_pane_id: sourcePaneId ? this.remotePaneIdForLocal(sourcePaneId) : '',
+                    tab_key: tab?.remoteKey || '',
+                    direction: extra.direction || '',
+                    title: extra.title || ''
+                };
+            }
+
+            async requestRemoteTerminalCreate(title, layout = null) {
                 if (!this.isReceiverMode()) return;
-                const desktopId = (this.settings.get('pairedDesktopId') || '').trim();
-                if (!desktopId) {
+                const workspaceId = this.ownerWorkspaceId();
+                if (!workspaceId || workspaceId === 'default') {
                     this.showToast('请先在设置中绑定 PC 发送端', 'warning');
                     this.showSettings();
                     return;
@@ -6000,14 +7181,75 @@
                     return;
                 }
                 try {
-                    await invoke('request_remote_session_create', {
-                        desktopId,
-                        title: title || '远程终端'
+                    const actionPayload = layout || {};
+                    await invoke('request_layout_action', {
+                        workspaceId,
+                        action: actionPayload.action || 'new_tab',
+                        payload: {
+                            ...actionPayload,
+                            title: title || actionPayload.title || '远程终端'
+                        }
                     });
                     this.showToast('已请求发送端新建终端', 'success');
                 } catch (err) {
                     this.showToast('请求远程终端失败: ' + err, 'error');
                 }
+            }
+
+            scheduleRemoteSessionListRefresh() {
+                if (!this.isReceiverMode()) return;
+                for (const delay of [250, 900, 1800]) {
+                    setTimeout(() => this.refreshRemoteWorkspaces(), delay);
+                }
+            }
+
+            async sendRemoteWorkspaceAction(action, layout = {}, title = '') {
+                if (!this.isReceiverMode()) return false;
+                const workspaceId = this.ownerWorkspaceId();
+                if (!workspaceId || workspaceId === 'default' || !this.serverConnected || typeof invoke === 'undefined') return false;
+                try {
+                    await invoke('request_layout_action', {
+                        workspaceId,
+                        action,
+                        payload: { ...layout, action, title: title || layout.title || '远程终端' }
+                    });
+                    return true;
+                } catch (err) {
+                    this.showToast('同步远程操作失败: ' + err, 'error');
+                    return false;
+                }
+            }
+
+            handleRemoteSessionCreateRequest(payload) {
+                if (this.isReceiverMode()) return;
+                const requestedTitle = payload?.title ? String(payload.title) : undefined;
+                const layout = payload?.layout && typeof payload.layout === 'object' ? payload.layout : {};
+                const action = String(layout.action || 'new_tab');
+                if (action === 'rename_tab') {
+                    const paneId = this.paneIdFromV3MessagePaneId(layout.source_pane_id || layout.pane_id, layout.source_session_id);
+                    const tab = paneId === null ? null : this.findTabByPaneId(paneId);
+                    if (tab) this.updateTabTitle(tab.id, layout.title || requestedTitle || tab.title, { remoteSync: false });
+                    return;
+                }
+                if (action === 'rename_pane') {
+                    const paneId = this.paneIdFromV3MessagePaneId(layout.source_pane_id || layout.pane_id, layout.source_session_id);
+                    if (paneId !== null) this.updatePaneTitle(paneId, layout.title || requestedTitle || defaultPaneTitle(paneId), { remoteSync: false });
+                    return;
+                }
+                if (action === 'split') {
+                    const sourcePaneId = this.paneIdFromV3MessagePaneId(layout.source_pane_id || layout.pane_id, layout.source_session_id);
+                    if (sourcePaneId !== null) {
+                        this.splitMenuTarget = sourcePaneId;
+                        this.activePaneId = sourcePaneId;
+                        this.splitPane(layout.direction || 'right');
+                        this.syncActiveSessionsWithLayout();
+                        this.showToast('接收端请求已分屏', 'success');
+                        return;
+                    }
+                }
+                this.createNewTab(undefined, requestedTitle ? { title: requestedTitle } : {});
+                this.syncActiveSessionsWithLayout();
+                this.showToast('接收端请求已新建标签页', 'success');
             }
 
             renderActiveTab() {
@@ -6036,20 +7278,28 @@
                     const first = Array.from(tab.panes)[0];
                     if (first) this.focusPane(first);
                 }
+                if (this.isReceiverMode()) this.syncVisibleV3ScreenSubscriptions();
                 this.updateStatusBar();
                 if (this.aiPanelOpen) this.updateAiContextPreview();
                 this.scheduleWorkspaceSave();
             }
 
-            closeTab(tabId) {
-                if (this.tabs.size <= 1) { this.showToast('至少保留一个标签页', 'warning'); return; }
+            closeTab(tabId, options = {}) {
+                if (this.tabs.size <= 1 && !options.allowEmpty) { this.showToast('至少保留一个标签页', 'warning'); return; }
                 const tab = this.tabs.get(tabId);
                 if (!tab) return;
+                if (this.isReceiverMode() && options.remoteSync !== false) {
+                    for (const pid of tab.panes) {
+                        this.destroyBackendSession(pid);
+                    }
+                    return;
+                }
                 if (this.titleEditState && ((this.titleEditState.kind === 'tab' && this.titleEditState.id === tabId) || (this.titleEditState.kind === 'pane' && tab.panes.has(this.titleEditState.id)))) {
                     this.finishTitleEdit(false);
                 }
                 for (const pid of tab.panes) {
-                    this.destroyBackendSession(pid);
+                    if (options.remoteSync !== false) this.destroyBackendSession(pid);
+                    this.forgetRemotePaneMapping(this.v3WorkspaceId, this.remotePaneIdForLocal(pid), pid);
                     this.terminals.get(pid)?.dispose();
                     this.splitTree.panes.delete(pid);
                     this.splitTree.forgetPane(pid);
@@ -6063,10 +7313,25 @@
                     this.activeTabId = next.id;
                     this.renderActiveTab();
                     this.focusPane(Array.from(next.panes)[0]);
+                } else if (!next && options.allowEmpty) {
+                    this.activeTabId = null;
+                    this.activePaneId = null;
+                    this.splitTree.root = null;
+                    document.getElementById('terminalArea').innerHTML = '';
+                    if (this.isReceiverMode()) {
+                        const firstPaneId = this.splitTree.init();
+                        this.createNewTab(firstPaneId, {
+                            title: '远程终端',
+                            paneTitle: '等待远程终端',
+                            placeholderRemote: true
+                        });
+                    }
                 }
                 this.renderTabs();
+                if (this.isReceiverMode()) this.syncVisibleV3ScreenSubscriptions();
                 this.updateStatusBar();
                 this.scheduleWorkspaceSave();
+                if (options.remoteSync !== false) this.syncActiveSessionsWithLayout();
             }
 
             renderTabs() {
@@ -6152,16 +7417,21 @@
                 this.scheduleWorkspaceSave();
             }
 
-            closePane(paneId) {
+            removePaneLocally(paneId, options = {}) {
                 const tab = this.findTabByPaneId(paneId);
                 if (!tab) return;
-                if (tab.panes.size <= 1) { this.closeTab(tab.id); return; }
+                if (tab.panes.size <= 1) { this.closeTab(tab.id, options); return; }
+                if (this.isReceiverMode() && options.remoteSync !== false) {
+                    this.destroyBackendSession(paneId);
+                    return;
+                }
                 if (this.titleEditState && this.titleEditState.kind === 'pane' && this.titleEditState.id === paneId) {
                     this.finishTitleEdit(false);
                 }
                 const closingActiveTab = this.activeTabId === tab.id;
                 this.splitTree.setRoot(tab.root);
-                this.destroyBackendSession(paneId);
+                if (options.remoteSync !== false) this.destroyBackendSession(paneId);
+                this.forgetRemotePaneMapping(this.v3WorkspaceId, this.remotePaneIdForLocal(paneId), paneId);
                 this.splitTree.closePane(paneId);
                 this.terminals.get(paneId)?.dispose();
                 this.terminals.delete(paneId);
@@ -6178,13 +7448,20 @@
                 const remaining = tab ? Array.from(tab.panes) : [];
                 if (closingActiveTab) {
                     if (remaining.length > 0) this.focusPane(remaining[0]);
+                    if (this.isReceiverMode()) this.syncVisibleV3ScreenSubscriptions();
                 } else {
                     this.renderTabs();
                     this.renderActiveTab();
+                    if (this.isReceiverMode()) this.syncVisibleV3ScreenSubscriptions();
                     this.updateStatusBar();
                     if (this.aiPanelOpen) this.updateAiContextPreview();
                     this.scheduleWorkspaceSave();
                 }
+                if (options.remoteSync !== false) this.syncActiveSessionsWithLayout();
+            }
+
+            closePane(paneId) {
+                this.removePaneLocally(paneId, { remoteSync: true });
             }
 
             closeCurrentPane() {
@@ -6254,9 +7531,14 @@
                 document.getElementById('contextMenu').classList.remove('visible');
             }
 
-            splitPane(direction) {
+            splitPane(direction, options = {}) {
                 if (this.isReceiverMode()) {
-                    this.requestRemoteTerminalCreate('远程终端');
+                    const sourcePaneId = this.splitMenuTarget || this.activePaneId;
+                    this.requestRemoteTerminalCreate('远程终端', this.buildRemoteCreateLayout('split_pane', {
+                        sourcePaneId,
+                        direction,
+                        title: '远程终端'
+                    }));
                     document.getElementById('splitMenu').classList.remove('visible');
                     this.splitMenuTarget = null;
                     this.contextMenuTarget = null;
@@ -6303,6 +7585,7 @@
                     });
                     this.showToast('已' + (direction === 'right' || direction === 'left' ? '左右' : '上下') + '分割', 'success');
                     this.scheduleWorkspaceSave();
+                    if (options.remoteSync !== false) this.syncActiveSessionsWithLayout();
                 }
                 document.getElementById('splitMenu').classList.remove('visible');
                 this.splitMenuTarget = null;
@@ -6313,6 +7596,13 @@
                 const tab = this.tabs.get(this.activeTabId);
                 if (!tab) return;
                 const keepPaneId = tab.panes.has(this.activePaneId) ? this.activePaneId : Array.from(tab.panes)[0];
+                if (this.isReceiverMode()) {
+                    for (const paneId of Array.from(tab.panes)) {
+                        if (paneId !== keepPaneId) this.destroyBackendSession(paneId);
+                    }
+                    document.getElementById('contextMenu')?.classList.remove('visible');
+                    return;
+                }
                 const keepNode = this.splitTree.getNode(keepPaneId);
                 if (!keepNode) return;
                 for (const paneId of Array.from(tab.panes)) {
@@ -6337,6 +7627,7 @@
                 this.updateStatusBar();
                 this.showToast('已取消分割', 'success');
                 this.scheduleWorkspaceSave();
+                this.syncActiveSessionsWithLayout();
             }
 
             showContextMenu(event, paneId) {
@@ -6591,6 +7882,7 @@
                 this.connectionPending = false;
                 try { await invoke('disconnect_server', {}); } catch (e) { console.warn('Disconnect error:', e); }
                 this.serverConnected = false;
+                this.connectedPeers = [];
                 if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
                 this.reconnectAttempts = 0;
                 this.updateConnectionStatus('local');
@@ -6656,6 +7948,50 @@
                 }
                 el.setAttribute('aria-label', el.title);
                 this.updateChrome();
+            }
+
+            handlePeerState(payload) {
+                const peers = Array.isArray(payload?.peers) ? payload.peers : [];
+                this.connectedPeers = peers.map((peer) => ({
+                    id: String(peer?.id || ''),
+                    name: String(peer?.name || peer?.id || '').trim(),
+                    type: String(peer?.type || ''),
+                    online: !!peer?.online
+                })).filter((peer) => peer.id || peer.name);
+                this.renderPeerStatus();
+                this.updateClientModeVisibility();
+            }
+
+            renderPeerStatus() {
+                const el = document.getElementById('peerStatus');
+                if (!el) return;
+                const onlinePeers = this.connectedPeers.filter((peer) => peer.online);
+                const labelFor = (peer) => peer.name || peer.id || '未命名设备';
+                const names = onlinePeers.map(labelFor);
+
+                let text = '';
+                let title = '';
+                if (this.isReceiverMode()) {
+                    const pairedName = this.settings.get('pairedDesktopName') || this.settings.get('pairedDesktopId');
+                    const activeName = names[0] || pairedName || '';
+                    text = activeName ? '发送端: ' + activeName : '未绑定发送端';
+                    if (activeName && onlinePeers.length === 0) text += ' (离线)';
+                    title = activeName
+                        ? '当前绑定发送端: ' + activeName + (onlinePeers.length > 0 ? '，在线' : '，未在线')
+                        : '设置中绑定发送端后会显示在这里';
+                } else {
+                    text = names.length > 0
+                        ? '接收端: ' + names.slice(0, 2).join(', ') + (names.length > 2 ? ' +' + (names.length - 2) : '')
+                        : '无在线接收端';
+                    const pairedCount = this.connectedPeers.length;
+                    title = names.length > 0
+                        ? '在线接收端: ' + names.join(', ')
+                        : (pairedCount > 0 ? '已配对接收端均不在线' : '暂无已连接接收端');
+                }
+
+                el.textContent = text;
+                el.title = title;
+                el.classList.toggle('has-online', onlinePeers.length > 0);
             }
 
             updateChrome() {
@@ -7020,8 +8356,9 @@
                 const pairedName = this.settings.get('pairedDesktopName') || this.settings.get('pairedDesktopId');
                 const receiverHint = document.getElementById('receiverPairingHint');
                 if (receiverHint) {
+                    const onlineSender = this.connectedPeers.find((peer) => peer.online && peer.type === 'desktop');
                     receiverHint.textContent = pairedName
-                        ? '已绑定发送端: ' + pairedName
+                        ? '已绑定发送端: ' + (onlineSender?.name || pairedName) + (onlineSender ? ' (在线)' : '')
                         : '绑定成功后，PC 接收端可以同时和手机一样订阅发送端终端。';
                 }
             }
@@ -7034,6 +8371,7 @@
                 document.getElementById('statusShell').textContent = this.isReceiverMode() ? 'remote' : this.settings.get('shell');
                 const activeTerminal = this.terminals.get(this.activePaneId);
                 document.getElementById('statusSize').textContent = activeTerminal ? activeTerminal.getSizeLabel() : '80x24';
+                this.renderPeerStatus();
                 this.updateChrome();
             }
 
