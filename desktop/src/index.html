@@ -5938,10 +5938,10 @@
                 if (activeTab) {
                     const activePaneText = String(sortedTabs.find((item) => this.remoteTabKeyForV3Tab(ownerId, item) === activeTab.remoteKey)?.active_pane_id || '');
                     const activePane = this.localPaneIdForRemote(this.v3WorkspaceId, activePaneText) ?? Number(activePaneText);
-                    const focusPaneId = Number.isFinite(activePane) && activeTab.panes.has(activePane)
-                        ? activePane
-                        : activeTab.panes.has(this.activePaneId)
-                            ? this.activePaneId
+                    const focusPaneId = activeTab.panes.has(this.activePaneId)
+                        ? this.activePaneId
+                        : Number.isFinite(activePane) && activeTab.panes.has(activePane)
+                            ? activePane
                             : Array.from(activeTab.panes)[0];
                     if (focusPaneId !== null && focusPaneId !== undefined) this.setActivePane(focusPaneId);
                 }
