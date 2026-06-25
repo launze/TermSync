@@ -24,8 +24,9 @@ type WorkspaceInfo struct {
 }
 
 type ScreenDelta struct {
-	Seq     int64
-	Payload map[string]interface{}
+	Seq      int64
+	Encoding string
+	Payload  map[string]interface{}
 }
 
 type ScreenStreamInfo struct {
@@ -34,6 +35,7 @@ type ScreenStreamInfo struct {
 	SessionID   string
 	OwnerID     string
 	Snapshot    map[string]interface{}
+	Snapshots   map[string]map[string]interface{}
 	Deltas      []ScreenDelta
 	Subscribers map[string]*ScreenSubscriberState
 	LastSeq     int64
@@ -48,12 +50,15 @@ type ScreenSubscriberState struct {
 	LastAckAt         time.Time
 	LastResyncAskAt   time.Time
 	SkippedDeltaCount int
+	Encoding          string
 }
 
 const (
 	outboundQueueSize             = 1024
 	screenDeltaBacklogLimit       = 256
 	screenDeltaAckLagLimit  int64 = 256
+	screenEncodingVT              = "base64+vt"
+	screenEncodingCells           = "base64+cells-json"
 )
 
 type deviceSender struct {
@@ -61,6 +66,13 @@ type deviceSender struct {
 	queue     chan []byte
 	done      chan struct{}
 	closeOnce sync.Once
+}
+
+type inboundTrafficStats struct {
+	windowStart time.Time
+	bytes       int64
+	messages    int64
+	byType      map[string]int64
 }
 
 func newDeviceSender(conn *websocket.Conn) *deviceSender {
@@ -100,6 +112,8 @@ type SessionManager struct {
 	recentInputs map[string]time.Time
 
 	recentMessageIDs map[string]time.Time
+
+	inboundStats map[string]*inboundTrafficStats
 }
 
 // NewSessionManager creates a new SessionManager.
@@ -117,6 +131,7 @@ func NewSessionManager(store *store.Store) *SessionManager {
 		paneWorkspace:     make(map[string]string),
 		recentInputs:      make(map[string]time.Time),
 		recentMessageIDs:  make(map[string]time.Time),
+		inboundStats:      make(map[string]*inboundTrafficStats),
 	}
 }
 
@@ -245,6 +260,8 @@ func (sm *SessionManager) HandleMessage(deviceID string, msgData []byte) error {
 		return err
 	}
 
+	sm.recordInboundTraffic(deviceID, msg.Type, len(msgData))
+
 	if msg.V != 3 {
 		sm.sendError(deviceID, "unsupported_protocol", "TermSync server now accepts protocol v3 messages only")
 		return nil
@@ -257,12 +274,12 @@ func (sm *SessionManager) HandleMessage(deviceID string, msgData []byte) error {
 
 	msgType := models.MsgType(msg.Type)
 
-	// Validate timestamp (reject messages older than 60s)
+	// Device clocks can drift or jump after sleep/resume. Treat timestamp as
+	// diagnostic metadata instead of a user-visible protocol error.
 	if msg.Timestamp > 0 {
 		age := time.Now().Unix() - msg.Timestamp
-		if age > 60 || age < -10 {
-			sm.sendError(deviceID, "bad_timestamp", fmt.Sprintf("Message timestamp too old or in future: %d", msg.Timestamp))
-			return nil
+		if age > 24*60*60 || age < -5*60 {
+			log.Printf("[msg] suspicious timestamp device=%s type=%s timestamp=%d age=%ds", deviceID, msg.Type, msg.Timestamp, age)
 		}
 	}
 
@@ -311,6 +328,50 @@ func (sm *SessionManager) HandleMessage(deviceID string, msgData []byte) error {
 		sm.sendError(deviceID, "unknown_type", fmt.Sprintf("Unknown message type: %s", msg.Type))
 		return nil
 	}
+}
+
+func (sm *SessionManager) recordInboundTraffic(deviceID, msgType string, byteCount int) {
+	if deviceID == "" || byteCount <= 0 {
+		return
+	}
+	if msgType == "" {
+		msgType = "unknown"
+	}
+
+	now := time.Now()
+	sm.mu.Lock()
+	stats := sm.inboundStats[deviceID]
+	if stats == nil {
+		stats = &inboundTrafficStats{
+			windowStart: now,
+			byType:      make(map[string]int64),
+		}
+		sm.inboundStats[deviceID] = stats
+	}
+	if now.Sub(stats.windowStart) >= 5*time.Second {
+		elapsed := now.Sub(stats.windowStart).Seconds()
+		bytes := stats.bytes
+		messages := stats.messages
+		byType := make(map[string]int64, len(stats.byType))
+		for key, value := range stats.byType {
+			byType[key] = value
+		}
+		stats.windowStart = now
+		stats.bytes = int64(byteCount)
+		stats.messages = 1
+		stats.byType = make(map[string]int64)
+		stats.byType[msgType] = int64(byteCount)
+		sm.mu.Unlock()
+
+		if elapsed > 0 && bytes > 0 {
+			log.Printf("[traffic:in] device=%s app_bytes=%d app_bps=%.0f messages=%d by_type=%v", deviceID, bytes, float64(bytes)/elapsed, messages, byType)
+		}
+		return
+	}
+	stats.bytes += int64(byteCount)
+	stats.messages += 1
+	stats.byType[msgType] += int64(byteCount)
+	sm.mu.Unlock()
 }
 
 // ─── Session lifecycle ────────────────────────────────────────────────────
@@ -574,6 +635,7 @@ func (sm *SessionManager) handleScreenSubscribe(deviceID string, msg models.Mess
 		sm.sendError(deviceID, "missing_pane_id", "screen.subscribe requires pane_id")
 		return nil
 	}
+	encoding := normalizeScreenEncoding(strField(msg.Payload, "encoding", strField(msg.Payload, "preferred_encoding", "")))
 
 	sm.mu.RLock()
 	stream := sm.paneStreams[paneID]
@@ -612,8 +674,9 @@ func (sm *SessionManager) handleScreenSubscribe(deviceID string, msg models.Mess
 	}
 	stream.Subscribers[deviceID] = &ScreenSubscriberState{
 		SubscribedAt: time.Now(),
+		Encoding:     encoding,
 	}
-	snapshot := clonePayload(stream.Snapshot)
+	snapshot := clonePayload(screenSnapshotForEncoding(stream, encoding))
 	lastSeq := stream.LastSeq
 	sm.mu.Unlock()
 
@@ -628,7 +691,8 @@ func (sm *SessionManager) handleScreenSubscribe(deviceID string, msg models.Mess
 			Timestamp:   time.Now().Unix(),
 			Payload:     snapshot,
 		})
-	} else {
+	}
+	if stream.OwnerID != "" && stream.OwnerID != deviceID {
 		sm.sendToDevice(stream.OwnerID, models.Message{
 			Type:        string(models.MsgScreenResyncRequest),
 			V:           3,
@@ -640,6 +704,7 @@ func (sm *SessionManager) handleScreenSubscribe(deviceID string, msg models.Mess
 			Payload: map[string]interface{}{
 				"requested_by": deviceID,
 				"last_seq":     lastSeq,
+				"encoding":     encoding,
 			},
 		})
 	}
@@ -703,10 +768,17 @@ func (sm *SessionManager) handleScreenSnapshot(deviceID string, msg models.Messa
 	stream.OwnerID = deviceID
 	stream.WorkspaceID = workspaceID
 	stream.SessionID = msg.SessionID
-	stream.Snapshot = clonePayload(msg.Payload)
+	encoding := normalizeScreenEncoding(strField(msg.Payload, "encoding", ""))
+	if stream.Snapshots == nil {
+		stream.Snapshots = map[string]map[string]interface{}{}
+	}
+	stream.Snapshots[encoding] = clonePayload(msg.Payload)
+	if encoding == screenEncodingVT {
+		stream.Snapshot = clonePayload(msg.Payload)
+	}
 	stream.LastSeq = int64Field(msg.Payload, "snapshot_seq", stream.LastSeq)
 	stream.UpdatedAt = time.Now()
-	subscribers := screenSubscribersExcept(stream.Subscribers, deviceID)
+	subscribers := screenSubscribersExceptEncoding(stream.Subscribers, deviceID, encoding)
 	sm.mu.Unlock()
 
 	msg.V = 3
@@ -760,15 +832,16 @@ func (sm *SessionManager) handleScreenDelta(deviceID string, msg models.Message)
 	stream.OwnerID = deviceID
 	stream.WorkspaceID = workspaceID
 	stream.SessionID = msg.SessionID
+	encoding := normalizeScreenEncoding(strField(msg.Payload, "encoding", ""))
 	if seq > stream.LastSeq {
 		stream.LastSeq = seq
 	}
-	stream.Deltas = append(stream.Deltas, ScreenDelta{Seq: seq, Payload: clonePayload(msg.Payload)})
+	stream.Deltas = append(stream.Deltas, ScreenDelta{Seq: seq, Encoding: encoding, Payload: clonePayload(msg.Payload)})
 	if len(stream.Deltas) > 512 {
 		stream.Deltas = stream.Deltas[len(stream.Deltas)-512:]
 	}
 	stream.UpdatedAt = time.Now()
-	subscribers := sm.screenSubscribersForDeltaLocked(stream, deviceID, seq)
+	subscribers := sm.screenSubscribersForDeltaLocked(stream, deviceID, seq, encoding)
 	sm.mu.Unlock()
 
 	msg.V = 3
@@ -841,8 +914,15 @@ func (sm *SessionManager) handleScreenResyncRequest(deviceID string, msg models.
 	if paneID == "" {
 		paneID = strField(msg.Payload, "pane_id", "")
 	}
+	encoding := normalizeScreenEncoding(strField(msg.Payload, "encoding", ""))
 	sm.mu.RLock()
 	stream := sm.paneStreams[paneID]
+	if stream != nil {
+		if state := stream.Subscribers[deviceID]; state != nil && state.Encoding != "" {
+			encoding = state.Encoding
+		}
+	}
+	snapshot := clonePayload(screenSnapshotForEncoding(stream, encoding))
 	sm.mu.RUnlock()
 	if stream == nil {
 		sm.sendError(deviceID, "screen_not_found", "Screen stream not found")
@@ -852,7 +932,7 @@ func (sm *SessionManager) handleScreenResyncRequest(deviceID string, msg models.
 		sm.sendError(deviceID, "permission_denied", err.Error())
 		return nil
 	}
-	if stream.Snapshot != nil {
+	if snapshot != nil {
 		sm.markScreenSnapshotSent(paneID, deviceID)
 		sm.sendToDevice(deviceID, models.Message{
 			Type:        string(models.MsgScreenSnapshot),
@@ -862,9 +942,8 @@ func (sm *SessionManager) handleScreenResyncRequest(deviceID string, msg models.
 			PaneID:      stream.PaneID,
 			SessionID:   stream.SessionID,
 			Timestamp:   time.Now().Unix(),
-			Payload:     clonePayload(stream.Snapshot),
+			Payload:     snapshot,
 		})
-		return nil
 	}
 	if deviceID != stream.OwnerID {
 		msg.V = 3
@@ -875,6 +954,7 @@ func (sm *SessionManager) handleScreenResyncRequest(deviceID string, msg models.
 			msg.Payload = map[string]interface{}{}
 		}
 		msg.Payload["requested_by"] = deviceID
+		msg.Payload["encoding"] = encoding
 		sm.sendToDevice(stream.OwnerID, msg)
 	}
 	return nil
@@ -901,7 +981,8 @@ func (sm *SessionManager) requestResyncForLaggingSubscribers(paneID, ownerID str
 			continue
 		}
 		state.LastResyncAskAt = now
-		if stream.Snapshot != nil {
+		encoding := normalizeScreenEncoding(state.Encoding)
+		if snapshot := screenSnapshotForEncoding(stream, encoding); snapshot != nil {
 			requests = append(requests, request{
 				deviceID: deviceID,
 				msg: models.Message{
@@ -912,7 +993,7 @@ func (sm *SessionManager) requestResyncForLaggingSubscribers(paneID, ownerID str
 					PaneID:      stream.PaneID,
 					SessionID:   stream.SessionID,
 					Timestamp:   now.Unix(),
-					Payload:     clonePayload(stream.Snapshot),
+					Payload:     clonePayload(snapshot),
 				},
 			})
 			continue
@@ -930,6 +1011,7 @@ func (sm *SessionManager) requestResyncForLaggingSubscribers(paneID, ownerID str
 				Payload: map[string]interface{}{
 					"requested_by": deviceID,
 					"last_seq":     state.LastAckSeq,
+					"encoding":     encoding,
 				},
 			},
 		})
@@ -966,6 +1048,7 @@ func (sm *SessionManager) handleScreenClear(deviceID string, msg models.Message)
 		return nil
 	}
 	stream.Snapshot = nil
+	stream.Snapshots = nil
 	stream.Deltas = nil
 	stream.LastSeq = 0
 	subscribers := screenSubscribersExcept(stream.Subscribers, deviceID)
@@ -1461,10 +1544,25 @@ func screenSubscribersExcept(values map[string]*ScreenSubscriberState, exclude s
 	return result
 }
 
-func (sm *SessionManager) screenSubscribersForDeltaLocked(stream *ScreenStreamInfo, exclude string, seq int64) []string {
+func screenSubscribersExceptEncoding(values map[string]*ScreenSubscriberState, exclude, encoding string) []string {
+	encoding = normalizeScreenEncoding(encoding)
+	result := make([]string, 0, len(values))
+	for key, state := range values {
+		if key == exclude {
+			continue
+		}
+		if normalizeScreenEncoding(stateEncoding(state)) == encoding {
+			result = append(result, key)
+		}
+	}
+	return result
+}
+
+func (sm *SessionManager) screenSubscribersForDeltaLocked(stream *ScreenStreamInfo, exclude string, seq int64, encoding string) []string {
 	if stream == nil {
 		return nil
 	}
+	encoding = normalizeScreenEncoding(encoding)
 	result := make([]string, 0, len(stream.Subscribers))
 	for key, state := range stream.Subscribers {
 		if key == exclude {
@@ -1473,6 +1571,9 @@ func (sm *SessionManager) screenSubscribersForDeltaLocked(stream *ScreenStreamIn
 		if state == nil {
 			state = &ScreenSubscriberState{SubscribedAt: time.Now()}
 			stream.Subscribers[key] = state
+		}
+		if normalizeScreenEncoding(state.Encoding) != encoding {
+			continue
 		}
 		if state.NeedsResync {
 			continue
@@ -1493,6 +1594,38 @@ func (sm *SessionManager) screenSubscribersForDeltaLocked(stream *ScreenStreamIn
 		result = append(result, key)
 	}
 	return result
+}
+
+func normalizeScreenEncoding(encoding string) string {
+	switch encoding {
+	case screenEncodingCells, "cells", "cells-json":
+		return screenEncodingCells
+	default:
+		return screenEncodingVT
+	}
+}
+
+func stateEncoding(state *ScreenSubscriberState) string {
+	if state == nil {
+		return ""
+	}
+	return state.Encoding
+}
+
+func screenSnapshotForEncoding(stream *ScreenStreamInfo, encoding string) map[string]interface{} {
+	if stream == nil {
+		return nil
+	}
+	encoding = normalizeScreenEncoding(encoding)
+	if stream.Snapshots != nil {
+		if snapshot := stream.Snapshots[encoding]; snapshot != nil {
+			return snapshot
+		}
+	}
+	if encoding == screenEncodingVT {
+		return stream.Snapshot
+	}
+	return nil
 }
 
 func (sm *SessionManager) deviceQueueBacklogLocked(deviceID string) int {

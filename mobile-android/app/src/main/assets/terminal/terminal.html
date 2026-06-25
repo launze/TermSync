@@ -203,6 +203,38 @@
       -webkit-touch-callout: default;
     }
 
+    #fallback.cells-frame {
+      padding: 0;
+      white-space: pre;
+      word-break: normal;
+      overflow-wrap: normal;
+      line-height: 1.08;
+    }
+
+    .cell-line {
+      display: block;
+      min-height: 1.08em;
+    }
+
+    .cell-cursor {
+      border-left: 1.5px solid #4ec9b0;
+      margin-left: -1.5px;
+    }
+
+    .cells-content {
+      display: block;
+      box-sizing: border-box;
+      padding: 4px 6px;
+      transform-origin: top left;
+      width: max-content;
+    }
+
+    .cells-spacer {
+      display: block;
+      width: 1px;
+      pointer-events: none;
+    }
+
     .xterm {
       height: 100%;
       padding: 8px;
@@ -278,7 +310,7 @@
     var INITIAL_RENDER_MAX_LINES = 3000;
     var DEFAULT_FONT_SIZE = 13;
     var LAYOUT_REFIT_DELAYS_MS = [0, 80, 240, 600];
-    var renderMode = "mobile-fit";
+    var renderMode = "desktop-mirror";
     var fontScale = 1;
     var targetDesktopCols = 80;
     var targetDesktopRows = 24;
@@ -292,12 +324,43 @@
     var ensureLayoutReason = "";
     var lastReportedAtBottom = null;
     var tuiDetectedReported = false;
+    var lastCellsFrame = null;
+    var cellsRefitPending = false;
+    var cellsVirtualState = null;
+    var cellsVirtualScrollTimer = null;
+    var CELLS_MAX_RENDER_LINES = 720;
+    var CELLS_RENDER_MARGIN_LINES = 120;
+    var incomingPayloadChunks = {};
 
     function isReaderMode() {
       return renderMode !== "desktop-mirror";
     }
 
     function updateRenderSurface() {
+      if (fallbackEl && fallbackEl.classList.contains("cells-frame")) {
+        if (readerEl) {
+          readerEl.style.display = "none";
+          readerEl.style.pointerEvents = "none";
+        }
+        if (terminalHost) {
+          terminalHost.style.visibility = "hidden";
+          terminalHost.style.pointerEvents = "none";
+        }
+        fallbackEl.style.display = "block";
+        fallbackEl.style.pointerEvents = "auto";
+        bindViewportTracking();
+        if (lastCellsFrame && !cellsRefitPending) {
+          cellsRefitPending = true;
+          requestAnimationFrame(function() {
+            cellsRefitPending = false;
+            if (fallbackEl && fallbackEl.classList.contains("cells-frame") && lastCellsFrame) {
+              renderCellsFrame(lastCellsFrame);
+            }
+          });
+        }
+        reportScrollAtBottom(true);
+        return;
+      }
       var readerVisible = isReaderMode();
       applyReaderFont();
       if (readerEl) {
@@ -540,6 +603,230 @@
         .replace(/"/g, "&quot;");
     }
 
+    var cellPalette = [
+      "#1e1e1e", "#f44747", "#4ec9b0", "#cca700",
+      "#0e639c", "#c586c0", "#4fc1ff", "#d4d4d4",
+      "#808080", "#ff6b68", "#6ad7be", "#dcdcaa",
+      "#569cd6", "#d670d6", "#9cdcfe", "#ffffff"
+    ];
+
+    function cssColorFromCellToken(token) {
+      if (!token) return "";
+      if (token[0] === "#") return token;
+      if (token[0] === "p") {
+        var index = parseInt(token.slice(1), 10);
+        if (!isNaN(index) && cellPalette[index]) return cellPalette[index];
+      }
+      return "";
+    }
+
+    function styleFromCellAttrs(attrs) {
+      var style = [];
+      String(attrs || "").split(";").forEach(function(part) {
+        if (!part) return;
+        if (part === "b") style.push("font-weight:600");
+        else if (part === "i") style.push("font-style:italic");
+        else if (part === "u") style.push("text-decoration:underline");
+        else if (part === "r") {
+          style.push("color:#1e1e1e");
+          style.push("background-color:#cccccc");
+        }
+        else if (part.indexOf("f") === 0) {
+          var fg = cssColorFromCellToken(part.slice(1));
+          if (fg) style.push("color:" + fg);
+        } else if (part.indexOf("g") === 0) {
+          var bg = cssColorFromCellToken(part.slice(1));
+          if (bg) style.push("background-color:" + bg);
+        }
+      });
+      return style.join(";");
+    }
+
+    function computeCellsFontSize(frame, lineHeight) {
+      var cols = Math.max(1, Number(frame.cols) || targetDesktopCols || 80);
+      var rows = Math.max(1, Number(frame.viewportRows || frame.rows) || targetDesktopRows || 24);
+      var paddingX = 12;
+      var paddingY = 8;
+      var width = Math.max(1, fallbackEl ? fallbackEl.clientWidth - paddingX : window.innerWidth - paddingX);
+      var height = Math.max(1, fallbackEl ? fallbackEl.clientHeight - paddingY : window.innerHeight - paddingY);
+      var charWidthRatio = 0.62;
+      var byWidth = width / (cols * charWidthRatio);
+      var byHeight = height / (rows * lineHeight);
+      var fitted = Math.min(byWidth, byHeight);
+      var preferred = Math.max(8, Math.min(24, Number(frame.font && frame.font.size) || DEFAULT_FONT_SIZE)) * fontScale;
+      if (fontScale > 1.001) return Math.max(5, Math.min(28, preferred));
+      return Math.max(5, Math.min(preferred, fitted));
+    }
+
+    function renderCellLineHtml(line, rowIndex, cursor) {
+      var col = 0;
+      var spans = Array.isArray(line) ? line : [];
+      var cursorX = Number(cursor && cursor.x);
+      var cursorY = Number(cursor && cursor.y);
+      var cursorVisible = !!(cursor && cursor.visible);
+      var lineHtml = spans.map(function(span) {
+        var text = String(span && span.text ? span.text : "");
+        var style = styleFromCellAttrs(span && span.attrs ? span.attrs : "");
+        var styleAttr = style ? " style=\"" + style + "\"" : "";
+        if (cursorVisible && rowIndex === cursorY && cursorX >= col && cursorX < col + text.length) {
+          var offset = cursorX - col;
+          col += text.length;
+          return "<span" + styleAttr + ">" +
+            escapeHtml(text.slice(0, offset)) +
+            "<span class=\"cell-cursor\">" + escapeHtml(text.slice(offset, offset + 1) || " ") + "</span>" +
+            escapeHtml(text.slice(offset + 1)) +
+            "</span>";
+        }
+        col += text.length;
+        return "<span" + styleAttr + ">" + escapeHtml(text) + "</span>";
+      }).join("");
+      return "<span class=\"cell-line\">" + lineHtml + "</span>";
+    }
+
+    function renderCellsVirtualWindow(targetTop, force) {
+      if (!fallbackEl || !cellsVirtualState || !lastCellsFrame) return;
+      var frame = lastCellsFrame;
+      var lines = Array.isArray(frame.lines) ? frame.lines : [];
+      var total = lines.length;
+      var linePx = Math.max(1, cellsVirtualState.linePx || 14);
+      var viewportLines = Math.max(1, Math.ceil((fallbackEl.clientHeight || window.innerHeight || 640) / linePx));
+      var desired = Math.min(total, CELLS_MAX_RENDER_LINES, Math.max(viewportLines + CELLS_RENDER_MARGIN_LINES * 2, viewportLines + 240));
+      var scrollTop = typeof targetTop === "number" ? targetTop : (fallbackEl.scrollTop || 0);
+      var firstVisible = Math.max(0, Math.floor(scrollTop / linePx));
+      var start = Math.max(0, firstVisible - CELLS_RENDER_MARGIN_LINES);
+      if (start + desired > total) start = Math.max(0, total - desired);
+      var end = Math.min(total, start + desired);
+
+      if (!force && cellsVirtualState.start === start && cellsVirtualState.end === end) return;
+      cellsVirtualState.start = start;
+      cellsVirtualState.end = end;
+
+      var cursor = frame.cursor || {};
+      var topHeight = Math.round(start * linePx);
+      var bottomHeight = Math.round(Math.max(0, total - end) * linePx);
+      var html = [];
+      html.push("<span class=\"cells-content\" style=\"min-width:" + Math.max(1, Number(frame.cols) || targetDesktopCols || 80) + "ch\">");
+      if (topHeight > 0) html.push("<span class=\"cells-spacer\" style=\"height:" + topHeight + "px\"></span>");
+      for (var i = start; i < end; i += 1) {
+        html.push(renderCellLineHtml(lines[i], i, cursor));
+      }
+      if (bottomHeight > 0) html.push("<span class=\"cells-spacer\" style=\"height:" + bottomHeight + "px\"></span>");
+      html.push("</span>");
+      fallbackEl.innerHTML = html.join("");
+      if (typeof targetTop === "number") {
+        fallbackEl.scrollTop = Math.min(targetTop, Math.max(0, fallbackEl.scrollHeight - fallbackEl.clientHeight));
+      }
+    }
+
+    function scheduleCellsVirtualWindowUpdate() {
+      if (cellsVirtualScrollTimer !== null) return;
+      cellsVirtualScrollTimer = requestAnimationFrame(function() {
+        cellsVirtualScrollTimer = null;
+        renderCellsVirtualWindow(null, false);
+      });
+    }
+
+    function mergeCellsFrame(frame) {
+      if (!frame || !frame.partial || !lastCellsFrame || !Array.isArray(lastCellsFrame.lines)) return frame;
+      if (!Array.isArray(frame.lines)) return frame;
+      if (Number(frame.cols) !== Number(lastCellsFrame.cols)) return frame;
+      var previousBase = Number(lastCellsFrame.lineBase) || 0;
+      var incomingBase = Number(frame.lineBase) || 0;
+      var previousEnd = previousBase + lastCellsFrame.lines.length;
+      var incomingEnd = incomingBase + frame.lines.length;
+      if (incomingEnd <= previousBase || incomingBase > previousEnd) return frame;
+
+      var prefixCount = Math.max(0, Math.min(lastCellsFrame.lines.length, incomingBase - previousBase));
+      var mergedLines = lastCellsFrame.lines.slice(0, prefixCount).concat(frame.lines);
+      var limit = Math.max(1, Number(frame.historyLimit || lastCellsFrame.historyLimit) || 20000);
+      var nextBase = previousBase;
+      if (mergedLines.length > limit) {
+        var drop = mergedLines.length - limit;
+        mergedLines = mergedLines.slice(drop);
+        nextBase += drop;
+      }
+
+      var cursor = Object.assign({}, frame.cursor || {});
+      if (cursor && typeof cursor.y !== "undefined") {
+        cursor.y = Math.max(0, (Number(cursor.y) || 0) + incomingBase - nextBase);
+      }
+      return Object.assign({}, lastCellsFrame, frame, {
+        partial: false,
+        lineBase: nextBase,
+        totalRows: mergedLines.length,
+        lines: mergedLines,
+        cursor: cursor
+      });
+    }
+
+    function renderCellsFrame(frame) {
+      if (!fallbackEl) return "ERR:no_fallback";
+      if (!frame || !Array.isArray(frame.lines)) return "ERR:bad_frame";
+      frame = mergeCellsFrame(frame);
+      var wasCellsFrame = fallbackEl.classList.contains("cells-frame");
+      var previousTop = fallbackEl.scrollTop || 0;
+      var previousLeft = fallbackEl.scrollLeft || 0;
+      var previousAtBottom = isNearBottomEl(fallbackEl);
+      var shouldFollow = followOutput || previousAtBottom || !wasCellsFrame;
+      lastCellsFrame = frame;
+      var font = frame.font || {};
+      var lineHeight = Math.max(1, Math.min(1.5, Number(font.lineHeight) || 1.08));
+      var size = computeCellsFontSize(frame, lineHeight);
+      var fontFamily = font.family || "'Cascadia Code', 'Consolas', 'Courier New', monospace";
+
+      if (readerEl) {
+        readerEl.style.display = "none";
+        readerEl.style.pointerEvents = "none";
+      }
+      if (terminalHost) {
+        terminalHost.style.visibility = "hidden";
+        terminalHost.style.pointerEvents = "none";
+      }
+      fallbackEl.classList.add("cells-frame");
+      fallbackEl.style.display = "block";
+      fallbackEl.style.pointerEvents = "auto";
+      fallbackEl.style.fontFamily = fontFamily;
+      fallbackEl.style.fontSize = size + "px";
+      fallbackEl.style.lineHeight = String(lineHeight);
+
+      cellsVirtualState = {
+        linePx: size * lineHeight,
+        start: -1,
+        end: -1
+      };
+      bindViewportTracking();
+      var targetTop = shouldFollow
+        ? Number.MAX_SAFE_INTEGER
+        : Math.min(previousTop, Math.max(0, (frame.lines.length * cellsVirtualState.linePx) - fallbackEl.clientHeight));
+      renderCellsVirtualWindow(targetTop, true);
+      if (shouldFollow) {
+        fallbackEl.scrollTop = fallbackEl.scrollHeight;
+        fallbackEl.scrollLeft = 0;
+        followOutput = true;
+      } else {
+        fallbackEl.scrollLeft = Math.min(previousLeft, Math.max(0, fallbackEl.scrollWidth - fallbackEl.clientWidth));
+      }
+      reportScrollAtBottom(true);
+      return "OK:cells";
+    }
+
+    function leaveCellsFrameMode() {
+      if (!fallbackEl || !fallbackEl.classList.contains("cells-frame")) return;
+      lastCellsFrame = null;
+      cellsVirtualState = null;
+      if (cellsVirtualScrollTimer !== null) {
+        cancelAnimationFrame(cellsVirtualScrollTimer);
+        cellsVirtualScrollTimer = null;
+      }
+      fallbackEl.classList.remove("cells-frame");
+      fallbackEl.innerHTML = "";
+      fallbackEl.textContent = fallbackBuffer || "";
+      fallbackEl.style.fontSize = "";
+      fallbackEl.style.lineHeight = "";
+      fallbackEl.style.fontFamily = "";
+      updateRenderSurface();
+    }
+
     function attrPayload(text) {
       return escapeHtml(encodeURIComponent(String(text || "")));
     }
@@ -684,7 +971,7 @@
       if (!readerEl) return;
       var shouldFollow = typeof autoScroll === "boolean" ? autoScroll : isNearBottomEl(readerEl);
       var blocks = splitReaderBlocks(readerBuffer);
-      var header = "<div class=\"reader-head\"><strong>Codex 阅读流</strong><span>" + blocks.length + " 段输出</span></div>";
+      var header = "<div class=\"reader-head\"><strong>终端输出</strong><span>" + blocks.length + " 段输出</span></div>";
       var html = blocks.map(function(block) {
         var body = block.lines.join("\n");
         if (block.type === "diff") {
@@ -1025,11 +1312,15 @@
     }
 
     function viewport() {
+      if (fallbackEl && fallbackEl.classList.contains("cells-frame")) return fallbackEl;
       if (isReaderMode()) return readerEl;
       return boundViewport || document.querySelector(".xterm-viewport");
     }
 
     function handleViewportScroll() {
+      if (fallbackEl && fallbackEl.classList.contains("cells-frame")) {
+        scheduleCellsVirtualWindowUpdate();
+      }
       followOutput = isNearBottomEl(viewport());
       reportScrollAtBottom(false);
     }
@@ -1044,7 +1335,9 @@
     }
 
     function bindViewportTracking() {
-      var el = document.querySelector(".xterm-viewport");
+      var el = fallbackEl && fallbackEl.classList.contains("cells-frame")
+        ? fallbackEl
+        : document.querySelector(".xterm-viewport");
       if (!el || el === boundViewport) return;
       if (boundViewport) {
         boundViewport.removeEventListener("scroll", handleViewportScroll);
@@ -1086,11 +1379,6 @@
       var next = Number(value);
       if (!isFinite(next)) next = 1;
       return Math.max(0.7, Math.min(1.6, next));
-    }
-
-    function applyMobileFitFont() {
-      if (!term) return;
-      term.options.fontSize = Math.max(8, Math.min(24, DEFAULT_FONT_SIZE * fontScale));
     }
 
     function scheduleAppendMaintenance(reason) {
@@ -1185,6 +1473,7 @@
     }
 
     function writeTerminal(data, mode, shouldFollowOutput) {
+      leaveCellsFrameMode();
       maybeReportTuiDetected(data);
       rememberTerminalMirror(data, mode);
       if (isReaderMode()) {
@@ -1342,6 +1631,35 @@
       return window.termsyncAppend(data);
     };
 
+    window.termsyncRenderCellsBase64 = function(base64) {
+      var data = decodeBase64Utf8(base64);
+      if (!data) return "OK:empty";
+      try {
+        return renderCellsFrame(JSON.parse(data));
+      } catch (e) {
+        console.error("CELLS_RENDER_ERR: " + e.message);
+        return "ERR:cells_parse";
+      }
+    };
+
+    window.termsyncApplyPayloadChunk = function(id, mode, encoding, chunk, done) {
+      if (!id) return "ERR:chunk_id";
+      var key = String(id);
+      if (!incomingPayloadChunks[key]) incomingPayloadChunks[key] = [];
+      if (chunk) incomingPayloadChunks[key].push(String(chunk));
+      if (!done) return "OK:chunk";
+      var base64 = incomingPayloadChunks[key].join("");
+      delete incomingPayloadChunks[key];
+      if (!base64) return "OK:empty";
+      if (encoding === "base64+cells-json") {
+        return window.termsyncRenderCellsBase64(base64);
+      }
+      if (mode === "append") {
+        return window.termsyncAppendBase64(base64);
+      }
+      return window.termsyncRenderBase64(base64);
+    };
+
     window.termsyncFocus = function() {
       if (term) term.focus();
     };
@@ -1354,12 +1672,20 @@
       }
       followOutput = true;
       if (fallbackEl) {
-        fallbackEl.scrollTop = fallbackEl.scrollHeight;
+        if (fallbackEl.classList.contains("cells-frame")) {
+          fallbackEl.scrollTop = fallbackEl.scrollHeight;
+          fallbackEl.scrollLeft = 0;
+        } else {
+          fallbackEl.scrollTop = fallbackEl.scrollHeight;
+        }
       }
       reportScrollAtBottom(true);
     };
 
     window.termsyncEnsureLayout = function(reason) {
+      if (fallbackEl && fallbackEl.classList.contains("cells-frame") && lastCellsFrame) {
+        return renderCellsFrame(lastCellsFrame);
+      }
       if (renderMode === "desktop-mirror" && typeof window.termsyncMatchDesktop === "function") {
         return window.termsyncMatchDesktop(targetDesktopCols, targetDesktopRows);
       }
@@ -1375,6 +1701,9 @@
       targetDesktopCols = desktopCols > 0 ? desktopCols : targetDesktopCols;
       targetDesktopRows = desktopRows > 0 ? desktopRows : targetDesktopRows;
 
+      if (fallbackEl && fallbackEl.classList.contains("cells-frame") && lastCellsFrame) {
+        return renderCellsFrame(lastCellsFrame);
+      }
       updateRenderSurface();
       if (renderMode === "desktop-mirror") {
         var desktopResult = window.termsyncMatchDesktop(targetDesktopCols, targetDesktopRows);

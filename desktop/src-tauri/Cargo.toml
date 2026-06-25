@@ -1,6 +1,6 @@
 [package]
 name = "termsync-desktop"
-version = "0.1.9"
+version = "0.1.10"
 description = "TermSync Cross-Platform Terminal Client"
 authors = ["TermSync Team"]
 edition = "2021"

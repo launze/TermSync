@@ -33,6 +33,7 @@ pub struct ScreenDeltaPayload {
     pub session_id: String,
     pub seq: i64,
     pub prev_seq: i64,
+    pub encoding: Option<String>,
     pub data: String,
 }
 
@@ -42,6 +43,7 @@ pub struct ScreenSnapshotPayload {
     pub pane_id: String,
     pub session_id: String,
     pub snapshot_seq: i64,
+    pub encoding: Option<String>,
     pub data: String,
 }
 
@@ -316,6 +318,7 @@ pub async fn subscribe_workspace(
 pub async fn subscribe_screen(
     workspace_id: String,
     pane_id: String,
+    encoding: Option<String>,
     state: State<'_, WssClientState>,
 ) -> Result<String, String> {
     let workspace_id = workspace_id.trim();
@@ -323,7 +326,13 @@ pub async fn subscribe_screen(
     if workspace_id.is_empty() || pane_id.is_empty() {
         return Err("workspace_id and pane_id are required".to_string());
     }
-    state.subscribe_screen(workspace_id, pane_id).await?;
+    state
+        .subscribe_screen(
+            workspace_id,
+            pane_id,
+            encoding.as_deref().unwrap_or("base64+vt"),
+        )
+        .await?;
     Ok("Screen subscribed".to_string())
 }
 
@@ -354,6 +363,7 @@ pub async fn publish_screen_delta(
             payload.session_id.trim(),
             payload.seq,
             payload.prev_seq,
+            payload.encoding.as_deref().unwrap_or("base64+vt"),
             &payload.data,
         )
         .await?;
@@ -371,6 +381,7 @@ pub async fn publish_screen_snapshot(
             payload.pane_id.trim(),
             payload.session_id.trim(),
             payload.snapshot_seq,
+            payload.encoding.as_deref().unwrap_or("base64+vt"),
             &payload.data,
         )
         .await?;
@@ -382,6 +393,7 @@ pub async fn request_screen_resync(
     workspace_id: String,
     pane_id: String,
     last_seq: Option<i64>,
+    encoding: Option<String>,
     state: State<'_, WssClientState>,
 ) -> Result<String, String> {
     let workspace_id = workspace_id.trim();
@@ -390,7 +402,12 @@ pub async fn request_screen_resync(
         return Err("workspace_id and pane_id are required".to_string());
     }
     state
-        .send_screen_resync_request(workspace_id, pane_id, last_seq.unwrap_or(0))
+        .send_screen_resync_request(
+            workspace_id,
+            pane_id,
+            last_seq.unwrap_or(0),
+            encoding.as_deref().unwrap_or("base64+vt"),
+        )
         .await?;
     Ok("Screen resync requested".to_string())
 }

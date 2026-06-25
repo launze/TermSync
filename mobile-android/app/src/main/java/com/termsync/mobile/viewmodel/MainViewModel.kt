@@ -77,6 +77,7 @@ data class TerminalSession(
     val activity: String = "",
     val taskState: String = "",
     val preview: String = "",
+    val screenPreview: String = "",
     val lastActivityAt: Long = 0L,
     val tabId: String = "",
     val tabTitle: String = "",
@@ -98,7 +99,8 @@ data class TerminalSplitNode(
 data class TerminalDeltaBatch(
     val sessionId: String,
     val data: String,
-    val version: Long
+    val version: Long,
+    val encoding: String = "base64+vt"
 )
 
 data class AppUpdateUiState(
@@ -149,7 +151,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private data class PendingTerminalDelta(
         val sessionId: String,
         val data: String,
-        val version: Long
+        val version: Long,
+        val encoding: String = "base64+vt"
     )
 
     private data class V3ScreenSubscription(
@@ -165,6 +168,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _selectedSessionId = MutableStateFlow<String?>(null)
     private val _terminalOutput = MutableStateFlow<String>("")
     private val _terminalOutputVersion = MutableStateFlow(0L)
+    private val _terminalOutputEncoding = MutableStateFlow("base64+vt")
     // Raw v3 screen delta channel; UI batching keeps WebView updates bounded.
     private val _rawDeltaChannel = Channel<PendingTerminalDelta>(Channel.UNLIMITED)
     // Batched delta flow: merged every DELTA_BATCH_MS, consumed by WebView LaunchedEffect
@@ -185,7 +189,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _pairedDesktopId = MutableStateFlow(prefs.getString(KEY_PAIRED_DESKTOP_ID, "") ?: "")
     private val _pairedDesktopName = MutableStateFlow(prefs.getString(KEY_PAIRED_DESKTOP_NAME, "") ?: "")
     private val _isPaired = MutableStateFlow(_pairedDesktopId.value.isNotBlank())
+    private val _terminalFontScale = MutableStateFlow(
+        prefs.getFloat(KEY_TERMINAL_FONT_SCALE, 1.0f).coerceIn(0.7f, 1.6f)
+    )
     private val sessionOutputCache = loadSessionOutputCache().toMutableMap()
+    private val sessionCellsCache = mutableMapOf<String, String>()
     private val v3ScreenSeqByPane = mutableMapOf<String, Long>()
     private val v3ResyncRequestedAt = mutableMapOf<String, Long>()
     private val v3ScreenAckSeqByPane = mutableMapOf<String, Long>()
@@ -195,6 +203,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _commandLibrary = MutableStateFlow(buildCommandLibraryUiState(commandCatalog))
     private val _appUpdate = MutableStateFlow(AppUpdateUiState())
     private val sessionOutputVersion = mutableMapOf<String, Long>()
+    private val sessionCellsVersion = mutableMapOf<String, Long>()
     private val lastRequestedResizeBySession = mutableMapOf<String, Pair<Int, Int>>()
     private val lastResizeRequestAtBySession = mutableMapOf<String, Long>()
     private var reconnectJob: Job? = null
@@ -212,6 +221,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val KEY_DEVICE_NAME = "device_name"
         private const val KEY_PAIRED_DESKTOP_ID = "paired_desktop_id"
         private const val KEY_PAIRED_DESKTOP_NAME = "paired_desktop_name"
+        private const val KEY_TERMINAL_FONT_SCALE = "terminal_font_scale"
         private const val KEY_SESSION_OUTPUT_CACHE = "session_output_cache"
         private const val KEY_COMMAND_LIBRARY = "command_library"
         private const val DEFAULT_SERVER_URL = "wss://8.153.163.104:7373/ws"
@@ -257,6 +267,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val selectedSessionId: StateFlow<String?> = _selectedSessionId.asStateFlow()
     val terminalOutput: StateFlow<String> = _terminalOutput.asStateFlow()
     val terminalOutputVersion: StateFlow<Long> = _terminalOutputVersion.asStateFlow()
+    val terminalOutputEncoding: StateFlow<String> = _terminalOutputEncoding.asStateFlow()
     val terminalDelta: SharedFlow<TerminalDeltaBatch> = _terminalDelta
     val debugLog: StateFlow<List<String>> = _debugLog.asStateFlow()
     val statusMessage: StateFlow<String> = _statusMessage.asStateFlow()
@@ -268,6 +279,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val pairedDesktopId: StateFlow<String> = _pairedDesktopId.asStateFlow()
     val pairedDesktopName: StateFlow<String> = _pairedDesktopName.asStateFlow()
     val isPaired: StateFlow<Boolean> = _isPaired.asStateFlow()
+    val terminalFontScale: StateFlow<Float> = _terminalFontScale.asStateFlow()
     val commandLibrary: StateFlow<CommandLibraryUiState> = _commandLibrary.asStateFlow()
     val appUpdate: StateFlow<AppUpdateUiState> = _appUpdate.asStateFlow()
 
@@ -279,13 +291,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             while (isActive) {
                 val first = _rawDeltaChannel.receive()
-                val batchBySession = linkedMapOf<String, StringBuilder>()
-                val versionBySession = mutableMapOf<String, Long>()
+                val batchByKey = linkedMapOf<String, StringBuilder>()
+                val versionByKey = mutableMapOf<String, Long>()
+                val sessionByKey = mutableMapOf<String, String>()
+                val encodingByKey = mutableMapOf<String, String>()
 
                 fun append(delta: PendingTerminalDelta) {
-                    val builder = batchBySession.getOrPut(delta.sessionId) { StringBuilder() }
+                    val key = "${delta.sessionId}\n${delta.encoding}"
+                    val builder = batchByKey.getOrPut(key) { StringBuilder() }
+                    if (delta.encoding == "base64+cells-json") {
+                        builder.clear()
+                    }
                     builder.append(delta.data)
-                    versionBySession[delta.sessionId] = maxOf(versionBySession[delta.sessionId] ?: 0L, delta.version)
+                    versionByKey[key] = maxOf(versionByKey[key] ?: 0L, delta.version)
+                    sessionByKey[key] = delta.sessionId
+                    encodingByKey[key] = delta.encoding
                 }
 
                 // Block until at least one delta arrives
@@ -297,14 +317,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val more = _rawDeltaChannel.tryReceive().getOrNull() ?: break
                     append(more)
                 }
-                batchBySession.forEach { (sessionId, builder) ->
+                batchByKey.forEach { (key, builder) ->
                     val data = builder.toString()
                     if (data.isNotEmpty()) {
                         _terminalDelta.emit(
                             TerminalDeltaBatch(
-                                sessionId = sessionId,
+                                sessionId = sessionByKey[key].orEmpty(),
                                 data = data,
-                                version = versionBySession[sessionId] ?: 0L
+                                version = versionByKey[key] ?: 0L,
+                                encoding = encodingByKey[key] ?: "base64+vt"
                             )
                         )
                     }
@@ -394,6 +415,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     String(Base64.decode(encoded, Base64.DEFAULT), Charsets.UTF_8)
                 }.getOrDefault("")
                 if (data.isBlank()) return
+                val encoding = msg.payload?.optString("encoding").orEmpty().ifBlank { "base64+vt" }
+                if (encoding == "base64+cells-json") {
+                    val version = nextSessionOutputVersion(sessionId)
+                    sessionCellsCache[sessionId] = data
+                    sessionCellsVersion[sessionId] = version
+                    if (msg.type == "screen.snapshot") {
+                        val snapshotSeq = v3ScreenSeqByPane[seqKey] ?: 0L
+                        if (snapshotSeq > 0L) ackScreenThrottled(workspaceId, paneId, snapshotSeq)
+                    } else {
+                        val seq = v3ScreenSeqByPane[seqKey] ?: 0L
+                        if (seq > 0L) ackScreenThrottled(workspaceId, paneId, seq)
+                    }
+                    if (_selectedSessionId.value == sessionId) {
+                        _terminalOutput.value = data
+                        _terminalOutputVersion.value = version
+                        _terminalOutputEncoding.value = encoding
+                        _rawDeltaChannel.trySend(PendingTerminalDelta(sessionId, data, version, encoding))
+                        _replayLoading.value = false
+                        _terminalStreamStatus.value = "实时同步中"
+                    }
+                    return
+                }
                 if (msg.type == "screen.snapshot") {
                     sessionOutputCache[sessionId] = data
                     val snapshotSeq = v3ScreenSeqByPane[seqKey] ?: 0L
@@ -408,7 +451,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (_selectedSessionId.value == sessionId) {
                     _terminalOutput.value = sessionOutputCache[sessionId].orEmpty()
                     _terminalOutputVersion.value = version
-                    _rawDeltaChannel.trySend(PendingTerminalDelta(sessionId, data, version))
+                    _terminalOutputEncoding.value = encoding
+                    _rawDeltaChannel.trySend(PendingTerminalDelta(sessionId, data, version, encoding))
                     _replayLoading.value = false
                     _terminalStreamStatus.value = "实时同步中"
                 }
@@ -489,6 +533,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateDeviceName(value: String) {
         _deviceName.value = value
+    }
+
+    fun updateTerminalFontScale(value: Float) {
+        val normalized = value.coerceIn(0.7f, 1.6f)
+        _terminalFontScale.value = normalized
+        prefs.edit().putFloat(KEY_TERMINAL_FONT_SCALE, normalized).apply()
     }
 
     fun checkForAppUpdate(silent: Boolean = false) {
@@ -661,6 +711,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _selectedSessionId.value = null
         _terminalOutput.value = ""
         _terminalOutputVersion.value = 0L
+        _terminalOutputEncoding.value = "base64+vt"
         _replayLoading.value = false
         _terminalStreamStatus.value = "已断开连接"
         _statusMessage.value = "已断开连接"
@@ -672,7 +723,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         appInForeground = true
         val sessionId = _selectedSessionId.value ?: return
         _sessions.value.firstOrNull { it.sessionId == sessionId }?.let { session ->
-            syncVisibleScreenSubscriptions(session)
+            syncVisibleScreenSubscriptions(session, forceResync = true)
             if (_terminalStreamStatus.value == "已暂停实时屏幕同步") {
                 _terminalStreamStatus.value = "正在同步远程屏幕…"
             }
@@ -681,7 +732,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun onAppBackground() {
         appInForeground = false
-        unsubscribeSelectedScreen()
+        unsubscribeAllScreens()
         if (_selectedSessionId.value != null) {
             _terminalStreamStatus.value = "已暂停实时屏幕同步"
         }
@@ -690,10 +741,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun selectSession(sessionId: String?) {
         if (sessionId.isNullOrBlank()) {
             dbg("SELECT_SESSION -> null (deselect)")
-            unsubscribeSelectedScreen()
+            unsubscribeAllScreens()
             _selectedSessionId.value = null
             _terminalOutput.value = ""
             _terminalOutputVersion.value = 0L
+            _terminalOutputEncoding.value = "base64+vt"
             _replayLoading.value = false
             _terminalStreamStatus.value = "等待进入终端"
             replayTimeoutJob?.cancel()
@@ -707,13 +759,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val cachedLen = sessionOutputCache[sessionId].orEmpty().length
         dbg("SELECT_SESSION sid=${sessionId.take(8)} cache.len=$cachedLen")
         _selectedSessionId.value = sessionId
-        _terminalOutput.value = sessionOutputCache[sessionId].orEmpty()
+        val cachedOutput = sessionOutputCache[sessionId].orEmpty()
+        val cachedCells = sessionCellsCache[sessionId].orEmpty()
+        val hasCellsFrame = cachedCells.isNotBlank() && (sessionCellsVersion[sessionId] ?: 0L) > 0L
+        _terminalOutput.value = if (hasCellsFrame) cachedCells else cachedOutput
         _terminalOutputVersion.value = ensureSessionOutputVersion(sessionId)
+        _terminalOutputEncoding.value = if (hasCellsFrame) "base64+cells-json" else "base64+vt"
         dbg("SELECT_SESSION output.len=${_terminalOutput.value.length}")
-        _replayLoading.value = _terminalOutput.value.isBlank()
-        _terminalStreamStatus.value = if (_terminalOutput.value.isBlank()) "正在同步远程屏幕…" else "已加载本地缓存，正在同步实时输出"
+        _replayLoading.value = !hasCellsFrame
+        _terminalStreamStatus.value = if (hasCellsFrame) {
+            "实时同步中"
+        } else if (cachedOutput.isBlank()) {
+            "正在同步远程屏幕…"
+        } else {
+            "正在同步远程屏幕…"
+        }
         _sessions.value.firstOrNull { it.sessionId == sessionId }?.let { session ->
-            syncVisibleScreenSubscriptions(session)
+            syncVisibleScreenSubscriptions(session, forceResync = true)
         }
         
         // 添加超时处理，防止一直等待
@@ -722,7 +784,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             delay(5000) // 5秒超时
             if (_selectedSessionId.value == sessionId && _replayLoading.value) {
                 _replayLoading.value = false
-                _terminalStreamStatus.value = "回放请求超时，显示本地缓存"
+                _terminalStreamStatus.value = if ((sessionCellsVersion[sessionId] ?: 0L) > 0L) {
+                    "实时同步中"
+                } else {
+                    "仍在等待远程屏幕更新"
+                }
             }
         }
     }
@@ -732,7 +798,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _replayLoading.value = true
         _terminalStreamStatus.value = "正在重新同步远程屏幕…"
         _sessions.value.firstOrNull { it.sessionId == sessionId }?.let { session ->
-            syncVisibleScreenSubscriptions(session)
+            syncVisibleScreenSubscriptions(session, forceResync = true)
         }
         
         // 添加超时处理
@@ -741,7 +807,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             delay(5000) // 5秒超时
             if (_selectedSessionId.value == sessionId && _replayLoading.value) {
                 _replayLoading.value = false
-                _terminalStreamStatus.value = "刷新请求超时，显示当前内容"
+                _terminalStreamStatus.value = if ((sessionCellsVersion[sessionId] ?: 0L) > 0L) {
+                    "实时同步中"
+                } else {
+                    "仍在等待远程屏幕更新"
+                }
             }
         }
     }
@@ -862,6 +932,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (_selectedSessionId.value == sessionId) {
             _selectedSessionId.value = null
             _terminalOutput.value = ""
+            _terminalOutputEncoding.value = "base64+vt"
         }
     }
 
@@ -917,10 +988,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         val selected = sessions.firstOrNull { it.sessionId == selectedSessionId }
         if (selected == null) {
-            unsubscribeSelectedScreen(selectedSessionId)
+            unsubscribeAllScreens()
             _selectedSessionId.value = null
             _terminalOutput.value = ""
             _terminalOutputVersion.value = 0L
+            _terminalOutputEncoding.value = "base64+vt"
             _replayLoading.value = false
             _terminalStreamStatus.value = "当前终端已关闭"
             replayTimeoutJob?.cancel()
@@ -930,7 +1002,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         syncVisibleScreenSubscriptions(selected)
     }
 
-    private fun syncVisibleScreenSubscriptions(session: TerminalSession) {
+    private fun syncVisibleScreenSubscriptions(session: TerminalSession, forceResync: Boolean = false) {
         if (!appInForeground) return
         val visibleSessions = visibleSessionsForDetail(session)
         val desiredKeys = visibleSessions
@@ -948,6 +1020,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (!v3SubscribedScreens.containsKey(key)) {
                 v3SubscribedScreens[key] = subscription
                 wssClient.subscribeScreen(subscription.workspaceId, subscription.paneId)
+                requestScreenResyncThrottled(subscription.workspaceId, subscription.paneId, 0L)
+            } else if (forceResync) {
+                val lastSeq = v3ScreenSeqByPane[key] ?: 0L
+                requestScreenResyncThrottled(subscription.workspaceId, subscription.paneId, lastSeq)
             }
         }
     }
@@ -980,6 +1056,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
+        v3SubscribedScreens.values.forEach { subscription ->
+            wssClient.unsubscribeScreen(subscription.workspaceId, subscription.paneId)
+        }
+        v3SubscribedScreens.clear()
+    }
+
+    private fun unsubscribeAllScreens() {
         v3SubscribedScreens.values.forEach { subscription ->
             wssClient.unsubscribeScreen(subscription.workspaceId, subscription.paneId)
         }
@@ -1053,8 +1136,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val title = pane.optString("title", previous?.title ?: tabTitle)
                 val activity = pane.optString("activity", previous?.activity.orEmpty())
                 val preview = pane.optString("preview", previous?.preview.orEmpty())
+                val screenPreview = pane.optString("screen_preview", previous?.screenPreview.orEmpty())
                 val taskState = pane.optString("task_state", previous?.taskState.orEmpty())
-                val changed = activity != previous?.activity || preview != previous?.preview || taskState != previous?.taskState
+                val changed = activity != previous?.activity ||
+                    preview != previous?.preview ||
+                    screenPreview != previous?.screenPreview ||
+                    taskState != previous?.taskState
                 result.add(
                     TerminalSession(
                         sessionId = sessionId,
@@ -1067,6 +1154,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         activity = activity,
                         taskState = taskState,
                         preview = preview,
+                        screenPreview = screenPreview,
                         lastActivityAt = if (changed) now else previous?.lastActivityAt ?: 0L,
                         tabId = tabId,
                         tabTitle = tabTitle,
@@ -1229,6 +1317,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun clearSessionOutputCache() {
         sessionOutputCache.clear()
+        sessionCellsCache.clear()
         sessionOutputVersion.clear()
         prefs.edit().remove(KEY_SESSION_OUTPUT_CACHE).apply()
     }
@@ -1448,7 +1537,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun ensureSessionOutputVersion(sessionId: String): Long {
         val current = currentSessionOutputVersion(sessionId)
         if (current > 0L) return current
-        if (sessionOutputCache[sessionId].isNullOrEmpty()) return 0L
+        if (sessionOutputCache[sessionId].isNullOrEmpty() && sessionCellsCache[sessionId].isNullOrEmpty()) return 0L
         sessionOutputVersion[sessionId] = 1L
         return 1L
     }

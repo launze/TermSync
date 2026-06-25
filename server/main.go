@@ -262,6 +262,7 @@ func serveLatestRelease(downloadsDir, httpPort string) http.HandlerFunc {
 
 func writeLatestRelease(w http.ResponseWriter, r *http.Request, downloadsDir, httpPort, platform string) {
 	buildType := normalizeReleaseBuildType(r.URL.Query().Get("build_type"))
+	targetOS := normalizeReleaseOS(r.URL.Query().Get("os"))
 	items := listDownloads(downloadsDir, releaseDownloadBaseURL(r, httpPort, platform))
 	var latest *downloadItem
 	var latestVersion string
@@ -271,6 +272,9 @@ func writeLatestRelease(w http.ResponseWriter, r *http.Request, downloadsDir, ht
 			continue
 		}
 		if !matchesReleaseBuildType(item.Name, platform, buildType) {
+			continue
+		}
+		if !matchesReleaseOS(item.Name, platform, targetOS) {
 			continue
 		}
 		version := versionFromDownloadName(item.Name)
@@ -289,6 +293,7 @@ func writeLatestRelease(w http.ResponseWriter, r *http.Request, downloadsDir, ht
 			"available":  false,
 			"platform":   platform,
 			"build_type": buildType,
+			"os":         targetOS,
 		})
 		return
 	}
@@ -297,12 +302,26 @@ func writeLatestRelease(w http.ResponseWriter, r *http.Request, downloadsDir, ht
 		"available":    true,
 		"platform":     platform,
 		"build_type":   buildType,
+		"os":           targetOS,
 		"version_name": latestVersion,
 		"file_name":    latest.Name,
 		"download_url": latest.Path,
 		"size":         latest.Size,
 		"updated_at":   latest.UpdatedAt,
 	})
+}
+
+func normalizeReleaseOS(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "windows", "win32", "win":
+		return "windows"
+	case "darwin", "macos", "mac":
+		return "macos"
+	case "linux":
+		return "linux"
+	default:
+		return ""
+	}
 }
 
 func normalizeReleaseBuildType(value string) string {
@@ -335,6 +354,24 @@ func matchesReleasePlatform(name, platform string) bool {
 			strings.Contains(lower, "macos") || strings.Contains(lower, "linux")
 	default:
 		return false
+	}
+}
+
+func matchesReleaseOS(name, platform, targetOS string) bool {
+	if targetOS == "" || (platform != "desktop" && platform != "pc") {
+		return true
+	}
+	lower := strings.ToLower(name)
+	ext := strings.ToLower(filepath.Ext(name))
+	switch targetOS {
+	case "windows":
+		return ext == ".exe" || ext == ".msi" || strings.Contains(lower, "windows")
+	case "macos":
+		return ext == ".dmg" || strings.Contains(lower, "macos") || strings.Contains(lower, "darwin")
+	case "linux":
+		return ext == ".deb" || ext == ".appimage" || strings.Contains(lower, "linux")
+	default:
+		return true
 	}
 }
 

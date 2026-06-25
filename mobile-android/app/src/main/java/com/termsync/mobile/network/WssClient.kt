@@ -267,7 +267,10 @@ class WssClient {
     }
 
     fun subscribeScreen(workspaceId: String, paneId: String) {
-        sendMessage("screen.subscribe", workspaceId = workspaceId, paneId = paneId, payload = JSONObject().put("pane_id", paneId))
+        val payload = JSONObject()
+            .put("pane_id", paneId)
+            .put("encoding", "base64+cells-json")
+        sendMessage("screen.subscribe", workspaceId = workspaceId, paneId = paneId, payload = payload)
     }
 
     fun unsubscribeScreen(workspaceId: String, paneId: String) {
@@ -278,6 +281,7 @@ class WssClient {
         val payload = JSONObject().apply {
             put("pane_id", paneId)
             put("last_seq", lastSeq)
+            put("encoding", "base64+cells-json")
         }
         sendMessage("screen.resync_request", workspaceId = workspaceId, paneId = paneId, payload = payload)
     }

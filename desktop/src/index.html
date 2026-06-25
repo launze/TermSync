@@ -2421,6 +2421,7 @@
                     '<div class="terminal-canvas" id="output-' + paneId + '" tabindex="0"></div>' +
                 '</div>';
                 pane.addEventListener('click', () => {
+                    if (window.app?.isTitleEditing?.()) return;
                     window.app.setActivePane(paneId);
                     window.app.terminals.get(paneId)?.focus();
                 });
@@ -2497,6 +2498,9 @@
                 this.inputSequence = 0;
                 this.lastInputFingerprint = null;
                 this.lastInputAt = 0;
+                this.pendingFocusFrame = null;
+                this.cursorVisible = null;
+                this.remoteCellsFrame = null;
                 this.pendingWrites = [
                     this.remote
                         ? '\x1b[38;2;78;201;176mTermSync 远程终端已连接\x1b[0m\r\n'
@@ -2530,9 +2534,9 @@
                     : text + '\r\n';
                 this.writeRaw(chunk);
             }
-            appendChunk(text, isError) {
+            appendChunk(text, isError, onWritten) {
                 if (text === undefined || text === null || text === '') return;
-                this.writeRaw(isError ? '\x1b[38;2;244;71;71m' + text + '\x1b[0m' : text);
+                this.writeRaw(isError ? '\x1b[38;2;244;71;71m' + text + '\x1b[0m' : text, onWritten);
             }
             createTerminal(el) {
                 if (!XtermTerminal || !XtermFitAddon) {
@@ -2543,9 +2547,15 @@
                 this.term = new XtermTerminal({
                     allowTransparency: false,
                     cursorBlink: true,
+                    cursorStyle: 'bar',
                     fontSize: normalizeTerminalFontSize(window.app?.settings?.get('fontSize')),
                     fontFamily: TERMINAL_FONT_FAMILY,
-                    scrollback: 5000,
+                    fontWeight: 400,
+                    fontWeightBold: 600,
+                    lineHeight: 1.15,
+                    letterSpacing: 0,
+                    drawBoldTextInBrightColors: true,
+                    scrollback: 20000,
                     theme: {
                         background: '#1e1e1e',
                         foreground: '#cccccc',
@@ -2685,9 +2695,15 @@
                 };
                 return sequences[event.key] || '';
             }
-            writeRaw(text) {
-                if (this.term) this.term.write(text);
-                else this.pendingWrites.push(text);
+            writeRaw(text, onWritten) {
+                if (this.term) {
+                    this.term.write(text, () => {
+                        if (typeof onWritten === 'function') onWritten();
+                    });
+                } else {
+                    this.pendingWrites.push(text);
+                    if (typeof onWritten === 'function') onWritten();
+                }
             }
             flushPendingWrites() {
                 if (!this.term || this.pendingWrites.length === 0) return;
@@ -2697,11 +2713,15 @@
                 this.pendingWrites = [];
             }
             focus() {
+                if (window.app?.activePaneId !== this.paneId) return;
+                if (window.app?.isTitleEditing?.()) return;
                 this.term?.focus();
             }
             updateCursorVisibility(activePaneId = window.app?.activePaneId) {
                 if (!this.term) return;
                 const active = Number(activePaneId) === Number(this.paneId);
+                if (this.cursorVisible === active) return;
+                this.cursorVisible = active;
                 this.term.options.cursorBlink = active;
                 this.term.options.theme = {
                     ...(this.term.options.theme || {}),
@@ -2711,9 +2731,13 @@
                 this.term.refresh(0, Math.max(0, this.term.rows - 1));
             }
             focusSoon() {
-                this.focus();
-                setTimeout(() => this.focus(), 0);
-                requestAnimationFrame(() => this.focus());
+                if (window.app?.activePaneId !== this.paneId) return;
+                if (window.app?.isTitleEditing?.()) return;
+                if (this.pendingFocusFrame !== null) return;
+                this.pendingFocusFrame = requestAnimationFrame(() => {
+                    this.pendingFocusFrame = null;
+                    this.focus();
+                });
             }
             async copySelection() {
                 if (!this.term || !this.term.hasSelection()) return;
@@ -2833,6 +2857,202 @@
                     return text;
                 }
                 return '\x1b[2J\x1b[H';
+            }
+            serializeScreenCells(maxChars = 12000000, maxLines = 20000, options = {}) {
+                const term = this.term;
+                const buffer = term?.buffer?.active;
+                if (!term || !buffer) return null;
+                const cols = Number(term.cols) || 80;
+                const viewportRows = Number(term.rows) || 24;
+                const ybase = Number(buffer.baseY ?? buffer.ybase) || 0;
+                const bufferLength = Math.max(viewportRows, Number(buffer.length) || viewportRows);
+                const lineLimit = Math.max(viewportRows, Math.max(1, Number(maxLines) || 20000));
+                const startLine = Math.max(0, bufferLength - lineLimit);
+                const lineCount = Math.max(viewportRows, bufferLength - startLine);
+                const cursor = {
+                    x: Math.max(0, Number(buffer.cursorX) || 0),
+                    y: Math.max(0, (ybase + (Number(buffer.cursorY) || 0)) - startLine),
+                    visible: window.app?.activePaneId === this.paneId
+                };
+                const palette = {
+                    background: '#1e1e1e',
+                    foreground: '#cccccc',
+                    cursor: '#4ec9b0'
+                };
+                const lines = [];
+                const probeCell = typeof buffer.getNullCell === 'function' ? buffer.getNullCell() : null;
+                for (let row = 0; row < lineCount; row++) {
+                    const line = buffer.getLine(startLine + row);
+                    const spans = [];
+                    let current = null;
+                    for (let col = 0; col < cols; col++) {
+                        let chars = ' ';
+                        let width = 1;
+                        let attrs = '';
+                        if (line) {
+                            const cell = probeCell && typeof line.getCell === 'function'
+                                ? line.getCell(col, probeCell)
+                                : null;
+                            if (cell) {
+                                const rawChars = typeof cell.getChars === 'function' ? cell.getChars() : '';
+                                chars = rawChars || ' ';
+                                width = Math.max(1, Number(typeof cell.getWidth === 'function' ? cell.getWidth() : 1) || 1);
+                                const parts = [];
+                                if (typeof cell.isBold === 'function' && cell.isBold()) parts.push('b');
+                                if (typeof cell.isItalic === 'function' && cell.isItalic()) parts.push('i');
+                                if (typeof cell.isUnderline === 'function' && cell.isUnderline()) parts.push('u');
+                                if (typeof cell.isInverse === 'function' && cell.isInverse()) parts.push('r');
+                                if (typeof cell.isFgRGB === 'function' && cell.isFgRGB()) {
+                                    const fg = (cell.getFgColor?.() ?? cell.getFgColorMode?.() ?? '').toString(16);
+                                    parts.push('f#' + fg.padStart(6, '0').slice(-6));
+                                } else if (typeof cell.isFgPalette === 'function' && cell.isFgPalette()) {
+                                    parts.push('fp' + (cell.getFgColor?.() ?? 0));
+                                }
+                                if (typeof cell.isBgRGB === 'function' && cell.isBgRGB()) {
+                                    const bg = (cell.getBgColor?.() ?? cell.getBgColorMode?.() ?? '').toString(16);
+                                    parts.push('g#' + bg.padStart(6, '0').slice(-6));
+                                } else if (typeof cell.isBgPalette === 'function' && cell.isBgPalette()) {
+                                    parts.push('gp' + (cell.getBgColor?.() ?? 0));
+                                }
+                                attrs = parts.join(';');
+                            } else {
+                                chars = line.translateToString(false, col, col + 1) || ' ';
+                            }
+                        }
+                        if (!current || current.attrs !== attrs) {
+                            current = { attrs, text: '' };
+                            spans.push(current);
+                        }
+                        current.text += chars;
+                        if (width > 1) col += width - 1;
+                    }
+                    lines.push(spans);
+                }
+                const frame = {
+                    encoding: 'cells-json',
+                    version: 1,
+                    cols,
+                    rows: viewportRows,
+                    viewportRows,
+                    totalRows: lines.length,
+                    lineBase: startLine,
+                    visibleStart: Math.max(0, ybase - startLine),
+                    partial: !!options.partial,
+                    historyLimit: lineLimit,
+                    cursor,
+                    palette,
+                    font: {
+                        family: TERMINAL_FONT_FAMILY,
+                        size: normalizeTerminalFontSize(window.app?.settings?.get('fontSize')),
+                        weight: 400,
+                        boldWeight: 600,
+                        lineHeight: 1.08
+                    },
+                    lines
+                };
+                let json = JSON.stringify(frame);
+                if (maxChars && json.length > maxChars) {
+                    frame.truncated = true;
+                    while (frame.lines.length > 1 && JSON.stringify(frame).length > maxChars) {
+                        frame.lines.shift();
+                        frame.totalRows = frame.lines.length;
+                        frame.lineBase += 1;
+                        frame.visibleStart = Math.max(0, frame.visibleStart - 1);
+                        if (frame.cursor) frame.cursor.y = Math.max(0, frame.cursor.y - 1);
+                    }
+                    json = JSON.stringify(frame);
+                }
+                return json;
+            }
+            serializeScreenPreviewText(maxRows = 10, maxChars = 1600) {
+                const term = this.term;
+                const buffer = term?.buffer?.active;
+                if (!term || !buffer) return '';
+                const rows = Math.max(1, Math.min(Number(maxRows) || 10, Number(term.rows) || 24));
+                const ybase = Number(buffer.baseY ?? buffer.ybase) || 0;
+                const viewportRows = Number(term.rows) || 24;
+                const start = Math.max(0, ybase + viewportRows - rows);
+                const end = ybase + viewportRows;
+                const lines = [];
+                for (let i = start; i < end; i++) {
+                    const line = buffer.getLine(i);
+                    if (!line) {
+                        lines.push('');
+                        continue;
+                    }
+                    lines.push(line.translateToString(true));
+                }
+                let text = lines.join('\n').replace(/\n{4,}/g, '\n\n\n').trimEnd();
+                if (maxChars && text.length > maxChars) text = text.slice(text.length - maxChars);
+                return text;
+            }
+            mergeRemoteCellsFrame(frame) {
+                if (!frame || !frame.partial || !this.remoteCellsFrame || !Array.isArray(this.remoteCellsFrame.lines)) return frame;
+                if (!Array.isArray(frame.lines)) return frame;
+                if (Number(frame.cols) !== Number(this.remoteCellsFrame.cols)) return frame;
+                const previousBase = Number(this.remoteCellsFrame.lineBase) || 0;
+                const incomingBase = Number(frame.lineBase) || 0;
+                const previousEnd = previousBase + this.remoteCellsFrame.lines.length;
+                const incomingEnd = incomingBase + frame.lines.length;
+                if (incomingEnd <= previousBase || incomingBase > previousEnd) return frame;
+
+                const prefixCount = Math.max(0, Math.min(this.remoteCellsFrame.lines.length, incomingBase - previousBase));
+                let mergedLines = this.remoteCellsFrame.lines.slice(0, prefixCount).concat(frame.lines);
+                const limit = Math.max(1, Number(frame.historyLimit || this.remoteCellsFrame.historyLimit) || 20000);
+                let nextBase = previousBase;
+                if (mergedLines.length > limit) {
+                    const drop = mergedLines.length - limit;
+                    mergedLines = mergedLines.slice(drop);
+                    nextBase += drop;
+                }
+
+                const cursor = { ...(frame.cursor || {}) };
+                if (cursor && typeof cursor.y !== 'undefined') {
+                    cursor.y = Math.max(0, (Number(cursor.y) || 0) + incomingBase - nextBase);
+                }
+                return {
+                    ...this.remoteCellsFrame,
+                    ...frame,
+                    partial: false,
+                    lineBase: nextBase,
+                    totalRows: mergedLines.length,
+                    lines: mergedLines,
+                    cursor
+                };
+            }
+            cellsFrameToPlainText(frame, maxLines = 0) {
+                if (!frame || !Array.isArray(frame.lines)) return '';
+                const sourceLines = maxLines > 0 ? frame.lines.slice(-maxLines) : frame.lines;
+                return sourceLines.map((line) => {
+                    if (!Array.isArray(line)) return '';
+                    return line.map((span) => String(span?.text || '')).join('').replace(/[ \t]+$/g, '');
+                }).join('\r\n');
+            }
+            remoteCursorSequence(frame, renderedLineCount) {
+                if (!frame?.cursor) return '';
+                const cursor = frame.cursor;
+                const totalRows = Array.isArray(frame.lines) ? frame.lines.length : 0;
+                const startRow = renderedLineCount > 0 ? Math.max(0, totalRows - renderedLineCount) : 0;
+                const y = Math.max(0, Math.min(Math.max(0, renderedLineCount - 1), (Number(cursor.y) || 0) - startRow));
+                const x = Math.max(0, Math.min(Math.max(0, (Number(frame.cols) || 80) - 1), Number(cursor.x) || 0));
+                return `\x1b[${y + 1};${x + 1}H`;
+            }
+            applyRemoteCellsFrame(frame, options = {}) {
+                if (!frame || !Array.isArray(frame.lines)) return false;
+                const merged = this.mergeRemoteCellsFrame(frame);
+                this.remoteCellsFrame = merged;
+                const renderFrame = frame.partial && merged.lines.length > 800 ? frame : merged;
+                const maxLines = frame.partial ? 300 : 0;
+                const text = this.cellsFrameToPlainText(renderFrame, maxLines);
+                const renderedLineCount = maxLines > 0
+                    ? Math.min(maxLines, Array.isArray(renderFrame.lines) ? renderFrame.lines.length : 0)
+                    : (Array.isArray(renderFrame.lines) ? renderFrame.lines.length : 0);
+                const payload = '\x1b[2J\x1b[H' + (text || '') + this.remoteCursorSequence(renderFrame, renderedLineCount);
+                const shouldRefocus = this.remote && window.app?.activePaneId === this.paneId;
+                this.writeRaw(payload, () => {
+                    if (shouldRefocus) this.focusSoon();
+                });
+                return true;
             }
             async sendText(text) {
                 if (!text || typeof invoke === 'undefined') return false;
@@ -2983,6 +3203,10 @@
             }
             updatePrompt() {}
             dispose() {
+                if (this.pendingFocusFrame !== null) {
+                    cancelAnimationFrame(this.pendingFocusFrame);
+                    this.pendingFocusFrame = null;
+                }
                 if (this.resizeObserver) {
                     this.resizeObserver.disconnect();
                     this.resizeObserver = null;
@@ -3033,6 +3257,11 @@
                 this.v3OwnerScreenSeq = new Map();
                 this.v3OwnerDeltaBuffers = new Map();
                 this.v3OwnerDeltaTimers = new Map();
+                this.v3OwnerCellsTimers = new Map();
+                this.v3OwnerCellsDirty = new Set();
+                this.v3OwnerCellsSeq = new Map();
+                this.v3OwnerCellsLastSeq = new Map();
+                this.v3OwnerCellsLastData = new Map();
                 this.v3ViewerScreenSeq = new Map();
                 this.v3SnapshotTimers = new Map();
                 this.v3SnapshotPublishedSeq = new Map();
@@ -3170,7 +3399,8 @@
                             cwd: terminal?.cwd || '',
                             task_state: state.taskState || 'idle',
                             activity: state.activity || '',
-                            preview: state.preview || ''
+                            preview: state.preview || '',
+                            screen_preview: terminal?.serializeScreenPreviewText?.() || state.screenPreview || state.preview || ''
                         };
                     })
                 }));
@@ -3196,6 +3426,7 @@
                         layoutVersion: this.v3LayoutVersion
                     });
                     this.debug('v3:layout:snapshot:sent', { reason, workspaceId, version: this.v3LayoutVersion });
+                    this.publishVisibleV3ScreenSnapshots(reason === 'connected' ? 'resync-request' : 'layout-snapshot');
                 } catch (err) {
                     this.debug('v3:layout:snapshot:failed', { reason, error: String(err) });
                 }
@@ -3216,6 +3447,19 @@
                     this.debug('v3:layout:patch:sent', { reason, workspaceId, version: this.v3LayoutVersion });
                 } catch (err) {
                     this.debug('v3:layout:patch:failed', { reason, error: String(err) });
+                }
+            }
+
+            publishVisibleV3ScreenSnapshots(reason = '') {
+                if (this.isReceiverMode() || !this.serverConnected) return;
+                const paneIds = new Set();
+                for (const tab of this.tabs.values()) {
+                    for (const paneId of tab.panes || []) paneIds.add(Number(paneId));
+                }
+                for (const paneId of paneIds) {
+                    const terminal = this.terminals.get(Number(paneId));
+                    if (!terminal || terminal.remote || !terminal.sessionId) continue;
+                    this.scheduleV3ScreenSnapshot(String(paneId), reason);
                 }
             }
 
@@ -3288,7 +3532,11 @@
                 if (this.v3SubscribedPanes.has(key)) return;
                 this.v3SubscribedPanes.add(key);
                 try {
-                    await invoke('subscribe_screen', { workspaceId, paneId: String(paneId) });
+                    await invoke('subscribe_screen', {
+                        workspaceId,
+                        paneId: String(paneId),
+                        encoding: 'base64+cells-json'
+                    });
                 } catch (err) {
                     this.v3SubscribedPanes.delete(key);
                     this.debug('v3:screen:subscribe:failed', { workspaceId, paneId, error: String(err) });
@@ -3344,6 +3592,13 @@
                 const deltaTimer = this.v3OwnerDeltaTimers.get(paneKey);
                 if (deltaTimer) clearTimeout(deltaTimer);
                 this.v3OwnerDeltaTimers.delete(paneKey);
+                const cellsTimer = this.v3OwnerCellsTimers.get(paneKey);
+                if (cellsTimer) clearTimeout(cellsTimer);
+                this.v3OwnerCellsTimers.delete(paneKey);
+                this.v3OwnerCellsDirty.delete(paneKey);
+                this.v3OwnerCellsSeq.delete(paneKey);
+                this.v3OwnerCellsLastSeq.delete(paneKey);
+                this.v3OwnerCellsLastData.delete(paneKey);
                 this.v3OwnerScreenSeq.delete(paneKey);
                 this.v3SnapshotPublishedSeq.delete(paneKey);
                 this.v3SnapshotLastAt.delete(paneKey);
@@ -3387,6 +3642,7 @@
                             session_id: pending.sessionId,
                             seq,
                             prev_seq: prevSeq,
+                            encoding: 'base64+vt',
                             data: pending.data
                         }
                     });
@@ -3401,6 +3657,58 @@
                 }
             }
 
+            scheduleV3ScreenCellsFrame(paneId, reason = '') {
+                if (this.isReceiverMode() || !this.serverConnected || typeof invoke === 'undefined') return;
+                const paneIdText = String(paneId);
+                if (this.v3OwnerCellsTimers.has(paneIdText)) {
+                    this.v3OwnerCellsDirty.add(paneIdText);
+                    return;
+                }
+                const delay = reason === 'resync-request' ? 0 : 120;
+                const timer = setTimeout(async () => {
+                    this.v3OwnerCellsTimers.delete(paneIdText);
+                    const wasDirty = this.v3OwnerCellsDirty.delete(paneIdText);
+                    await this.publishV3ScreenCellsFrame(paneIdText, reason || 'output');
+                    if (wasDirty) {
+                        this.scheduleV3ScreenCellsFrame(paneIdText, 'rendered-write-final');
+                    }
+                }, delay);
+                this.v3OwnerCellsTimers.set(paneIdText, timer);
+            }
+
+            async publishV3ScreenCellsFrame(paneId, reason = '') {
+                if (this.isReceiverMode() || !this.serverConnected || typeof invoke === 'undefined') return;
+                const paneIdText = String(paneId);
+                const terminal = this.terminals.get(Number(paneId));
+                if (!terminal || !terminal.sessionId) return;
+                const viewportRows = Number(terminal.term?.rows) || 24;
+                const realtimeLines = Math.max(viewportRows, Math.min(96, viewportRows + 8));
+                const data = terminal.serializeScreenCells(120000, realtimeLines, { partial: true });
+                if (!data) return;
+                if (this.v3OwnerCellsLastData.get(paneIdText) === data) return;
+                const vtSeq = this.v3OwnerScreenSeq.get(paneIdText) || 0;
+                const prevSeq = this.v3OwnerCellsSeq.get(paneIdText) || 0;
+                const seq = Math.max(prevSeq + 1, vtSeq + 1);
+                try {
+                    await invoke('publish_screen_delta', {
+                        payload: {
+                            workspace_id: this.ownerWorkspaceId(),
+                            pane_id: paneIdText,
+                            session_id: terminal.sessionId,
+                            seq,
+                            prev_seq: prevSeq,
+                            encoding: 'base64+cells-json',
+                            data
+                        }
+                    });
+                    this.v3OwnerCellsSeq.set(paneIdText, seq);
+                    this.v3OwnerCellsLastSeq.set(paneIdText, seq);
+                    this.v3OwnerCellsLastData.set(paneIdText, data);
+                } catch (err) {
+                    this.debug('v3:screen:cells:failed', { paneId: paneIdText, reason, error: String(err) });
+                }
+            }
+
             async publishV3ScreenSnapshot(paneId, reason = '') {
                 if (this.isReceiverMode() || !this.serverConnected || typeof invoke === 'undefined') return;
                 const paneIdText = String(paneId);
@@ -3409,7 +3717,8 @@
                 const seq = this.v3OwnerScreenSeq.get(paneIdText) || 0;
                 const lastSeq = this.v3SnapshotPublishedSeq.get(paneIdText) || -1;
                 const lastAt = this.v3SnapshotLastAt.get(paneIdText) || 0;
-                if (reason !== 'resync-request' && seq === lastSeq && Date.now() - lastAt < 5000) return;
+                if (reason === 'output') return;
+                if (reason !== 'resync-request' && seq === lastSeq && Date.now() - lastAt < 30000) return;
                 try {
                     await invoke('publish_screen_snapshot', {
                         payload: {
@@ -3417,9 +3726,28 @@
                             pane_id: paneIdText,
                             session_id: terminal.sessionId,
                             snapshot_seq: seq,
+                            encoding: 'base64+vt',
                             data: terminal.serializeScreenSnapshot()
                         }
                     });
+                    const shouldPublishFullCells = reason !== 'output';
+                    const cells = shouldPublishFullCells ? terminal.serializeScreenCells() : null;
+                    if (cells) {
+                        const cellsSeq = Math.max(this.v3OwnerCellsSeq.get(paneIdText) || 0, seq);
+                        this.v3OwnerCellsSeq.set(paneIdText, cellsSeq);
+                        await invoke('publish_screen_snapshot', {
+                            payload: {
+                                workspace_id: this.ownerWorkspaceId(),
+                                pane_id: paneIdText,
+                                session_id: terminal.sessionId,
+                                snapshot_seq: cellsSeq,
+                                encoding: 'base64+cells-json',
+                                data: cells
+                            }
+                        });
+                        this.v3OwnerCellsLastSeq.set(paneIdText, cellsSeq);
+                        this.v3OwnerCellsLastData.set(paneIdText, cells);
+                    }
                     this.v3SnapshotPublishedSeq.set(paneIdText, seq);
                     this.v3SnapshotLastAt.set(paneIdText, Date.now());
                     this.debug('v3:screen:snapshot:sent', { paneId: paneIdText, seq, reason });
@@ -3430,12 +3758,13 @@
 
             scheduleV3ScreenSnapshot(paneId, reason = '') {
                 if (this.isReceiverMode() || !this.serverConnected || typeof invoke === 'undefined') return;
+                if (reason === 'output') return;
                 const paneIdText = String(paneId);
                 const seq = this.v3OwnerScreenSeq.get(paneIdText) || 0;
                 const lastSeq = this.v3SnapshotPublishedSeq.get(paneIdText) || -1;
                 const lastAt = this.v3SnapshotLastAt.get(paneIdText) || 0;
                 if (reason !== 'resync-request' && seq === lastSeq) return;
-                if (reason !== 'resync-request' && Date.now() - lastAt < 5000) return;
+                if (reason !== 'resync-request' && Date.now() - lastAt < 30000) return;
                 if (this.v3SnapshotTimers.has(paneIdText)) return;
                 const timer = setTimeout(() => {
                     this.v3SnapshotTimers.delete(paneIdText);
@@ -3455,7 +3784,8 @@
                     await invoke('request_screen_resync', {
                         workspaceId,
                         paneId: String(paneId),
-                        lastSeq: Number(lastSeq) || 0
+                        lastSeq: Number(lastSeq) || 0,
+                        encoding: 'base64+cells-json'
                     });
                     this.debug('v3:screen:resync:request', { workspaceId, paneId, lastSeq, reason });
                 } catch (err) {
@@ -5163,7 +5493,7 @@
                         ? Array.from(activeTab.panes)[0]
                         : null;
                 if (focusPaneId !== null && focusPaneId !== undefined) {
-                    this.focusPane(focusPaneId);
+                    this.activatePane(focusPaneId, { focus: !this.isReceiverMode() });
                 }
 
                 for (const tab of this.tabs.values()) {
@@ -5283,6 +5613,9 @@
                 };
 
                 const stop = (event) => event.stopPropagation();
+                input.addEventListener('pointerdown', stop);
+                input.addEventListener('mousedown', stop);
+                input.addEventListener('mouseup', stop);
                 input.addEventListener('click', stop);
                 input.addEventListener('dblclick', stop);
                 input.addEventListener('keydown', (event) => {
@@ -5298,9 +5631,14 @@
                 input.addEventListener('blur', () => this.finishTitleEdit(true));
 
                 requestAnimationFrame(() => {
+                    if (this.titleEditState?.input !== input || !input.isConnected) return;
                     input.focus();
                     input.select();
                 });
+            }
+
+            isTitleEditing() {
+                return !!(this.titleEditState?.input?.isConnected);
             }
 
             finishTitleEdit(commit) {
@@ -5506,6 +5844,7 @@
                         titleMode: 'auto',
                         activity: '终端已就绪',
                         preview: '',
+                        screenPreview: '',
                         taskState: 'idle',
                         lastSentKey: '',
                         lastUpdatedAt: Date.now(),
@@ -5708,6 +6047,7 @@
                     state.taskState = exitCode === null || exitCode === 0 ? 'completed' : 'error';
                     state.activity = exitCode === null || exitCode === 0 ? '终端任务已结束' : '终端异常退出';
                     state.preview = exitCode === null ? '终端进程已退出' : ('终端进程已退出，退出码 ' + exitCode);
+                    state.screenPreview = terminal?.serializeScreenPreviewText?.(10, 1600) || state.screenPreview || state.preview;
                     this.scheduleSessionMetaSend(sessionId, true);
                     this.debug('session:meta:update', {
                         sessionId: sessionId,
@@ -5722,6 +6062,7 @@
                 if (meaningfulLine) {
                     state.outputSequence = (state.outputSequence || 0) + 1;
                     state.preview = clipText(meaningfulLine, 96);
+                    state.screenPreview = terminal?.serializeScreenPreviewText?.(10, 1600) || state.screenPreview || state.preview;
                     if (outputHasErrorSignal(sourceText)) {
                         state.taskState = 'error';
                         state.activity = this.summarizeActivity(meaningfulLine);
@@ -5742,6 +6083,7 @@
                     }
                 } else if (terminal && terminal.backendReady && !state.activity && state.taskState !== 'running') {
                     state.activity = '等待新的输出';
+                    state.screenPreview = terminal?.serializeScreenPreviewText?.(10, 1600) || state.screenPreview || '';
                 }
 
                 this.scheduleSessionMetaSend(sessionId);
@@ -5814,11 +6156,16 @@
                 const state = this.sessionActivity.get(sessionId);
                 if (!state) return;
                 const paneId = this.paneIdFromSession(sessionId);
+                const terminal = paneId === null ? null : this.terminals.get(paneId);
+                if (terminal?.serializeScreenPreviewText) {
+                    state.screenPreview = terminal.serializeScreenPreviewText(10, 1600) || state.screenPreview || '';
+                }
                 const layout = paneId === null ? null : this.buildSessionLayoutMeta(paneId);
                 const payload = {
                     title: state.title || '',
                     activity: state.activity || '',
                     preview: state.preview || '',
+                    screenPreview: state.screenPreview || '',
                     taskState: state.taskState || 'idle',
                     layout
                 };
@@ -5938,22 +6285,26 @@
                 }
 
                 this.rebuildSplitTreeRegistry();
-                const activeTabKey = String(snapshot.active_tab_id || '');
-                const desiredActiveTab = touchedTabs.find((tab) => String(tab.remoteKey || '').endsWith(':' + activeTabKey))
-                    || touchedTabs.find((tab) => tab.panes.has(this.activePaneId))
-                    || touchedTabs[0];
-                if (desiredActiveTab) this.activeTabId = desiredActiveTab.id;
+                const currentActiveTab = this.tabs.get(this.activeTabId);
+                const keepLocalActiveTab = currentActiveTab && currentActiveTab.remoteKey && touchedTabs.includes(currentActiveTab);
+                if (!keepLocalActiveTab) {
+                    const activeTabKey = String(snapshot.active_tab_id || '');
+                    const desiredActiveTab = touchedTabs.find((tab) => String(tab.remoteKey || '').endsWith(':' + activeTabKey))
+                        || touchedTabs.find((tab) => tab.panes.has(this.activePaneId))
+                        || touchedTabs[0];
+                    if (desiredActiveTab) this.activeTabId = desiredActiveTab.id;
+                }
 
                 this.renderTabs();
                 this.renderActiveTab();
                 const activeTab = this.tabs.get(this.activeTabId);
                 if (activeTab) {
-                    const activePaneText = String(sortedTabs.find((item) => this.remoteTabKeyForV3Tab(ownerId, item) === activeTab.remoteKey)?.active_pane_id || '');
-                    const activePane = this.localPaneIdForRemote(this.v3WorkspaceId, activePaneText) ?? Number(activePaneText);
+                    const remoteActivePaneText = String(sortedTabs.find((item) => this.remoteTabKeyForV3Tab(ownerId, item) === activeTab.remoteKey)?.active_pane_id || '');
+                    const remoteActivePane = this.localPaneIdForRemote(this.v3WorkspaceId, remoteActivePaneText) ?? Number(remoteActivePaneText);
                     const focusPaneId = activeTab.panes.has(this.activePaneId)
                         ? this.activePaneId
-                        : Number.isFinite(activePane) && activeTab.panes.has(activePane)
-                            ? activePane
+                        : Number.isFinite(remoteActivePane) && activeTab.panes.has(remoteActivePane)
+                            ? remoteActivePane
                             : Array.from(activeTab.panes)[0];
                     if (focusPaneId !== null && focusPaneId !== undefined) this.setActivePane(focusPaneId);
                 }
@@ -5970,9 +6321,11 @@
                 if (!terminal) return;
                 const data = this.decodeBase64Utf8(message.payload?.data || '');
                 if (!data) return;
+                const encoding = String(message.payload?.encoding || '').toLowerCase();
                 const seqKey = this.v3ScreenKey(workspaceId, paneIdText);
                 if (message.type === 'screen.snapshot') {
                     terminal.term?.clear?.();
+                    terminal.remoteCellsFrame = null;
                     this.replayBuffers.set(sessionId, '');
                     const snapshotSeq = Number(message.payload?.snapshot_seq || message.payload?.seq || 0);
                     this.v3ViewerScreenSeq.set(seqKey, snapshotSeq);
@@ -5993,7 +6346,31 @@
                     if (seq > 0) this.v3ViewerScreenSeq.set(seqKey, seq);
                     if (seq > 0) this.ackV3Screen(workspaceId, paneIdText, seq);
                 }
-                terminal.appendChunk(data);
+                if (encoding === 'base64+cells-json' || encoding === 'cells-json' || encoding === 'cells') {
+                    let frame = null;
+                    try {
+                        frame = JSON.parse(data);
+                    } catch (err) {
+                        this.debug('v3:screen:cells:parse-failed', { workspaceId, paneId: paneIdText, error: String(err) });
+                        this.requestV3ScreenResync(workspaceId, paneIdText, this.v3ViewerScreenSeq.get(seqKey) || 0, 'cells-parse-failed');
+                        return;
+                    }
+                    if (!terminal.applyRemoteCellsFrame(frame, { snapshot: message.type === 'screen.snapshot' })) {
+                        this.debug('v3:screen:cells:apply-failed', { workspaceId, paneId: paneIdText });
+                        return;
+                    }
+                    const text = terminal.cellsFrameToPlainText(terminal.remoteCellsFrame || frame, 300);
+                    if (sessionId && text) {
+                        this.replayBuffers.set(sessionId, text);
+                        this.applySessionOutput(sessionId, text, null);
+                    }
+                    return;
+                }
+                terminal.remoteCellsFrame = null;
+                const shouldRefocus = terminal.remote && this.activePaneId === terminal.paneId;
+                terminal.appendChunk(data, false, () => {
+                    if (shouldRefocus) terminal.focusSoon();
+                });
                 if (sessionId) {
                     this.appendReplayBuffer(sessionId, data);
                     this.applySessionOutput(sessionId, data, null);
@@ -6584,7 +6961,13 @@
                         this.scheduleWorkspaceSave();
                     }
                     const terminal = this.terminals.get(paneId);
-                    if (terminal) terminal.appendChunk(payload.data || '');
+                    if (terminal) {
+                        terminal.appendChunk(payload.data || '', false, () => {
+                            if (payload.session_id && payload.data) {
+                                this.scheduleV3ScreenCellsFrame(paneId, 'rendered-write');
+                            }
+                        });
+                    }
                     if (payload.session_id && payload.data) {
                         this.appendReplayBuffer(payload.session_id, payload.data);
                     }
@@ -7288,7 +7671,7 @@
                 if (tab) {
                     this.renderActiveTab();
                     const first = Array.from(tab.panes)[0];
-                    if (first) this.focusPane(first);
+                    if (first) this.activatePane(first, { focus: !this.isReceiverMode() });
                 }
                 if (this.isReceiverMode()) this.syncVisibleV3ScreenSubscriptions();
                 this.updateStatusBar();
@@ -7324,7 +7707,7 @@
                 if (this.activeTabId === tabId && next) {
                     this.activeTabId = next.id;
                     this.renderActiveTab();
-                    this.focusPane(Array.from(next.panes)[0]);
+                    this.activatePane(Array.from(next.panes)[0], { focus: !this.isReceiverMode() });
                 } else if (!next && options.allowEmpty) {
                     this.activeTabId = null;
                     this.activePaneId = null;
@@ -7400,7 +7783,10 @@
                         el.appendChild(statusEl);
                     }
                     el.appendChild(closeEl);
-                    el.addEventListener('click', () => this.switchTab(tab.id));
+                    el.addEventListener('click', (event) => {
+                        if (event.target?.closest?.('.inline-title-input')) return;
+                        this.switchTab(tab.id);
+                    });
                     el.addEventListener('contextmenu', (event) => {
                         event.preventDefault();
                         event.stopPropagation();
@@ -7424,12 +7810,16 @@
                 }
             }
 
-            focusPane(paneId) {
+            activatePane(paneId, options = {}) {
                 this.setActivePane(paneId);
-                this.terminals.get(paneId)?.focus();
+                if (options.focus) this.terminals.get(paneId)?.focusSoon();
                 this.updateStatusBar();
                 if (this.aiPanelOpen) this.updateAiContextPreview();
                 this.scheduleWorkspaceSave();
+            }
+
+            focusPane(paneId) {
+                this.activatePane(paneId, { focus: true });
             }
 
             removePaneLocally(paneId, options = {}) {
@@ -7462,7 +7852,7 @@
                 }
                 const remaining = tab ? Array.from(tab.panes) : [];
                 if (closingActiveTab) {
-                    if (remaining.length > 0) this.focusPane(remaining[0]);
+                    if (remaining.length > 0) this.activatePane(remaining[0], { focus: !this.isReceiverMode() });
                     if (this.isReceiverMode()) this.syncVisibleV3ScreenSubscriptions();
                 } else {
                     this.renderTabs();

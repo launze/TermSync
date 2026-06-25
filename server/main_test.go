@@ -41,3 +41,15 @@ func TestNormalizeReleaseBuildType(t *testing.T) {
 		t.Fatalf("normalizeReleaseBuildType(anything) = %q", got)
 	}
 }
+
+func TestMatchesReleaseOSDesktop(t *testing.T) {
+	if !matchesReleaseOS("termsync-desktop-windows-x64-v0.1.9-setup.exe", "desktop", "windows") {
+		t.Fatal("windows setup should match windows desktop release")
+	}
+	if matchesReleaseOS("termsync-desktop-linux-arm64-v0.1.9.AppImage", "desktop", "windows") {
+		t.Fatal("linux AppImage must not match windows desktop release")
+	}
+	if !matchesReleaseOS("termsync-desktop-linux-arm64-v0.1.9.AppImage", "desktop", "") {
+		t.Fatal("empty target OS should preserve legacy all-desktop matching")
+	}
+}

@@ -21,6 +21,7 @@ import android.webkit.JavascriptInterface
 import android.view.ViewGroup
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
 import androidx.core.content.FileProvider
@@ -110,6 +111,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -141,10 +143,6 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalContext
 
 private const val DEFAULT_SERVER_URL = "wss://8.153.163.104:7373/ws"
-enum class TerminalRenderMode {
-    MobileFit,
-    DesktopMirror
-}
 
 private enum class CommandPanelSection(val key: String, val label: String) {
     Favorites("favorites", "收藏"),
@@ -255,6 +253,7 @@ fun TTY1App(viewModel: MainViewModel) {
     val selectedSessionId by viewModel.selectedSessionId.collectAsState()
     val terminalOutput by viewModel.terminalOutput.collectAsState()
     val terminalOutputVersion by viewModel.terminalOutputVersion.collectAsState()
+    val terminalOutputEncoding by viewModel.terminalOutputEncoding.collectAsState()
     val statusMessage by viewModel.statusMessage.collectAsState()
     val replayLoading by viewModel.replayLoading.collectAsState()
     val terminalStreamStatus by viewModel.terminalStreamStatus.collectAsState()
@@ -263,6 +262,7 @@ fun TTY1App(viewModel: MainViewModel) {
     val deviceName by viewModel.deviceName.collectAsState()
     val isPaired by viewModel.isPaired.collectAsState()
     val pairedDesktopName by viewModel.pairedDesktopName.collectAsState()
+    val terminalFontScale by viewModel.terminalFontScale.collectAsState()
     val commandLibrary by viewModel.commandLibrary.collectAsState()
     val appUpdate by viewModel.appUpdate.collectAsState()
     val selectedSession = sessions.firstOrNull { it.sessionId == selectedSessionId }
@@ -285,6 +285,10 @@ fun TTY1App(viewModel: MainViewModel) {
     val hasToken = deviceToken.isNotBlank()
     val canRequestRemoteTerminal = connectionState is ConnectionState.Connected && isPaired
     val activeSessionCount = sessions.count { it.taskState == "running" || it.taskState == "waiting_input" }
+
+    BackHandler(enabled = selectedSessionId != null) {
+        viewModel.selectSession(null)
+    }
 
     LaunchedEffect(hasToken) {
         if (!hasToken) {
@@ -320,15 +324,18 @@ fun TTY1App(viewModel: MainViewModel) {
                         sameTabSessions = selectedTabSessions,
                         output = terminalOutput,
                         outputVersion = terminalOutputVersion,
+                        outputEncoding = terminalOutputEncoding,
                         terminalDelta = viewModel.terminalDelta,
                         replayLoading = replayLoading,
                         terminalStreamStatus = terminalStreamStatus,
+                        terminalFontScale = terminalFontScale,
                         commandLibrary = commandLibrary,
                         onSubmitCommand = { viewModel.submitCommand(it) },
                         onSendRawInput = { viewModel.sendInput(it) },
                         onToggleFavoriteCommand = { viewModel.toggleFavoriteCommand(it) },
                         onSendSpecialKey = { viewModel.sendSpecialKey(it) },
                         onRefreshTerminal = { viewModel.refreshSelectedSessionReplay() },
+                        onTerminalFontScaleChange = { viewModel.updateTerminalFontScale(it) },
                         onRequestCloseSession = { viewModel.requestRemoteSessionClose(it) },
                         onTerminalResize = { cols, rows, force -> viewModel.requestSelectedSessionResize(cols, rows, force) },
                         onSessionSelected = { viewModel.selectSession(it) },
@@ -338,7 +345,6 @@ fun TTY1App(viewModel: MainViewModel) {
                 }
 
                 else -> {
-                    ConnectionStatusBar(connectionState)
                     HomeScreen(
                         connectionState = connectionState,
                         sessions = sessions,
@@ -857,6 +863,12 @@ private fun SplitLeafPreview(
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis
             )
+            TerminalScreenPreviewText(
+                text = session.screenPreview,
+                minLines = 3,
+                maxLines = 5,
+                modifier = Modifier.fillMaxWidth()
+            )
         }
     }
 }
@@ -937,13 +949,13 @@ fun ConnectedDesktopCard(
 ) {
     val isConnected = connectionState is ConnectionState.Connected
     val isConnecting = connectionState is ConnectionState.Connecting
-    val (connectionLabel, connectionColor) = connectionStateVisual(connectionState)
+    val (_, connectionColor) = connectionStateVisual(connectionState)
 
     HomeSummaryBar(
         icon = Icons.Default.Verified,
         iconTint = connectionColor,
         headline = if (pairedDesktopName.isNotBlank()) pairedDesktopName else "已完成配对",
-        detail = "$connectionLabel · $deviceName",
+        detail = deviceName,
         containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.44f)
     ) {
         if (isConnected) {
@@ -1174,6 +1186,13 @@ fun SessionCard(session: TerminalSession, onClick: () -> Unit) {
                 )
             }
 
+            TerminalScreenPreviewText(
+                text = session.screenPreview,
+                minLines = 4,
+                maxLines = 7,
+                modifier = Modifier.fillMaxWidth()
+            )
+
             FlowRow(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1188,6 +1207,41 @@ fun SessionCard(session: TerminalSession, onClick: () -> Unit) {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun TerminalScreenPreviewText(
+    text: String,
+    minLines: Int,
+    maxLines: Int,
+    modifier: Modifier = Modifier
+) {
+    val lines = remember(text, maxLines) {
+        text
+            .replace("\r", "")
+            .lines()
+            .takeLast(maxLines)
+            .joinToString("\n")
+            .ifBlank { "等待终端输出" }
+    }
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(6.dp),
+        color = Color(0xFF101214)
+    ) {
+        Text(
+            text = lines,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+            style = MaterialTheme.typography.labelSmall.copy(
+                fontFamily = FontFamily.Monospace,
+                lineHeight = 13.sp
+            ),
+            color = Color(0xFFD6D6D6),
+            minLines = minLines,
+            maxLines = maxLines,
+            overflow = TextOverflow.Clip
+        )
     }
 }
 
@@ -1227,15 +1281,18 @@ fun TerminalViewScreen(
     sameTabSessions: List<TerminalSession>,
     output: String,
     outputVersion: Long,
+    outputEncoding: String,
     terminalDelta: SharedFlow<TerminalDeltaBatch>,
     replayLoading: Boolean,
     terminalStreamStatus: String,
+    terminalFontScale: Float,
     commandLibrary: CommandLibraryUiState,
     onSubmitCommand: (String) -> Unit,
     onSendRawInput: (String) -> Unit,
     onToggleFavoriteCommand: (String) -> Unit,
     onSendSpecialKey: (SpecialKey) -> Unit,
     onRefreshTerminal: () -> Unit,
+    onTerminalFontScaleChange: (Float) -> Unit,
     onRequestCloseSession: (String) -> Unit,
     onTerminalResize: (Int, Int, Boolean) -> Unit,
     onSessionSelected: (String) -> Unit,
@@ -1246,13 +1303,11 @@ fun TerminalViewScreen(
     var showSpecialKeysDialog by rememberSaveable(session?.sessionId) { mutableStateOf(false) }
     var showCloseSessionDialog by rememberSaveable(session?.sessionId) { mutableStateOf(false) }
     var copyMode by rememberSaveable(session?.sessionId) { mutableStateOf(false) }
-    var renderModeName by rememberSaveable(session?.sessionId) { mutableStateOf(TerminalRenderMode.MobileFit.name) }
-    var fontScale by rememberSaveable(session?.sessionId) { mutableStateOf(1.0f) }
+    val fontScale = terminalFontScale.coerceIn(0.7f, 1.6f)
     var showLayoutControls by rememberSaveable(session?.sessionId) { mutableStateOf(false) }
     var showCommandLibraryDialog by rememberSaveable(session?.sessionId) { mutableStateOf(false) }
     var showMoreMenu by remember { mutableStateOf(false) }
     var terminalAtBottom by rememberSaveable(session?.sessionId) { mutableStateOf(true) }
-    var tuiHintVisible by rememberSaveable(session?.sessionId) { mutableStateOf(false) }
     var scrollToBottomRequest by rememberSaveable(session?.sessionId) { mutableStateOf(0L) }
     var inputHistory by rememberSaveable(session?.sessionId) { mutableStateOf(emptyList<String>()) }
     var quickActionOrder by remember(session?.sessionId) { mutableStateOf(0) }
@@ -1263,7 +1318,6 @@ fun TerminalViewScreen(
         mutableStateOf(CommandPanelSection.Favorites.key)
     }
     val focusManager = LocalFocusManager.current
-    val renderMode = remember(renderModeName) { TerminalRenderMode.valueOf(renderModeName) }
     fun rememberQuickAction(kind: ComposerQuickActionKind) {
         quickActionOrder += 1
         val key = kind.name
@@ -1312,9 +1366,9 @@ fun TerminalViewScreen(
             copyMode -> "复制模式已开启，可在终端区域长按后框选复制"
             else -> ""
         }
-        LaunchedEffect(maxWidth, maxHeight, showSpecialKeysDialog, copyMode, renderModeName, fontScale, showLayoutControls, showCommandLibraryDialog) {
+        LaunchedEffect(maxWidth, maxHeight, showSpecialKeysDialog, copyMode, fontScale, showLayoutControls, showCommandLibraryDialog) {
             onDebug(
-                "TV_LAYOUT max=${maxWidth.value}x${maxHeight.value}dp keysDialog=$showSpecialKeysDialog copyMode=$copyMode mode=$renderModeName fontScale=$fontScale layoutExpanded=$showLayoutControls commandDialog=$showCommandLibraryDialog"
+                "TV_LAYOUT max=${maxWidth.value}x${maxHeight.value}dp keysDialog=$showSpecialKeysDialog copyMode=$copyMode renderedCells=true fontScale=$fontScale layoutExpanded=$showLayoutControls commandDialog=$showCommandLibraryDialog"
             )
         }
         Column(
@@ -1373,12 +1427,6 @@ fun TerminalViewScreen(
                                     style = MaterialTheme.typography.labelSmall,
                                     maxLines = 1
                                 )
-                                Text(
-                                    text = if (renderMode == TerminalRenderMode.MobileFit) "阅读" else "镜像",
-                                    color = MaterialTheme.colorScheme.primary,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    maxLines = 1
-                                )
                                 if (activityText.isNotBlank()) {
                                     Text(
                                         text = activityText,
@@ -1420,20 +1468,6 @@ fun TerminalViewScreen(
                                     }
                                 )
                                 DropdownMenuItem(
-                                    text = { Text(if (renderMode == TerminalRenderMode.MobileFit) "切换到镜像" else "切换到阅读") },
-                                    leadingIcon = {
-                                        Icon(Icons.Default.Settings, contentDescription = null)
-                                    },
-                                    onClick = {
-                                        showMoreMenu = false
-                                        renderModeName = if (renderMode == TerminalRenderMode.MobileFit) {
-                                            TerminalRenderMode.DesktopMirror.name
-                                        } else {
-                                            TerminalRenderMode.MobileFit.name
-                                        }
-                                    }
-                                )
-                                DropdownMenuItem(
                                     text = { Text("特殊键") },
                                     leadingIcon = {
                                         Icon(Icons.Default.Keyboard, contentDescription = null)
@@ -1454,7 +1488,7 @@ fun TerminalViewScreen(
                                     }
                                 )
                                 DropdownMenuItem(
-                                    text = { Text("布局与字号") },
+                                    text = { Text("字号") },
                                     leadingIcon = {
                                         Icon(Icons.Default.Settings, contentDescription = null)
                                     },
@@ -1502,21 +1536,16 @@ fun TerminalViewScreen(
                         sessionId = session?.sessionId,
                         output = output,
                         outputVersion = outputVersion,
+                        outputEncoding = outputEncoding,
                         terminalDelta = terminalDelta,
                         desktopCols = session?.cols ?: 80,
                         desktopRows = session?.rows ?: 24,
-                        renderMode = renderMode,
                         fontScale = fontScale,
                         copyMode = copyMode,
                         scrollToBottomRequest = scrollToBottomRequest,
                         onTerminalResize = onTerminalResize,
                         onScrollAtBottom = { terminalAtBottom = it },
-                        onTuiDetected = {
-                            if (renderMode != TerminalRenderMode.DesktopMirror) {
-                                renderModeName = TerminalRenderMode.DesktopMirror.name
-                            }
-                            tuiHintVisible = false
-                        },
+                        onTuiDetected = {},
                         onReaderCommand = onSubmitCommand,
                         onDebug = onDebug,
                         modifier = Modifier.fillMaxSize()
@@ -1546,45 +1575,6 @@ fun TerminalViewScreen(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
-                    }
-                }
-                if (tuiHintVisible && renderMode == TerminalRenderMode.MobileFit) {
-                    Surface(
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .padding(8.dp),
-                        shape = RoundedCornerShape(8.dp),
-                        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.96f),
-                        tonalElevation = 4.dp
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(start = 10.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "检测到 TUI",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSecondaryContainer
-                            )
-                            TextButton(
-                                onClick = {
-                                    renderModeName = TerminalRenderMode.DesktopMirror.name
-                                    tuiHintVisible = false
-                                },
-                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
-                                modifier = Modifier.height(28.dp)
-                            ) {
-                                Text("镜像")
-                            }
-                            TextButton(
-                                onClick = { tuiHintVisible = false },
-                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
-                                modifier = Modifier.height(28.dp)
-                            ) {
-                                Text("忽略")
-                            }
-                        }
                     }
                 }
                 if (!terminalAtBottom) {
@@ -1729,58 +1719,28 @@ fun TerminalViewScreen(
     if (showLayoutControls) {
         AlertDialog(
             onDismissRequest = { showLayoutControls = false },
-            title = { Text("布局与字号") },
+            title = { Text("字号") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        TextButton(
-                            onClick = { renderModeName = TerminalRenderMode.MobileFit.name },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text(
-                                text = "阅读流",
-                                color = if (renderMode == TerminalRenderMode.MobileFit) {
-                                    MaterialTheme.colorScheme.primary
-                                } else {
-                                    MaterialTheme.colorScheme.onSurfaceVariant
-                                }
-                            )
-                        }
-                        TextButton(
-                            onClick = { renderModeName = TerminalRenderMode.DesktopMirror.name },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text(
-                                text = "桌面镜像",
-                                color = if (renderMode == TerminalRenderMode.DesktopMirror) {
-                                    MaterialTheme.colorScheme.primary
-                                } else {
-                                    MaterialTheme.colorScheme.onSurfaceVariant
-                                }
-                            )
-                        }
-                    }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         TextButton(
-                            onClick = { fontScale = (fontScale - 0.1f).coerceIn(0.7f, 1.6f) }
+                            onClick = { onTerminalFontScaleChange((fontScale - 0.1f).coerceIn(0.7f, 1.6f)) }
                         ) {
                             Text("A-")
                         }
-                        Text(
-                            text = "${(fontScale * 100).toInt()}%",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        TextButton(onClick = { onTerminalFontScaleChange(1.0f) }) {
+                            Text(
+                                text = "${(fontScale * 100).toInt()}%",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                         TextButton(
-                            onClick = { fontScale = (fontScale + 0.1f).coerceIn(0.7f, 1.6f) }
+                            onClick = { onTerminalFontScaleChange((fontScale + 0.1f).coerceIn(0.7f, 1.6f)) }
                         ) {
                             Text("A+")
                         }
@@ -2681,10 +2641,10 @@ fun TerminalWebView(
     sessionId: String?,
     output: String,
     outputVersion: Long,
+    outputEncoding: String,
     terminalDelta: SharedFlow<TerminalDeltaBatch>,
     desktopCols: Int,
     desktopRows: Int,
-    renderMode: TerminalRenderMode,
     fontScale: Float,
     copyMode: Boolean,
     scrollToBottomRequest: Long,
@@ -2702,7 +2662,7 @@ fun TerminalWebView(
     var lastFullRendered by remember(sessionId) { mutableStateOf("") }
     var lastFullRenderedVersion by remember(sessionId) { mutableStateOf(0L) }
     var lastAppliedDeltaVersion by remember(sessionId) { mutableStateOf(0L) }
-    var pendingFullRender by remember(sessionId) { mutableStateOf<Pair<String, Long>?>(null) }
+    var pendingFullRender by remember(sessionId) { mutableStateOf<Triple<String, Long, String>?>(null) }
     val bridge = remember(sessionId) {
         TerminalAndroidBridge(
             context = context,
@@ -2733,13 +2693,12 @@ fun TerminalWebView(
         }
     }
 
-    LaunchedEffect(renderMode, fontScale, desktopCols, desktopRows, pageReady, webView) {
+    LaunchedEffect(fontScale, desktopCols, desktopRows, pageReady, webView) {
         if (!pageReady || webView == null) return@LaunchedEffect
-        val modeJs = if (renderMode == TerminalRenderMode.MobileFit) "mobile-fit" else "desktop-mirror"
         webView?.evaluateJavascript(
-            "window.termsyncSetRenderMode ? window.termsyncSetRenderMode(\"$modeJs\", ${fontScale}, $desktopCols, $desktopRows) : \"NO_RENDER_MODE\";"
+            "window.termsyncSetRenderMode ? window.termsyncSetRenderMode(\"desktop-mirror\", ${fontScale}, $desktopCols, $desktopRows) : \"NO_RENDER_MODE\";"
         ) { result ->
-            onDebug("WV_RENDER_MODE mode=$modeJs fontScale=$fontScale result=$result")
+            onDebug("WV_RENDER_MODE renderedCells=true fontScale=$fontScale result=$result")
         }
         listOf(0L, 120L, 400L).forEach { delayMs ->
             launch {
@@ -2760,7 +2719,11 @@ fun TerminalWebView(
             if (batchedDelta.sessionId != activeSessionId) return@collect
             if (batchedDelta.version <= lastAppliedDeltaVersion) return@collect
             val b64 = batchedDelta.data.toJsBase64()
-            val result = wv.evaluateJavascriptAwait("window.termsyncAppendBase64(\"$b64\");")
+            val result = wv.applyTerminalPayloadBase64(
+                base64 = b64,
+                mode = "append",
+                encoding = batchedDelta.encoding
+            )
             if (result.contains("OK")) {
                 lastAppliedDeltaVersion = batchedDelta.version
             }
@@ -2774,20 +2737,27 @@ fun TerminalWebView(
         if (output == lastFullRendered && outputVersion == lastFullRenderedVersion) return@LaunchedEffect
         delay(220)
         if (outputVersion <= lastAppliedDeltaVersion) return@LaunchedEffect
-        pendingFullRender = output to outputVersion
+        pendingFullRender = Triple(output, outputVersion, outputEncoding)
     }
 
     LaunchedEffect(sessionId, pageReady, webView, pendingFullRender) {
         if (!pageReady || webView == null) return@LaunchedEffect
         val pending = pendingFullRender ?: return@LaunchedEffect
-        val (pendingOutput, pendingVersion) = pending
-        onDebug("WV_FULL_RENDER out.len=${pendingOutput.length} version=$pendingVersion reason=${if (lastFullRendered.isEmpty()) "initial" else "replay"}")
-        val result = webView?.evaluateJavascriptAwait(
-            "window.termsyncRenderBase64(\"${pendingOutput.toJsBase64()}\");"
+        val pendingOutput = pending.first
+        val pendingVersion = pending.second
+        val pendingEncoding = pending.third
+        onDebug("WV_FULL_RENDER out.len=${pendingOutput.length} version=$pendingVersion encoding=$pendingEncoding reason=${if (lastFullRendered.isEmpty()) "initial" else "replay"}")
+        val b64 = pendingOutput.toJsBase64()
+        val result = webView?.applyTerminalPayloadBase64(
+            base64 = b64,
+            mode = "render",
+            encoding = pendingEncoding
         )
-        lastFullRendered = pendingOutput
-        lastFullRenderedVersion = pendingVersion
-        lastAppliedDeltaVersion = maxOf(lastAppliedDeltaVersion, pendingVersion)
+        if (result?.contains("OK") == true) {
+            lastFullRendered = pendingOutput
+            lastFullRenderedVersion = pendingVersion
+            lastAppliedDeltaVersion = maxOf(lastAppliedDeltaVersion, pendingVersion)
+        }
         if (pendingFullRender == pending) {
             pendingFullRender = null
         }
@@ -2823,7 +2793,7 @@ fun TerminalWebView(
                     }
                     webViewClient = object : WebViewClient() {
                         override fun onPageFinished(view: WebView?, url: String?) {
-                            onDebug("WV_PAGE_READY sid=${sessionId?.take(8)} desktopCols=$desktopCols desktopRows=$desktopRows mode=${renderMode.name} fontScale=$fontScale")
+                            onDebug("WV_PAGE_READY sid=${sessionId?.take(8)} desktopCols=$desktopCols desktopRows=$desktopRows renderedCells=true fontScale=$fontScale")
                             view?.addJavascriptInterface(bridge, "TermsyncAndroid")
                             view?.evaluateJavascript("window.termsyncHealthCheck ? window.termsyncHealthCheck() : 'NO_HEALTH_CHECK'") { result ->
                                 onDebug("WV_HEALTH: $result")
@@ -2873,6 +2843,40 @@ fun TerminalWebView(
 
 private fun String.toJsBase64(): String {
     return Base64.encodeToString(toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+}
+
+private const val WEBVIEW_JS_PAYLOAD_CHUNK_SIZE = 128 * 1024
+
+private suspend fun WebView.applyTerminalPayloadBase64(
+    base64: String,
+    mode: String,
+    encoding: String
+): String {
+    if (base64.length <= WEBVIEW_JS_PAYLOAD_CHUNK_SIZE) {
+        val js = if (encoding == "base64+cells-json") {
+            "window.termsyncRenderCellsBase64(\"$base64\");"
+        } else if (mode == "append") {
+            "window.termsyncAppendBase64(\"$base64\");"
+        } else {
+            "window.termsyncRenderBase64(\"$base64\");"
+        }
+        return evaluateJavascriptAwait(js)
+    }
+
+    val payloadId = "p${System.nanoTime()}"
+    var offset = 0
+    var result = "OK:chunk"
+    while (offset < base64.length) {
+        val end = minOf(offset + WEBVIEW_JS_PAYLOAD_CHUNK_SIZE, base64.length)
+        val chunk = base64.substring(offset, end)
+        val done = end >= base64.length
+        result = evaluateJavascriptAwait(
+            "window.termsyncApplyPayloadChunk(\"$payloadId\",\"$mode\",\"$encoding\",\"$chunk\",$done);"
+        )
+        if (!result.contains("OK")) return result
+        offset = end
+    }
+    return result
 }
 
 private suspend fun WebView.evaluateJavascriptAwait(script: String): String =

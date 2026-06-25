@@ -20,8 +20,8 @@ android {
         applicationId = "com.termsync.mobile"
         minSdk = 26
         targetSdk = 34
-        versionCode = 10
-        versionName = "0.1.9"
+        versionCode = 11
+        versionName = "0.1.10"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
             useSupportLibrary = true

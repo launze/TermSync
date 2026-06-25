@@ -162,9 +162,10 @@ pub async fn fetch_latest_release(
 ) -> Result<ReleaseInfo, String> {
     let client = http_client()?;
     let url = format!(
-        "{}/api/releases/latest?platform={}",
+        "{}/api/releases/latest?platform={}&os={}",
         server_base_url(&server_url)?,
-        platform
+        platform,
+        std::env::consts::OS
     );
 
     client

@@ -303,13 +303,22 @@ impl WssClientState {
         .await
     }
 
-    pub async fn subscribe_screen(&self, workspace_id: &str, pane_id: &str) -> Result<(), String> {
+    pub async fn subscribe_screen(
+        &self,
+        workspace_id: &str,
+        pane_id: &str,
+        encoding: &str,
+    ) -> Result<(), String> {
+        let encoding = normalize_screen_encoding(encoding);
         self.send_json(v3_message(
             "screen.subscribe",
             Some(workspace_id),
             Some(pane_id),
             None,
-            json!({ "pane_id": pane_id }),
+            json!({
+                "pane_id": pane_id,
+                "encoding": encoding
+            }),
         ))
         .await
     }
@@ -332,8 +341,10 @@ impl WssClientState {
         session_id: &str,
         seq: i64,
         prev_seq: i64,
+        encoding: &str,
         data: &str,
     ) -> Result<(), String> {
+        let encoding = normalize_screen_encoding(encoding);
         self.send_json(v3_message(
             "screen.delta",
             Some(workspace_id),
@@ -343,7 +354,7 @@ impl WssClientState {
                 "stream_id": format!("{session_id}:1"),
                 "seq": seq,
                 "prev_seq": prev_seq,
-                "encoding": "base64+vt",
+                "encoding": encoding,
                 "data": BASE64.encode(data.as_bytes())
             }),
         ))
@@ -356,8 +367,10 @@ impl WssClientState {
         pane_id: &str,
         session_id: &str,
         snapshot_seq: i64,
+        encoding: &str,
         data: &str,
     ) -> Result<(), String> {
+        let encoding = normalize_screen_encoding(encoding);
         self.send_json(v3_message(
             "screen.snapshot",
             Some(workspace_id),
@@ -366,7 +379,7 @@ impl WssClientState {
             json!({
                 "stream_id": format!("{session_id}:1"),
                 "snapshot_seq": snapshot_seq,
-                "encoding": "base64+vt",
+                "encoding": encoding,
                 "data": BASE64.encode(data.as_bytes())
             }),
         ))
@@ -378,7 +391,9 @@ impl WssClientState {
         workspace_id: &str,
         pane_id: &str,
         last_seq: i64,
+        encoding: &str,
     ) -> Result<(), String> {
+        let encoding = normalize_screen_encoding(encoding);
         self.send_json(v3_message(
             "screen.resync_request",
             Some(workspace_id),
@@ -386,7 +401,8 @@ impl WssClientState {
             None,
             json!({
                 "pane_id": pane_id,
-                "last_seq": last_seq
+                "last_seq": last_seq,
+                "encoding": encoding
             }),
         ))
         .await
@@ -741,6 +757,15 @@ fn v3_message(
     Value::Object(message)
 }
 
+fn normalize_screen_encoding(encoding: &str) -> &'static str {
+    match encoding {
+        "base64+cells-json" | "cells" | "cells-json" => "base64+cells-json",
+        _ => "base64+vt",
+    }
+}
+
 fn new_client_message_id() -> String {
-    format!("desktop-{}", current_timestamp_millis())
+    static NEXT_MESSAGE_ID: AtomicU64 = AtomicU64::new(1);
+    let seq = NEXT_MESSAGE_ID.fetch_add(1, Ordering::Relaxed);
+    format!("desktop-{}-{}", current_timestamp_millis(), seq)
 }

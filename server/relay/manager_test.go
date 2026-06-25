@@ -62,6 +62,21 @@ func marshalMsg(t *testing.T, msg models.Message) []byte {
 	return data
 }
 
+func readQueuedMessage(t *testing.T, sender *deviceSender) models.Message {
+	t.Helper()
+	select {
+	case data := <-sender.queue:
+		var msg models.Message
+		if err := json.Unmarshal(data, &msg); err != nil {
+			t.Fatalf("unmarshal queued message failed: %v", err)
+		}
+		return msg
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for queued message")
+		return models.Message{}
+	}
+}
+
 func TestNewSessionManager(t *testing.T) {
 	sm, cleanup := newTestManager(t)
 	defer cleanup()
@@ -522,6 +537,129 @@ func TestScreenUnsubscribeRemovesViewerFromDeltaFanout(t *testing.T) {
 	}
 	if _, ok := sm.paneStreams["pane-1"].Subscribers["pc-1"]; ok {
 		t.Fatal("unsubscribed viewer must not be re-added by delta fanout")
+	}
+}
+
+func TestScreenDeltaFanoutRespectsSubscriberEncoding(t *testing.T) {
+	sm, cleanup := newTestManager(t)
+	defer cleanup()
+	seedDevice(t, sm, "desktop-1", "desktop-token", "desktop")
+	seedDevice(t, sm, "pc-1", "pc-token", "pc_receiver")
+	seedDevice(t, sm, "mobile-1", "mobile-token", "mobile")
+	seedPairing(t, sm, "desktop-1", "pc-1")
+	seedPairing(t, sm, "desktop-1", "mobile-1")
+
+	sm.workspaces["desktop-1:default"] = &WorkspaceInfo{
+		WorkspaceID: "desktop-1:default",
+		OwnerID:     "desktop-1",
+		Subscribers: map[string]bool{"pc-1": true, "mobile-1": true},
+	}
+	sm.paneStreams["pane-1"] = &ScreenStreamInfo{
+		WorkspaceID: "desktop-1:default",
+		PaneID:      "pane-1",
+		SessionID:   "session-1",
+		OwnerID:     "desktop-1",
+		Snapshot: map[string]interface{}{
+			"snapshot_seq": 1.0,
+			"encoding":    "base64+vt",
+			"data":        "dnQ=",
+		},
+		Snapshots: map[string]map[string]interface{}{
+			screenEncodingVT: {
+				"snapshot_seq": 1.0,
+				"encoding":    "base64+vt",
+				"data":        "dnQ=",
+			},
+			screenEncodingCells: {
+				"snapshot_seq": 1.0,
+				"encoding":    "base64+cells-json",
+				"data":        "e30=",
+			},
+		},
+		Subscribers: map[string]*ScreenSubscriberState{},
+		LastSeq:     1,
+	}
+	pcSender := newDeviceSender(nil)
+	mobileSender := newDeviceSender(nil)
+	sm.deviceConnections["pc-1"] = &websocket.Conn{}
+	sm.deviceConnections["mobile-1"] = &websocket.Conn{}
+	sm.deviceSenders["pc-1"] = pcSender
+	sm.deviceSenders["mobile-1"] = mobileSender
+
+	if err := sm.HandleMessage("pc-1", marshalMsg(t, models.Message{
+		Type:        string(models.MsgScreenSubscribe),
+		V:           3,
+		ID:          "pc-sub",
+		WorkspaceID: "desktop-1:default",
+		PaneID:      "pane-1",
+		Timestamp:   time.Now().Unix(),
+	})); err != nil {
+		t.Fatalf("pc screen.subscribe failed: %v", err)
+	}
+	if err := sm.HandleMessage("mobile-1", marshalMsg(t, models.Message{
+		Type:        string(models.MsgScreenSubscribe),
+		V:           3,
+		ID:          "mobile-sub",
+		WorkspaceID: "desktop-1:default",
+		PaneID:      "pane-1",
+		Timestamp:   time.Now().Unix(),
+		Payload: map[string]interface{}{
+			"encoding": "base64+cells-json",
+		},
+	})); err != nil {
+		t.Fatalf("mobile screen.subscribe failed: %v", err)
+	}
+	_ = readQueuedMessage(t, pcSender)
+	_ = readQueuedMessage(t, mobileSender)
+
+	if err := sm.HandleMessage("desktop-1", marshalMsg(t, models.Message{
+		Type:        string(models.MsgScreenDelta),
+		V:           3,
+		ID:          "vt-delta",
+		WorkspaceID: "desktop-1:default",
+		PaneID:      "pane-1",
+		SessionID:   "session-1",
+		Timestamp:   time.Now().Unix(),
+		Payload: map[string]interface{}{
+			"seq":      2.0,
+			"prev_seq": 1.0,
+			"encoding": "base64+vt",
+			"data":     "dnQ=",
+		},
+	})); err != nil {
+		t.Fatalf("vt screen.delta failed: %v", err)
+	}
+	pcMsg := readQueuedMessage(t, pcSender)
+	if got := strField(pcMsg.Payload, "encoding", ""); got != screenEncodingVT {
+		t.Fatalf("pc should receive vt delta, got %q", got)
+	}
+	if len(mobileSender.queue) != 0 {
+		t.Fatalf("mobile must not receive vt delta")
+	}
+
+	if err := sm.HandleMessage("desktop-1", marshalMsg(t, models.Message{
+		Type:        string(models.MsgScreenDelta),
+		V:           3,
+		ID:          "cells-delta",
+		WorkspaceID: "desktop-1:default",
+		PaneID:      "pane-1",
+		SessionID:   "session-1",
+		Timestamp:   time.Now().Unix(),
+		Payload: map[string]interface{}{
+			"seq":      2.0,
+			"prev_seq": 0.0,
+			"encoding": "base64+cells-json",
+			"data":     "e30=",
+		},
+	})); err != nil {
+		t.Fatalf("cells screen.delta failed: %v", err)
+	}
+	mobileMsg := readQueuedMessage(t, mobileSender)
+	if got := strField(mobileMsg.Payload, "encoding", ""); got != screenEncodingCells {
+		t.Fatalf("mobile should receive cells delta, got %q", got)
+	}
+	if len(pcSender.queue) != 0 {
+		t.Fatalf("pc must not receive cells delta")
 	}
 }
 
