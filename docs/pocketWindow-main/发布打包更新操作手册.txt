@@ -1,0 +1,376 @@
+PocketWindow 打包、发包、重启操作手册
+====================================
+
+nas地址：192.168.31.77
+端口22
+账号：nopsnogs
+密码：2900@hzc!03210701Qc
+服务器和发布新版都要登录nas，从服务器上传发布
+
+最后更新：2026-06-09
+项目目录：F:\projects\pocketWindow
+
+一、发版前必须确认
+----------------
+
+1. 必须在项目根目录执行命令：
+
+   F:\projects\pocketWindow
+
+2. 版本号必须递增。
+
+   Android 版本在：
+   flutter-client\pubspec.yaml
+
+   示例：
+   version: 1.2.8+210
+
+   其中 1.2.8 是显示版本，210 是 Android build number。
+   新 APK 的 build number 必须大于手机上已安装版本，否则 Android 会提示“已安装版本更高”或无法覆盖安装。
+
+   Windows 桌面端版本在：
+   control-agent\version.json
+
+   示例：
+   {
+     "version": "1.1.103",
+     "build": 103,
+     "channel": "stable"
+   }
+
+   Windows build 也必须递增，避免更新服务误判为同一个包。
+
+3. 服务端地址：
+
+   局域网管理上传地址：
+   http://192.168.31.77:58080
+
+   公网信令地址：
+   signal.167183.xyz:80
+
+   注意：上传 release 包用 192.168.31.77:58080，不是 ws://signal.167183.xyz:80。
+
+4. NAS Soft 目录：
+
+   /vol3/1000/soft
+
+   这个目录用于手动下载备份包。APP 自动更新真正读取的是服务端 release 接口，不是直接读取 Soft 目录。
+
+
+二、Android APK 打包
+------------------
+
+1. 修改版本号：
+
+   打开：
+   flutter-client\pubspec.yaml
+
+   把 version 改成新的递增版本，例如：
+   version: 1.2.9+211
+
+2. 执行打包：
+
+   cd /d F:\projects\pocketWindow\flutter-client
+   python build_release_apk.py
+
+3. 打包成功后，APK 会生成在：
+
+   F:\projects\pocketWindow\flutter-client\release\
+
+   文件名示例：
+   PocketWindow-android-arm64-v8a-v1.2.9-build211.apk
+
+4. 检查 APK 是否存在：
+
+   dir F:\projects\pocketWindow\flutter-client\release\
+
+
+三、Android APK 上传到更新服务器
+------------------------------
+
+1. 回到项目根目录：
+
+   cd /d F:\projects\pocketWindow
+
+2. 上传到更新服务器。
+
+   注意：
+   --version 和 --build 必须和 pubspec.yaml 一致。
+   --file 指向刚刚生成的 APK。
+   --file-name 必须用 PocketWindow.apk，避免 APP 更新逻辑找错文件名。
+
+   示例：
+
+   python server\tools\upload_release.py --server http://192.168.31.77:58080 --platform android --version 1.2.9 --build 211 --file F:\projects\pocketWindow\flutter-client\release\PocketWindow-android-arm64-v8a-v1.2.9-build211.apk --file-name PocketWindow.apk
+
+3. 上传成功时会输出：
+
+   "message": "Release uploaded"
+
+   同时会显示 sha256、file_size、download_url。
+
+4. 如果上传失败，先检查：
+
+   - NAS 是否在线。
+   - 服务端容器是否运行。
+   - 文件路径是否写错。
+   - version/build 是否和 APK 一致。
+
+
+四、Android APK 放到 NAS Soft 手动下载目录
+--------------------------------------
+
+这个步骤不是自动更新必须的，但建议每次都做，方便手机或其他设备手动下载安装。
+
+命令示例：
+
+pscp.exe -pw "2900@hzc!03210701Qc" -batch "F:\projects\pocketWindow\flutter-client\release\PocketWindow-android-arm64-v8a-v1.2.9-build211.apk" nopsnogs@192.168.31.77:/vol3/1000/soft/PocketWindow-android-arm64-v8a-v1.2.9-build211.apk
+
+注意：
+
+1. Soft 目录路径必须是：
+
+   /vol3/1000/soft
+
+2. 不要只上传到服务端 release 接口而忘记 Soft 目录。用户如果要手动安装，会去 Soft 目录找。
+
+3. 不要把手动下载文件名改成没有版本号的 APK，否则以后无法判断下载的是哪个版本。
+
+
+五、Windows 桌面端打包
+--------------------
+
+1. 修改桌面端版本：
+
+   打开：
+   control-agent\version.json
+
+   示例：
+   {
+     "version": "1.1.104",
+     "build": 104,
+     "channel": "stable"
+   }
+
+2. 打包前先关闭正在运行的桌面端，否则 PyInstaller 可能无法删除旧 dist 目录。
+
+   查看进程：
+
+   Get-Process PocketWindowAgent -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,Path
+
+   停止进程：
+
+   Stop-Process -Name PocketWindowAgent -Force
+
+3. 执行打包：
+
+   cd /d F:\projects\pocketWindow\control-agent
+   python build_windows_exe.py
+
+4. 打包成功后，压缩包会生成在：
+
+   F:\projects\pocketWindow\control-agent\release\
+
+   文件名示例：
+   PocketWindowAgent-win64-v1.1.104-build104.zip
+
+5. 如果打包失败并提示 agent.out.log 被占用，说明旧桌面端还在运行。
+
+   处理方法：
+
+   Stop-Process -Name PocketWindowAgent -Force
+
+   然后重新执行：
+
+   python build_windows_exe.py
+
+
+六、Windows 桌面端上传到更新服务器
+-------------------------------
+
+1. 回到项目根目录：
+
+   cd /d F:\projects\pocketWindow
+
+2. 上传 Windows 更新包：
+
+   python server\tools\upload_release.py --server http://192.168.31.77:58080 --platform windows --version 1.1.104 --build 104 --file F:\projects\pocketWindow\control-agent\release\PocketWindowAgent-win64-v1.1.104-build104.zip --file-name PocketWindowAgent-win64.zip
+
+3. 上传成功时会输出：
+
+   "message": "Release uploaded"
+
+4. 注意：
+
+   --file-name 必须用 PocketWindowAgent-win64.zip，避免桌面端更新逻辑找错文件。
+
+
+七、Windows 桌面端放到 NAS Soft 手动下载目录
+----------------------------------------
+
+命令示例：
+
+pscp.exe -pw "2900@hzc!03210701Qc" -batch "F:\projects\pocketWindow\control-agent\release\PocketWindowAgent-win64-v1.1.104-build104.zip" nopsnogs@192.168.31.77:/vol3/1000/soft/PocketWindowAgent-win64-v1.1.104-build104.zip
+
+
+八、重启本机 Windows 桌面端
+-------------------------
+
+1. 停止旧进程：
+
+   Stop-Process -Name PocketWindowAgent -Force
+
+2. 启动新进程：
+
+   Start-Process -FilePath "F:\projects\pocketWindow\control-agent\dist\PocketWindowAgent\PocketWindowAgent.exe" -WorkingDirectory "F:\projects\pocketWindow\control-agent\dist\PocketWindowAgent" -WindowStyle Hidden
+
+3. 确认进程存在：
+
+   Get-Process PocketWindowAgent -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,Path
+
+4. 查看最近日志：
+
+   Get-Content "$env:LOCALAPPDATA\PocketWindow\agent.out.log" -Tail 120
+
+5. 正常启动应该看到类似：
+
+   PocketWindow agent starting
+   LAN direct WebSocket server listening
+   Connecting control WebSocket
+   control WebSocket connected
+   Room ID: pw-xxxx
+   Waiting for remote connection
+
+
+九、服务端重新部署或重启
+----------------------
+
+一般只上传 Android/Windows release 包时，不需要重启服务端。
+
+如果修改了 server 目录里的代码，才需要重新部署服务端。
+
+当前 NAS 服务器信息：
+
+   SSH：nopsnogs@192.168.31.77
+   服务端路径：/home/nopsnogs/workspace/pocketWindow-server
+   Docker 容器：pocketwindow-server
+   服务端端口：58080
+
+常用检查命令：
+
+   plink.exe -pw "2900@hzc!03210701Qc" -batch nopsnogs@192.168.31.77 "docker ps | grep pocketwindow-server"
+
+重启容器：
+
+   plink.exe -pw "2900@hzc!03210701Qc" -batch nopsnogs@192.168.31.77 "docker restart pocketwindow-server"
+
+检查健康状态：
+
+   curl http://192.168.31.77:58080/health
+
+
+十、更新安装错误排查
+------------------
+
+1. Android 提示“已安装版本更高”
+
+   原因：
+   APK 的 build number 比手机已安装版本低。
+
+   处理：
+   提高 flutter-client\pubspec.yaml 里的 +build，例如从 210 改到 211。
+   重新打包、重新上传。
+
+2. Android 下载成功但安装失败，提示 FileProvider root 错误
+
+   需要确认文件存在：
+
+   flutter-client\android\app\src\main\res\xml\file_paths.xml
+
+   其中必须允许 APP 内部下载路径被 FileProvider 访问。
+
+3. Android 提示 Cannot delete file /storage/emulated/0/Download/PocketWindow.apk
+
+   通常是旧下载路径不存在但代码仍尝试删除。
+   当前代码已经做过 safe delete 修复。
+   如果再次出现，需要检查 app_update_service.dart 中删除文件前是否先 exists。
+
+4. 自动更新下载到 99% 又从 0 开始
+
+   优先检查：
+
+   - 服务端 release 包 sha256 是否正确。
+   - file_size 是否和实际文件一致。
+   - 网络是否中途断开。
+   - APP 是否切后台后重启了下载任务。
+
+5. 上传 release 成功但手机看不到新版本
+
+   检查：
+
+   - platform 是否写 android。
+   - version/build 是否比手机当前版本高。
+   - channel 是否 stable。
+   - 上传服务端是否是 http://192.168.31.77:58080。
+   - APP 是否连接的是同一个公网信令/更新服务器。
+
+6. Windows 打包失败，提示 dist 目录被占用
+
+   原因：
+   旧 PocketWindowAgent 正在运行。
+
+   处理：
+
+   Stop-Process -Name PocketWindowAgent -Force
+   cd /d F:\projects\pocketWindow\control-agent
+   python build_windows_exe.py
+
+
+十一、推荐完整发版流程
+--------------------
+
+Android 完整流程：
+
+1. 修改 flutter-client\pubspec.yaml 的 version。
+2. 执行 dart analyze 或至少确认改动文件无语法错误。
+3. cd /d F:\projects\pocketWindow\flutter-client
+4. python build_release_apk.py
+5. cd /d F:\projects\pocketWindow
+6. python server\tools\upload_release.py --server http://192.168.31.77:58080 --platform android --version 新版本 --build 新build --file APK完整路径 --file-name PocketWindow.apk
+7. pscp.exe 上传同一个 APK 到 /vol3/1000/soft。
+8. 手机端检查更新并安装。
+
+Windows 完整流程：
+
+1. 修改 control-agent\version.json。
+2. python -m py_compile control-agent\src\agent_simple.py
+3. Stop-Process -Name PocketWindowAgent -Force
+4. cd /d F:\projects\pocketWindow\control-agent
+5. python build_windows_exe.py
+6. cd /d F:\projects\pocketWindow
+7. python server\tools\upload_release.py --server http://192.168.31.77:58080 --platform windows --version 新版本 --build 新build --file ZIP完整路径 --file-name PocketWindowAgent-win64.zip
+8. pscp.exe 上传同一个 ZIP 到 /vol3/1000/soft。
+9. Start-Process 启动新的 PocketWindowAgent.exe。
+10. 查看 agent.out.log，确认连接 signal.167183.xyz:80 成功。
+
+
+十二、重要原则
+------------
+
+1. 自动更新服务端使用固定 file-name：
+
+   Android：PocketWindow.apk
+   Windows：PocketWindowAgent-win64.zip
+
+2. NAS Soft 手动下载文件名保留版本号：
+
+   PocketWindow-android-arm64-v8a-v1.2.9-build211.apk
+   PocketWindowAgent-win64-v1.1.104-build104.zip
+
+3. build number 必须递增。
+
+4. 打包 Windows 前必须关闭旧桌面端。
+
+5. 修改 server 代码后才需要重启服务端；只上传 release 包不需要重启服务端。
+
+6. 发版后必须至少检查一次日志，确认桌面端已经连上公网信令服务器。

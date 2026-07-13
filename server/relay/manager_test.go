@@ -86,6 +86,53 @@ func TestNewSessionManager(t *testing.T) {
 	}
 }
 
+func TestScreenHistoryRoutesOnlyBetweenRequesterAndOwner(t *testing.T) {
+	sm, cleanup := newTestManager(t)
+	defer cleanup()
+	seedDevice(t, sm, "desktop-1", "desktop-token", "desktop")
+	seedDevice(t, sm, "mobile-1", "mobile-token", "mobile")
+	seedPairing(t, sm, "desktop-1", "mobile-1")
+
+	sm.paneStreams["pane-1"] = &ScreenStreamInfo{
+		WorkspaceID: "desktop-1:default",
+		PaneID:      "pane-1",
+		SessionID:   "session-1",
+		OwnerID:     "desktop-1",
+		Subscribers: map[string]*ScreenSubscriberState{"mobile-1": {}},
+	}
+	ownerSender := newDeviceSender(nil)
+	mobileSender := newDeviceSender(nil)
+	sm.deviceConnections["desktop-1"] = &websocket.Conn{}
+	sm.deviceConnections["mobile-1"] = &websocket.Conn{}
+	sm.deviceSenders["desktop-1"] = ownerSender
+	sm.deviceSenders["mobile-1"] = mobileSender
+
+	request := models.Message{
+		Type: string(models.MsgScreenHistoryRequest), V: 3, ID: "history-1",
+		WorkspaceID: "desktop-1:default", PaneID: "pane-1", Timestamp: time.Now().Unix(),
+		Payload: map[string]interface{}{"request_id": "history-1", "before_line": 2000.0},
+	}
+	if err := sm.HandleMessage("mobile-1", marshalMsg(t, request)); err != nil {
+		t.Fatalf("history request failed: %v", err)
+	}
+	forwarded := readQueuedMessage(t, ownerSender)
+	if got := strField(forwarded.Payload, "requested_by", ""); got != "mobile-1" {
+		t.Fatalf("requested_by = %q, want mobile-1", got)
+	}
+
+	response := models.Message{
+		Type: string(models.MsgScreenHistoryResponse), V: 3, ID: "history-response-1",
+		WorkspaceID: "desktop-1:default", PaneID: "pane-1", SessionID: "session-1", Timestamp: time.Now().Unix(),
+		Payload: map[string]interface{}{"request_id": "history-1", "target_device_id": "mobile-1", "data": "e30="},
+	}
+	if err := sm.HandleMessage("desktop-1", marshalMsg(t, response)); err != nil {
+		t.Fatalf("history response failed: %v", err)
+	}
+	if got := readQueuedMessage(t, mobileSender); got.Type != string(models.MsgScreenHistoryResponse) {
+		t.Fatalf("response type = %q", got.Type)
+	}
+}
+
 func TestV3OnlyRejectsLegacyMessage(t *testing.T) {
 	sm, cleanup := newTestManager(t)
 	defer cleanup()
@@ -561,19 +608,19 @@ func TestScreenDeltaFanoutRespectsSubscriberEncoding(t *testing.T) {
 		OwnerID:     "desktop-1",
 		Snapshot: map[string]interface{}{
 			"snapshot_seq": 1.0,
-			"encoding":    "base64+vt",
-			"data":        "dnQ=",
+			"encoding":     "base64+vt",
+			"data":         "dnQ=",
 		},
 		Snapshots: map[string]map[string]interface{}{
 			screenEncodingVT: {
 				"snapshot_seq": 1.0,
-				"encoding":    "base64+vt",
-				"data":        "dnQ=",
+				"encoding":     "base64+vt",
+				"data":         "dnQ=",
 			},
 			screenEncodingCells: {
 				"snapshot_seq": 1.0,
-				"encoding":    "base64+cells-json",
-				"data":        "e30=",
+				"encoding":     "base64+cells-json",
+				"data":         "e30=",
 			},
 		},
 		Subscribers: map[string]*ScreenSubscriberState{},

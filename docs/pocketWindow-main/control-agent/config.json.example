@@ -1,0 +1,19 @@
+"""
+ PocketWindow 配置文件示例
+请复制为 config.json 并根据需要修改
+"""
+
+{
+  "signaling_host": "signal.167183.xyz",
+  "signaling_port": 80,
+  "window_title": "VSCode",
+  "auto_select_first_window": false,
+  "jpeg_quality": 70,
+  "frame_interval": 0.1,
+  "capture_region": {
+    "x": 0,
+    "y": 0,
+    "width": 800,
+    "height": 600
+  }
+}

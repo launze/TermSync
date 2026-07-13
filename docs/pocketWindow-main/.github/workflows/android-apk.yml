@@ -1,0 +1,56 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Flutter Pub Get
+        working-directory: flutter-client
+        run: flutter pub get
+
+      - name: Generate Android Project (if missing)
+        working-directory: flutter-client
+        run: |
+          if [ ! -d android ]; then
+            flutter create --platforms=android .
+          fi
+
+      - name: Flutter Analyze
+        working-directory: flutter-client
+        run: flutter analyze
+
+      - name: Build Debug APK
+        working-directory: flutter-client
+        run: flutter build apk --debug
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pocketwindow-debug-apk
+          path: flutter-client/build/app/outputs/flutter-apk/app-debug.apk
+          # 尽量降低存储占用，避免很快打满 artifacts 配额
+          retention-days: 1

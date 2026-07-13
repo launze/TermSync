@@ -304,6 +304,8 @@
     var appendMaintenanceTimer = null;
     var boundViewport = null;
     var followOutput = true;
+    var userPinnedToBottom = true;
+    var viewportTouchY = null;
     var FALLBACK_SYNC_DEBOUNCE_MS = 280;
     var FALLBACK_MAX_LINES = 2400;
     var INITIAL_RENDER_MAX_CHARS = 800000;
@@ -331,6 +333,7 @@
     var CELLS_MAX_RENDER_LINES = 720;
     var CELLS_RENDER_MARGIN_LINES = 120;
     var incomingPayloadChunks = {};
+    var historyRequestInFlight = false;
 
     function isReaderMode() {
       return renderMode !== "desktop-mirror";
@@ -727,6 +730,23 @@
     }
 
     function mergeCellsFrame(frame) {
+      if (frame && frame.historyPage && lastCellsFrame && Array.isArray(frame.lines) && Array.isArray(lastCellsFrame.lines)) {
+        var currentBase = Number(lastCellsFrame.lineBase) || 0;
+        var incomingBase = Number(frame.lineBase) || 0;
+        var availablePrefix = Math.max(0, Math.min(frame.lines.length, currentBase - incomingBase));
+        var prefix = frame.lines.slice(0, availablePrefix);
+        var cursor = Object.assign({}, lastCellsFrame.cursor || {});
+        if (typeof cursor.y !== "undefined") cursor.y = (Number(cursor.y) || 0) + prefix.length;
+        historyRequestInFlight = false;
+        return Object.assign({}, lastCellsFrame, {
+          lineBase: incomingBase,
+          totalRows: prefix.length + lastCellsFrame.lines.length,
+          lines: prefix.concat(lastCellsFrame.lines),
+          cursor: cursor,
+          hasMoreHistory: !!frame.hasMoreHistory,
+          _prependedLines: prefix.length
+        });
+      }
       if (!frame || !frame.partial || !lastCellsFrame || !Array.isArray(lastCellsFrame.lines)) return frame;
       if (!Array.isArray(frame.lines)) return frame;
       if (Number(frame.cols) !== Number(lastCellsFrame.cols)) return frame;
@@ -766,8 +786,8 @@
       var wasCellsFrame = fallbackEl.classList.contains("cells-frame");
       var previousTop = fallbackEl.scrollTop || 0;
       var previousLeft = fallbackEl.scrollLeft || 0;
-      var previousAtBottom = isNearBottomEl(fallbackEl);
-      var shouldFollow = followOutput || previousAtBottom || !wasCellsFrame;
+      var previousAtBottom = isAtBottomEl(fallbackEl);
+      var shouldFollow = userPinnedToBottom || previousAtBottom || !wasCellsFrame;
       lastCellsFrame = frame;
       var font = frame.font || {};
       var lineHeight = Math.max(1, Math.min(1.5, Number(font.lineHeight) || 1.08));
@@ -797,15 +817,19 @@
       bindViewportTracking();
       var targetTop = shouldFollow
         ? Number.MAX_SAFE_INTEGER
-        : Math.min(previousTop, Math.max(0, (frame.lines.length * cellsVirtualState.linePx) - fallbackEl.clientHeight));
+        : Math.min(
+            previousTop + (Number(frame._prependedLines) || 0) * cellsVirtualState.linePx,
+            Math.max(0, (frame.lines.length * cellsVirtualState.linePx) - fallbackEl.clientHeight)
+          );
+      delete frame._prependedLines;
       renderCellsVirtualWindow(targetTop, true);
       if (shouldFollow) {
         fallbackEl.scrollTop = fallbackEl.scrollHeight;
         fallbackEl.scrollLeft = 0;
-        followOutput = true;
       } else {
         fallbackEl.scrollLeft = Math.min(previousLeft, Math.max(0, fallbackEl.scrollWidth - fallbackEl.clientWidth));
       }
+      userPinnedToBottom = shouldFollow;
       reportScrollAtBottom(true);
       return "OK:cells";
     }
@@ -995,6 +1019,7 @@
       }).join("");
       readerEl.innerHTML = header + (html || "");
       if (shouldFollow) readerEl.scrollTop = readerEl.scrollHeight;
+      userPinnedToBottom = shouldFollow;
       reportScrollAtBottom(true);
     }
 
@@ -1052,9 +1077,9 @@
         if (terminalMirrorBuffer) {
           term.write(terminalMirrorBuffer, function() {
             refreshTerminal();
-            if (followOutput || isNearBottomEl(boundViewport || document.querySelector(".xterm-viewport"))) {
+            if (userPinnedToBottom || isAtBottomEl(boundViewport || document.querySelector(".xterm-viewport"))) {
               term.scrollToBottom();
-              followOutput = true;
+              userPinnedToBottom = true;
             }
           });
         }
@@ -1111,6 +1136,11 @@
     function isNearBottomEl(el) {
       if (!el) return true;
       return el.scrollTop + el.clientHeight >= el.scrollHeight - 32;
+    }
+
+    function isAtBottomEl(el) {
+      if (!el) return true;
+      return el.scrollTop + el.clientHeight >= el.scrollHeight - 2;
     }
 
     function flushFallback(autoScroll) {
@@ -1321,8 +1351,36 @@
       if (fallbackEl && fallbackEl.classList.contains("cells-frame")) {
         scheduleCellsVirtualWindowUpdate();
       }
-      followOutput = isNearBottomEl(viewport());
+      userPinnedToBottom = isAtBottomEl(viewport());
+      requestOlderHistoryIfNeeded();
       reportScrollAtBottom(false);
+    }
+
+    function requestOlderHistoryIfNeeded() {
+      if (!fallbackEl || !lastCellsFrame || historyRequestInFlight) return;
+      if ((fallbackEl.scrollTop || 0) > 8) return;
+      var beforeLine = Number(lastCellsFrame.lineBase) || 0;
+      if (beforeLine <= 0 || lastCellsFrame.hasMoreHistory === false) return;
+      if (window.TermsyncAndroid && typeof window.TermsyncAndroid.requestHistory === "function") {
+        historyRequestInFlight = true;
+        window.TermsyncAndroid.requestHistory(beforeLine);
+      }
+    }
+
+    function handleViewportTouchStart(event) {
+      var touch = event.touches && event.touches[0];
+      viewportTouchY = touch ? touch.clientY : null;
+    }
+
+    function handleViewportTouchMove(event) {
+      var touch = event.touches && event.touches[0];
+      if (!touch || viewportTouchY === null) return;
+      if (touch.clientY > viewportTouchY + 1) userPinnedToBottom = false;
+      viewportTouchY = touch.clientY;
+    }
+
+    function handleViewportWheel(event) {
+      if (event.deltaY < 0) userPinnedToBottom = false;
     }
 
     function reportScrollAtBottom(force) {
@@ -1341,10 +1399,16 @@
       if (!el || el === boundViewport) return;
       if (boundViewport) {
         boundViewport.removeEventListener("scroll", handleViewportScroll);
+        boundViewport.removeEventListener("touchstart", handleViewportTouchStart);
+        boundViewport.removeEventListener("touchmove", handleViewportTouchMove);
+        boundViewport.removeEventListener("wheel", handleViewportWheel);
       }
       boundViewport = el;
       boundViewport.addEventListener("scroll", handleViewportScroll, { passive: true });
-      followOutput = isNearBottomEl(boundViewport);
+      boundViewport.addEventListener("touchstart", handleViewportTouchStart, { passive: true });
+      boundViewport.addEventListener("touchmove", handleViewportTouchMove, { passive: true });
+      boundViewport.addEventListener("wheel", handleViewportWheel, { passive: true });
+      userPinnedToBottom = isAtBottomEl(boundViewport);
       reportScrollAtBottom(true);
     }
 
@@ -1410,7 +1474,7 @@
       if (item.shouldFollowOutput || item.mode === "render") {
         requestAnimationFrame(function() {
           term.scrollToBottom();
-          followOutput = true;
+          userPinnedToBottom = true;
         });
       }
       if (writeCount <= 5 || writeCount % 20 === 0) {
@@ -1614,7 +1678,7 @@
     window.termsyncAppend = function(data) {
       if (!data) return "OK:empty";
       bindViewportTracking();
-      return writeTerminal(data, "append", followOutput && isNearBottom());
+      return writeTerminal(data, "append", userPinnedToBottom && isNearBottom());
     };
 
     window.termsyncRenderBase64 = function(base64) {
@@ -1654,6 +1718,9 @@
       if (encoding === "base64+cells-json") {
         return window.termsyncRenderCellsBase64(base64);
       }
+      if (encoding === "base64+cells-history-json") {
+        return window.termsyncRenderCellsBase64(base64);
+      }
       if (mode === "append") {
         return window.termsyncAppendBase64(base64);
       }
@@ -1670,7 +1737,7 @@
       } else if (term) {
         term.scrollToBottom();
       }
-      followOutput = true;
+      userPinnedToBottom = true;
       if (fallbackEl) {
         if (fallbackEl.classList.contains("cells-frame")) {
           fallbackEl.scrollTop = fallbackEl.scrollHeight;
@@ -1713,10 +1780,12 @@
       }
 
       try {
+        var shouldFollow = isNearBottomEl(viewport());
         if (previousMode !== "mobile-fit") {
-          rebuildReaderFromMirror(true);
+          rebuildReaderFromMirror(shouldFollow);
         }
-        flushReader(isNearBottomEl(readerEl));
+        flushReader(shouldFollow);
+        userPinnedToBottom = shouldFollow;
         return JSON.stringify({
           ok: true,
           mode: renderMode,

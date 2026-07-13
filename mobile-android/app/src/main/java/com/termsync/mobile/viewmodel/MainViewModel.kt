@@ -196,6 +196,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val sessionCellsCache = mutableMapOf<String, String>()
     private val v3ScreenSeqByPane = mutableMapOf<String, Long>()
     private val v3ResyncRequestedAt = mutableMapOf<String, Long>()
+    private val v3HistoryRequestedAt = mutableMapOf<String, Long>()
     private val v3ScreenAckSeqByPane = mutableMapOf<String, Long>()
     private val v3ScreenAckSentAt = mutableMapOf<String, Long>()
     private val v3SubscribedScreens = mutableMapOf<String, V3ScreenSubscription>()
@@ -299,7 +300,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 fun append(delta: PendingTerminalDelta) {
                     val key = "${delta.sessionId}\n${delta.encoding}"
                     val builder = batchByKey.getOrPut(key) { StringBuilder() }
-                    if (delta.encoding == "base64+cells-json") {
+                    if (delta.encoding.startsWith("base64+cells")) {
                         builder.clear()
                     }
                     builder.append(delta.data)
@@ -456,6 +457,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     _replayLoading.value = false
                     _terminalStreamStatus.value = "实时同步中"
                 }
+            }
+            "screen.history_response" -> {
+                val paneId = msg.paneId.orEmpty()
+                val session = _sessions.value.firstOrNull { it.paneId == paneId || it.sessionId == msg.sessionId }
+                val sessionId = msg.sessionId ?: session?.sessionId ?: return
+                if (_selectedSessionId.value != sessionId) return
+                val encoded = msg.payload?.optString("data").orEmpty()
+                val data = runCatching {
+                    String(Base64.decode(encoded, Base64.DEFAULT), Charsets.UTF_8)
+                }.getOrDefault("")
+                if (data.isBlank()) return
+                val version = nextSessionOutputVersion(sessionId)
+                _rawDeltaChannel.trySend(PendingTerminalDelta(sessionId, data, version, "base64+cells-history-json"))
             }
             "connection.error" -> {
                 val message = msg.payload?.optString("message", "Connection failed") ?: "Connection failed"
@@ -827,6 +841,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             input,
             "android:${System.currentTimeMillis()}:${input.length}"
         )
+    }
+
+    fun requestSelectedScreenHistory(beforeLine: Long) {
+        if (beforeLine <= 0L) return
+        val sessionId = _selectedSessionId.value ?: return
+        val session = _sessions.value.firstOrNull { it.sessionId == sessionId } ?: return
+        if (session.workspaceId.isBlank() || session.paneId.isBlank()) return
+        val key = v3ScreenKey(session.workspaceId, session.paneId)
+        val now = System.currentTimeMillis()
+        if (now - (v3HistoryRequestedAt[key] ?: 0L) < 750L) return
+        v3HistoryRequestedAt[key] = now
+        wssClient.requestScreenHistory(session.workspaceId, session.paneId, beforeLine)
     }
 
     fun submitCommand(command: String) {

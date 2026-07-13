@@ -1608,6 +1608,8 @@
 
         const COMMAND_LIBRARY_STORAGE_KEY = 'TermSync-command-library';
         const SAVED_TABS_STORAGE_KEY = 'TermSync-saved-tabs';
+        const WORKSPACE_STORAGE_KEY = 'TermSync-workspace';
+        const WORKSPACE_BACKUP_LIMIT = 8;
         const SAVED_TABS_LIMIT = 30;
         const RUNNING_OUTPUT_IDLE_MS = 3500;
         const COMMAND_CATEGORY_LABELS = {
@@ -2555,7 +2557,7 @@
                     lineHeight: 1.15,
                     letterSpacing: 0,
                     drawBoldTextInBrightColors: true,
-                    scrollback: 20000,
+                    scrollback: 100000,
                     theme: {
                         background: '#1e1e1e',
                         foreground: '#cccccc',
@@ -2867,12 +2869,18 @@
                 const ybase = Number(buffer.baseY ?? buffer.ybase) || 0;
                 const bufferLength = Math.max(viewportRows, Number(buffer.length) || viewportRows);
                 const lineLimit = Math.max(viewportRows, Math.max(1, Number(maxLines) || 20000));
-                const startLine = Math.max(0, bufferLength - lineLimit);
-                const lineCount = Math.max(viewportRows, bufferLength - startLine);
+                const historyEnd = Number.isFinite(Number(options.historyEnd))
+                    ? Math.max(0, Math.min(bufferLength, Number(options.historyEnd)))
+                    : null;
+                const endLine = historyEnd === null ? bufferLength : historyEnd;
+                const startLine = Math.max(0, endLine - lineLimit);
+                const lineCount = historyEnd === null
+                    ? Math.max(viewportRows, endLine - startLine)
+                    : Math.max(0, endLine - startLine);
                 const cursor = {
                     x: Math.max(0, Number(buffer.cursorX) || 0),
                     y: Math.max(0, (ybase + (Number(buffer.cursorY) || 0)) - startLine),
-                    visible: window.app?.activePaneId === this.paneId
+                    visible: historyEnd === null && window.app?.activePaneId === this.paneId
                 };
                 const palette = {
                     background: '#1e1e1e',
@@ -2938,7 +2946,9 @@
                     lineBase: startLine,
                     visibleStart: Math.max(0, ybase - startLine),
                     partial: !!options.partial,
-                    historyLimit: lineLimit,
+                    historyPage: historyEnd !== null,
+                    hasMoreHistory: startLine > 0,
+                    historyLimit: options.partial ? 100000 : lineLimit,
                     cursor,
                     palette,
                     font: {
@@ -2963,6 +2973,12 @@
                     json = JSON.stringify(frame);
                 }
                 return json;
+            }
+
+            serializeScreenHistory(beforeLine, maxLines = 2000) {
+                return this.serializeScreenCells(2000000, Math.max(100, Math.min(5000, maxLines)), {
+                    historyEnd: Math.max(0, Number(beforeLine) || 0)
+                });
             }
             serializeScreenPreviewText(maxRows = 10, maxChars = 1600) {
                 const term = this.term;
@@ -3236,7 +3252,9 @@
                 this.splitMenuTarget = null;
                 this.manualDisconnect = false;
                 this.connectionPending = false;
-                this.workspaceKey = 'TermSync-workspace';
+                this.workspaceBaseKey = WORKSPACE_STORAGE_KEY;
+                this.workspaceMode = normalizeClientMode(this.settings.get('clientMode'));
+                this.workspaceKey = this.getWorkspaceStorageKey();
                 this.workspaceSaveTimer = null;
                 this.sessionSyncTimer = null;
                 this.sessionActivity = new Map();
@@ -5108,31 +5126,152 @@
                 }, 150);
             }
 
-            saveWorkspace() {
-                try {
-                    const state = {
-                        version: 3,
-                        nextTabId: this.nextTabId,
-                        activeTabId: this.activeTabId,
-                        activePaneId: this.activePaneId,
-                        replayBuffers: Object.fromEntries(
-                            Array.from(this.replayBuffers.entries()).filter(([, value]) => !!value)
-                        ),
-                        tabs: Array.from(this.tabs.values()).map((tab) => ({
-                            id: tab.id,
-                            title: tab.title,
-                            titleMode: normalizeTitleMode(tab.titleMode),
-                            attention: !!tab.attention,
-                            root: this.splitTree.cloneNode(tab.root),
-                            panes: Array.from(tab.panes).map((paneId) => ({
-                                paneId,
-                                cwd: this.terminals.get(paneId)?.cwd || null,
-                                title: this.getPaneTitle(paneId, tab),
-                                titleMode: this.getPaneTitleMode(paneId, tab)
-                            }))
+            currentWorkspaceMode() {
+                return normalizeClientMode(this.workspaceMode);
+            }
+
+            getWorkspaceStorageKey(mode = this.currentWorkspaceMode()) {
+                return this.workspaceBaseKey + ':' + normalizeClientMode(mode);
+            }
+
+            getWorkspaceBackupStorageKey(key = this.workspaceKey) {
+                return key + ':backups';
+            }
+
+            refreshWorkspaceStorageKey() {
+                this.workspaceKey = this.getWorkspaceStorageKey();
+            }
+
+            buildWorkspaceState() {
+                return {
+                    version: 3,
+                    savedAt: Date.now(),
+                    mode: this.currentWorkspaceMode(),
+                    nextTabId: this.nextTabId,
+                    activeTabId: this.activeTabId,
+                    activePaneId: this.activePaneId,
+                    replayBuffers: Object.fromEntries(
+                        Array.from(this.replayBuffers.entries()).filter(([, value]) => !!value)
+                    ),
+                    tabs: Array.from(this.tabs.values()).map((tab) => ({
+                        id: tab.id,
+                        title: tab.title,
+                        titleMode: normalizeTitleMode(tab.titleMode),
+                        attention: !!tab.attention,
+                        root: this.splitTree.cloneNode(tab.root),
+                        panes: Array.from(tab.panes).map((paneId) => ({
+                            paneId,
+                            cwd: this.terminals.get(paneId)?.cwd || null,
+                            title: this.getPaneTitle(paneId, tab),
+                            titleMode: this.getPaneTitleMode(paneId, tab)
                         }))
-                    };
+                    }))
+                };
+            }
+
+            isValidWorkspaceNode(node, seenPaneIds = new Set()) {
+                if (!node || typeof node !== 'object') return false;
+                if (node.type === 'leaf') {
+                    const paneId = Number(node.paneId);
+                    if (!Number.isFinite(paneId) || paneId <= 0 || seenPaneIds.has(paneId)) return false;
+                    seenPaneIds.add(paneId);
+                    return true;
+                }
+                if (node.type !== 'horizontal' && node.type !== 'vertical') return false;
+                if (!Array.isArray(node.children) || node.children.length === 0) return false;
+                return node.children.every((child) => this.isValidWorkspaceNode(child, seenPaneIds));
+            }
+
+            isValidWorkspaceState(state) {
+                if (!state || typeof state !== 'object' || !Array.isArray(state.tabs) || state.tabs.length === 0) return false;
+                const seenTabIds = new Set();
+                for (const tab of state.tabs) {
+                    const tabId = Number(tab?.id);
+                    if (!Number.isFinite(tabId) || seenTabIds.has(tabId)) return false;
+                    seenTabIds.add(tabId);
+                    const seenPaneIds = new Set();
+                    if (!this.isValidWorkspaceNode(tab.root, seenPaneIds)) return false;
+                    const panes = Array.isArray(tab.panes) ? tab.panes : [];
+                    const paneMetaIds = new Set(panes.map((pane) => Number(pane?.paneId)).filter(Number.isFinite));
+                    for (const paneId of seenPaneIds) {
+                        if (!paneMetaIds.has(paneId)) return false;
+                    }
+                }
+                return true;
+            }
+
+            workspaceBackupState(state) {
+                return {
+                    ...state,
+                    replayBuffers: {}
+                };
+            }
+
+            workspaceLayoutSignature(state) {
+                return JSON.stringify({
+                    mode: state?.mode || '',
+                    tabs: (state?.tabs || []).map((tab) => ({
+                        id: tab.id,
+                        title: tab.title,
+                        titleMode: normalizeTitleMode(tab.titleMode),
+                        root: tab.root,
+                        panes: tab.panes
+                    }))
+                });
+            }
+
+            readWorkspaceState(key) {
+                try {
+                    const raw = localStorage.getItem(key);
+                    if (!raw) return null;
+                    const parsed = JSON.parse(raw);
+                    return this.isValidWorkspaceState(parsed) ? parsed : null;
+                } catch (err) {
+                    console.warn('Read workspace failed:', key, err);
+                    return null;
+                }
+            }
+
+            readWorkspaceBackups(key) {
+                try {
+                    const raw = localStorage.getItem(this.getWorkspaceBackupStorageKey(key));
+                    if (!raw) return [];
+                    const parsed = JSON.parse(raw);
+                    if (!Array.isArray(parsed)) return [];
+                    return parsed.filter((entry) => this.isValidWorkspaceState(entry));
+                } catch (err) {
+                    console.warn('Read workspace backups failed:', key, err);
+                    return [];
+                }
+            }
+
+            persistWorkspaceBackup(state, key = this.workspaceKey) {
+                if (!this.isValidWorkspaceState(state)) return;
+                const backupState = this.workspaceBackupState(state);
+                const signature = this.workspaceLayoutSignature(backupState);
+                const backups = this.readWorkspaceBackups(key)
+                    .filter((entry) => this.workspaceLayoutSignature(entry) !== signature);
+                backups.unshift(backupState);
+                try {
+                    localStorage.setItem(
+                        this.getWorkspaceBackupStorageKey(key),
+                        JSON.stringify(backups.slice(0, WORKSPACE_BACKUP_LIMIT))
+                    );
+                } catch (err) {
+                    console.warn('Persist workspace backup failed:', err);
+                }
+            }
+
+            saveWorkspace() {
+                this.refreshWorkspaceStorageKey();
+                try {
+                    const state = this.buildWorkspaceState();
+                    if (!this.isValidWorkspaceState(state)) {
+                        console.warn('Skip invalid workspace save');
+                        return;
+                    }
                     localStorage.setItem(this.workspaceKey, JSON.stringify(state));
+                    this.persistWorkspaceBackup(state, this.workspaceKey);
                 } catch (err) {
                     console.warn('Save workspace failed:', err);
                 }
@@ -5148,16 +5287,45 @@
             }
 
             loadWorkspace() {
-                try {
-                    const raw = localStorage.getItem(this.workspaceKey);
-                    if (!raw) return null;
-                    const parsed = JSON.parse(raw);
-                    if (!parsed || !Array.isArray(parsed.tabs) || parsed.tabs.length === 0) return null;
-                    return parsed;
-                } catch (err) {
-                    console.warn('Load workspace failed:', err);
-                    return null;
+                this.refreshWorkspaceStorageKey();
+                const scoped = this.readWorkspaceState(this.workspaceKey);
+                if (scoped) return scoped;
+
+                const scopedBackup = this.readWorkspaceBackups(this.workspaceKey)
+                    .sort((left, right) => (Number(right.savedAt) || 0) - (Number(left.savedAt) || 0))[0];
+                if (scopedBackup) {
+                    localStorage.setItem(this.workspaceKey, JSON.stringify(scopedBackup));
+                    return scopedBackup;
                 }
+
+                const legacy = this.workspaceKey === this.workspaceBaseKey
+                    ? null
+                    : this.readWorkspaceState(this.workspaceBaseKey);
+                if (legacy) {
+                    localStorage.setItem(this.workspaceKey, JSON.stringify({
+                        ...legacy,
+                        savedAt: Date.now(),
+                        mode: this.currentWorkspaceMode()
+                    }));
+                    this.persistWorkspaceBackup(legacy, this.workspaceKey);
+                    return legacy;
+                }
+
+                const legacyBackup = this.workspaceKey === this.workspaceBaseKey
+                    ? null
+                    : this.readWorkspaceBackups(this.workspaceBaseKey)
+                        .sort((left, right) => (Number(right.savedAt) || 0) - (Number(left.savedAt) || 0))[0];
+                if (legacyBackup) {
+                    localStorage.setItem(this.workspaceKey, JSON.stringify({
+                        ...legacyBackup,
+                        savedAt: Date.now(),
+                        mode: this.currentWorkspaceMode()
+                    }));
+                    this.persistWorkspaceBackup(legacyBackup, this.workspaceKey);
+                    return legacyBackup;
+                }
+
+                return null;
             }
 
             normalizeSavedTabEntry(entry) {
@@ -7150,6 +7318,29 @@
                     if (paneId) this.publishV3ScreenSnapshot(paneId, 'resync-request');
                     return;
                 }
+                if (payload.type === 'screen.history_request' && !this.isReceiverMode()) {
+                    const paneIdText = String(payload.pane_id || payload.payload?.pane_id || '');
+                    const paneId = this.paneIdFromV3MessagePaneId(paneIdText, payload.session_id);
+                    const terminal = Number.isFinite(paneId) ? this.terminals.get(paneId) : null;
+                    const requestedBy = String(payload.payload?.requested_by || '');
+                    const requestId = String(payload.payload?.request_id || payload.id || '');
+                    const beforeLine = Number(payload.payload?.before_line) || 0;
+                    if (terminal && requestedBy && requestId && beforeLine > 0) {
+                        const data = terminal.serializeScreenHistory(beforeLine, Number(payload.payload?.limit) || 2000);
+                        invoke('publish_screen_history', {
+                            payload: {
+                                workspace_id: payload.workspace_id || this.ownerWorkspaceId(),
+                                pane_id: paneIdText,
+                                session_id: terminal.sessionId,
+                                request_id: requestId,
+                                target_device_id: requestedBy,
+                                encoding: 'base64+cells-json',
+                                data
+                            }
+                        }).catch((err) => this.debug('v3:screen:history:failed', { paneId: paneIdText, error: String(err) }));
+                    }
+                    return;
+                }
                 if (payload.type === 'input.send' && !this.isReceiverMode()) {
                     this.handleV3InputSend(payload);
                     return;
@@ -7730,9 +7921,30 @@
             }
 
             renderTabs() {
+                if (this.renderTabsInProgress) {
+                    this.renderTabsQueued = true;
+                    return;
+                }
+
+                this.renderTabsInProgress = true;
+                try {
+                    do {
+                        this.renderTabsQueued = false;
+                        this.renderTabsOnce();
+                    } while (this.renderTabsQueued);
+                } finally {
+                    this.renderTabsInProgress = false;
+                }
+            }
+
+            renderTabsOnce() {
                 const tabBar = document.getElementById('tabBar');
                 const addBtn = tabBar.querySelector('.tab-add');
-                tabBar.querySelectorAll('.tab').forEach(el => el.remove());
+                for (const el of Array.from(tabBar.querySelectorAll('.tab'))) {
+                    if (el.parentNode === tabBar) {
+                        tabBar.removeChild(el);
+                    }
+                }
                 for (const tab of this.tabs.values()) {
                     const el = document.createElement('button');
                     const titleEl = document.createElement('span');
@@ -8591,7 +8803,9 @@
             closeSettings() { document.getElementById('settingsModal').classList.remove('visible'); }
 
             saveSettings() {
-                this.settings.set('clientMode', document.getElementById('settingClientMode').value);
+                const previousMode = this.currentWorkspaceMode();
+                const nextMode = normalizeClientMode(document.getElementById('settingClientMode').value);
+                this.settings.set('clientMode', nextMode);
                 this.settings.set('shell', document.getElementById('settingShell').value);
                 this.settings.set('customShell', document.getElementById('settingCustomShell').value);
                 this.setTerminalFontSize(document.getElementById('settingFontSize').value);
@@ -8606,7 +8820,12 @@
                     terminal.shell = this.settings.get('shell');
                 }
                 this.closeSettings();
-                this.showToast('设置已保存', 'success');
+                this.showToast(
+                    previousMode !== nextMode
+                        ? '设置已保存，重启后会加载对应模式的终端布局'
+                        : '设置已保存',
+                    'success'
+                );
             }
 
             compareVersions(left, right) {

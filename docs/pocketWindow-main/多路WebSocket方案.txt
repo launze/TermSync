@@ -1,0 +1,172 @@
+PocketWindow 多路 WebSocket 传输方案
+=========================================
+
+一、当前架构
+-------------
+
+Agent (Windows PC) → Cloudflare WebSocket 中继 → 手机 (Flutter)
+
+每端各有 2 条 WebSocket 连接：
+  - control: JSON 信令（鼠标、键盘、窗口列表等）
+  - media: H264 二进制视频帧 + 视频相关 JSON
+
+Server 按 role + channel 路由消息：
+  room.channels[role][channel] = WebSocket
+  例如: channels['agent']['media'] = agent_media_ws
+        channels['client']['media'] = client_media_ws
+
+二、为什么帧率上不去
+---------------------
+
+当前 5G/Cloudflare 下帧率 ~8-10fps，瓶颈不是带宽，是 TCP 拥塞控制：
+
+  1. Agent 发帧 → Cloudflare 中继 → 手机
+  2. 手机每收到一批数据，发回 TCP ACK
+  3. RTT ~500ms（5G + Cloudflare 路径）
+  4. 单路 TCP 的拥塞窗口决定每 RTT 能发多少数据
+  5. 窗口 ≈ 几十 KB → 每 500ms 只能发 ~4-5 帧（每帧 ~15KB）
+  6. 最大吞吐 ≈ 帧数/窗口 × 帧大小 / RTT = 4×15KB/0.5s ≈ 120KB/s ≈ 8-10fps
+
+这不是我们代码的 bug，是单路 TCP 在长 RTT 路径下的物理限制。
+
+三、多路 WebSocket 方案的原理
+------------------------------
+
+核心思想：用 N 条独立的 TCP 连接，每条各有自己的拥塞窗口。
+
+  单路：  窗口 W，每 RTT 发 W 字节
+  N 路：  N × W 字节同时发送（近似）
+
+Agent 将帧按 seq 轮询分配到各通道：
+  seq % N == 0 → media 通道
+  seq % N == 1 → stream-1 通道
+  seq % N == 2 → stream-2 通道
+  ...
+
+手机端按 seq 重排序后喂给 H264 解码器。
+
+为什么 N 路能绕过单路瓶颈：
+  - 每条 TCP 连接独立做拥塞控制
+  - 一条连接的丢包/窗口缩小不影响其他连接
+  - 总在途数据 = N × 单路窗口
+
+四、预估增益
+-------------
+
+  路数    理论最大    实际预期    说明
+  ─────────────────────────────────────────────
+  1（当前）  1×        ~8-10 fps  单路 TCP 瓶颈
+  2          2×        ~14-18 fps  第一档，效果最明显
+  4          4×        ~22-28 fps  收益递减
+  8          8×        ~30-35 fps  链路层竞争加剧，增益有限
+
+实际低于线性的原因：
+  1. N 路共享同一段 5G 空口 + Cloudflare 出口带宽
+  2. TCP 公平性：多条连接在瓶颈链路互相竞争
+  3. Cloudflare 可能对同一源的多个 WS 连接做限流
+  4. 手机端 CPU 开销：重排序 + 解 N 路帧头
+
+经验估计 N=2 就能从 ~10fps 提升到 ~15-18fps，N=4 到 ~25fps。
+
+五、全链路改动清单
+-------------------
+
+### 5.1 Server（Node.js, server.js + room_channels.js）
+
+改动量：~10 行
+
+  1. handleBinaryMessage 改用 ws._channel 决定目标通道
+     当前：硬编码发往 client 的 'media' 通道
+     改为：发往 client 的 ws._channel 同名通道
+
+  2. room.channels 改为支持动态通道名
+     当前：{agent:{control,media}, client:{control,media}}
+     改为：动态字典，registerPeer 时自动创建
+
+### 5.2 Agent（Python, signaling_channels.py + agent_simple.py）
+
+改动量：~100 行
+
+  1. MultiStreamSignaling 类（或修改 DualChannelSignaling）
+     - 创建 N 个 _WebSocketChannel，分别连到 server，channel 名 stream-0 ~ stream-N-1
+     - send_binary_stream(i, payload) 方法
+
+  2. 发送端改造
+     - N 个 send slot（每个通道一个）
+     - N 个发送线程（各自阻塞不影响其他路）
+     - 轮询分配：idx = seq % N
+
+### 5.3 Flutter 客户端（Dart, signaling_channels.dart + h264_video_stream_service.dart）
+
+改动量：~150 行
+
+  1. SignalingChannels
+     - connect() 额外连 N-1 条 WS（stream-1 ~ stream-N-1）
+     - 各路的 binary 帧统一回调到 H264VideoStreamService
+
+  2. H264VideoStreamService._enqueueFrame
+     - 当前：单帧 pending 缓冲，收到直接替换
+     - 改为：SplayTreeMap<int, FrameData> 按 seq 排序
+     - 从 _nextExpectedSeq 起连续出队喂解码器
+     - 缺 seq 超时（~500ms）则跳过，避免卡死
+
+  伪代码：
+    final _reorderBuffer = SplayTreeMap<int, _FrameData>();
+    int _nextSeq = 0;
+
+    void _addFrame(Map<String, dynamic> data) {
+      final seq = data['seq'] as int;
+      _reorderBuffer[seq] = _FrameData(data);
+      while (_reorderBuffer.containsKey(_nextSeq)) {
+        final frame = _reorderBuffer.remove(_nextSeq)!;
+        _pendingFrame = frame;  // 喂给解码器
+        _nextSeq++;
+        if (!_decodingFrame) _drainFrames();
+      }
+    }
+
+六、备选方案对比
+-----------------
+
+  方案                     复杂度              预期效果      改动 Flutter
+  ─────────────────────────────────────────────────────────────────────
+  多路 WebSocket（N=2先试） agent:中 server:低    ~15-18fps   需要（~150行）
+  WebRTC DataChannel (UDP)  agent:高 server:高    ~25-30fps   需要（中等）
+  UDP TURN 直发裸 H264      agent:中 server:低    ~25-30fps   需要（大量）
+  什么都不做（当前已可用）  无                    ~8-10fps    无
+
+七、为什么先做 N=2 而不是 N=4/8
+--------------------------------
+
+  1. 改动量最小：只加 1 条额外 WS 连接
+  2. 第一档增益最明显：从 8-10 到 15-18≈2×
+  3. 重排序逻辑复杂度与 N 无关（写好后扩展到 N 只需要改一个常量）
+  4. 验证多路方案是否真正有效的成本最低
+
+如果 N=2 有效（帧率有明显提升），再扩展到 N=4 只需改配置数字。
+
+八、风险与注意事项
+------------------
+
+  1. 帧乱序：不同路径延迟差异可能导致帧到达顺序错乱。
+     重排序缓冲 + 超时跳过可以解决。
+
+  2. 手机端 TCP 连接数增加：
+     N 路 WS = N 个 TCP 连接 = 更多 keepalive、更多内存。
+     5G 手机上 N=2 或 N=4 应该毫无压力。
+
+  3. Cloudflare WebSocket 连接数限制：
+     同源到 CF 边缘节点的 WS 连接数上限未知，可能需要测试。
+
+  4. 服务端兼容性：
+     旧版客户端（不支持多路）仍然只连 control+media，服务端需要兼容。
+
+九、推荐实施步骤
+-----------------
+
+  Step 1: 改 server（路由逻辑） + agent（开 stream-1 + 双路发送）
+           → 部署测试 agent→server 段是否正常工作
+  Step 2: 改 Flutter 客户端（连 stream-1 + 重排序缓冲）
+           → 端到端联调
+  Step 3: 5G 实网测试，对比单路/双路帧率和延迟
+  Step 4: 如果有效，扩展为 N=4

@@ -1,0 +1,85 @@
+首帧延迟问题分析
+==================
+日期：2026-06-09
+背景：5G + Cloudflare 隧道（高延迟 ~200-500ms RTT）下，首次连接时第一帧画面传输极慢，
+      导致 9 秒超时触发全断重连，死循环无法进入画面。
+
+一、现状：三阶段等待后才开始编码
+--------------------------------
+
+相关代码：agent_simple.py  _defer_video_start_until_stable() 和 _video_start_wait_active()
+
+┌─ 阶段1：最小延迟 0.5s ──────────────────────────────┐
+│  now < _video_start_wait_until                       │
+│  作用：简单防抖                                       │
+│  源头：_defer_video_start_until_stable('reason', 0.5) │
+└──────────────────────────────────────────────────────┘
+
+┌─ 阶段2：尺寸稳定检查 0.5s ───────────────────────────┐
+│  stable_for < 0.5                                    │
+│  要求：连续 0.5s 捕捉到的窗口尺寸不变                   │
+│  目的：确保窗口已完全渲染完毕，避免编码器因尺寸变化重建   │
+└──────────────────────────────────────────────────────┘
+
+┌─ 阶段3：内容稳定检查 1.2s ───────────────────────────┐
+│  content_stable_for < 1.2                            │
+│  要求：连续 1.2s 画面变化 < 1%（像素差强度 < 2）       │
+│  目的：（推测）避免首帧显示"半加载"的窗口                │
+└──────────────────────────────────────────────────────┘
+
+合计最低等待：~2.2 秒
+编码后还要串行发 video_stream_start + 二进制帧，再花 2 个 RTT
+
+
+二、三个阶段逐一分析
+------------------
+
+【阶段 1：最小延迟 0.5s】
+  - 合理但有优化空间，可缩短到 100-200ms
+  - 影响较小
+
+【阶段 2：尺寸稳定检查 0.5s】
+  - 有必要保留
+  - 原因：如果窗口还在调大小，编码器输出尺寸会变 → H264AnnexBEncoder.encode()
+    检测到 self._width != width → 重建 av.CodecContext → 丢失当前帧 → 浪费时间
+  - 建议缩短到 200-300ms
+
+【阶段 3：内容稳定检查 1.2s】—— 核心问题
+  - 没有必要保留
+  - 危害极大：桌面几乎不可能连续 1.2s 无变化（鼠标移动、光标闪烁、窗口动效、
+    CPU 占用率波动导致画面微变…… 任何一次变化都会重置计时器）
+  - 后果：如果桌面内容一直在变化，此检查永远无法通过 → 视频流永不启动
+  - 高延迟下恶化的原因：LAN 下侥幸通过（用户感知不到），5G 下因 RTT 大、
+    WebSocket 传输不稳定更容易触发内容变化，导致检查始终不过 → 9 秒后手机端
+    watchdog 触发全断重连（_recoverConnectionLikeFreshOpen）→ 循环
+
+
+三、建议修改方案
+--------------
+
+方案 A（推荐，改动小、收益大）：
+  1. 删除内容稳定检查（content_stable_for < 1.2 这行）
+  2. 尺寸稳定缩短到 200ms
+  3. 最小延迟缩短到 100ms
+  影响：首帧编码从 ~2.2s 降至 ~300ms，总体首帧到达手机的时间从 ~4s 降至 ~1s
+
+方案 B（更深入优化）：
+  方案 A + 将 video_stream_start JSON 和第一帧二进制数据合并发送，
+  省掉一个 RTT（高延迟下 ~200-500ms）
+
+
+四、文件路径参考
+--------------
+
+  control-agent/src/agent_simple.py:1845-1931
+    _defer_video_start_until_stable()
+    _video_start_wait_active()
+
+  control-agent/src/agent_simple.py:3116-3324
+    _send_h264_frame() - 串行发送 start + 二进制帧
+
+  flutter-client/lib/services/h264_video_stream_service.dart:45-46
+    _maxNegotiationMsWithoutOutput = 3000 - 解码超时
+
+  flutter-client/lib/ui/screens/control_screen.dart:3298-3344
+    _handleVideoHandshakeWatchdog - 9 秒重连触发器

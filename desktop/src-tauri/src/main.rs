@@ -59,6 +59,7 @@ fn main() {
             commands::unsubscribe_screen,
             commands::publish_screen_delta,
             commands::publish_screen_snapshot,
+            commands::publish_screen_history,
             commands::request_screen_resync,
             commands::ack_screen,
             commands::send_remote_input_v3,

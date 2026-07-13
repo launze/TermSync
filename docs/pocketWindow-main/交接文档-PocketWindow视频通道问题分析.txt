@@ -1,0 +1,245 @@
+PocketWindow 视频通道 0% 卡死问题 — 交接文档
+================================================
+编写日期：2026-06-10
+编写人：AI辅助调试
+
+目录
+1. 项目概述
+2. 架构
+3. 问题描述
+4. 已实施的修改
+5. Log 分析（6月10日测试）
+6. 发现的 Bug
+7. 疑似根因分析
+8. 待办事项
+9. 相关文件清单
+
+
+1. 项目概述
+-----------
+PocketWindow 是一款远程控制软件：手机（Flutter APK）通过 WebSocket 连接
+到电脑端（Python agent），实时查看电脑屏幕并控制。支持：
+  - Cloudflare 中继（信号走 signal.167183.xyz:80 → NAS 192.168.31.77:58080）
+  - LAN direct（局域网内直连，手机和PC在同一WiFi下）
+
+当前版本：v1.2.19+221（Flutter client），agent_simple.py（Python agent）
+
+
+2. 架构
+-------
+[手机] ←→ signal.167183.xyz:80(Cloudflare) ←→ NAS:58080(Node.js server)
+   ↑                        ↓
+   └── LAN direct ───── [Windows PC:58082(Python agent)]
+
+关键组件：
+  1. server.js         — Node.js 信令服务（NAS Docker容器）
+  2. room_channels.js  — 多房间/多通道消息路由（NAS Docker容器）
+  3. agent_simple.py   — Python agent（Windows 本机运行）
+  4. dual_channel_signaling.py — 3通道 WebSocket 封装（control/media/stream-1）
+  5. signaling_channels.py     — 同上，更低层
+  6. control_service.dart      — Flutter client 控制服务
+  7. h264_video_stream_service.dart — Flutter client H264 视频流处理
+  8. signaling_service.dart     — Flutter client 信令服务
+  9. control_screen.dart        — Flutter UI 控制屏幕
+
+
+3. 问题描述
+-----------
+症状：
+  - 手机连接电脑后，视频画面卡在 0%（旧版）或显示"等待 Agent 响应超时"（新版）
+  - 每次连接约 5 秒后断开
+  - 有时进度能到 88% 但仍然卡住不出画面
+  - 旧 agent 代码是正常的（后来改坏了？不确认）
+
+环境：
+  - Windows 10 x64，Python 3.9.5
+  - NAS: 192.168.31.77，运行 Node.js server 在 Docker 容器
+  - 手机: Android，通过 5G/Cloudflare 或 LAN/WiFi 连接
+  - 注意：NAS SSH 用户名 nopsnogs，密码 2900@hzc!03210701Qc
+
+
+4. 已实施的修改
+================
+
+4.1 server.js（NAS 容器）
+  - 第 290 行: const tracePayload → let tracePayload（修复 binary message 崩溃）
+  - 新增 /download.apk 路由（静态文件下载）
+
+4.2 room_channels.js（NAS 容器）
+  - normalizeChannel 接受任何非空 channel 名（旧版对 'stream-1' 返回 ''）
+
+4.3 agent_simple.py（Windows 本机）
+  - 新增 request_video_restart 原始消息处理（msg_type == 'request_video_restart'）
+  - 新增 3 个进度阶段发送：
+    · remote_connected_received (20%)
+    · send_thread_started (30%)
+    · channels_ready (35%)
+  - 视频发送线程改为按 stream_idx 分发帧（seq % video_stream_count）
+  - 日志改用 RotatingFileHandler（原本的 FileHandler 导致日志文件无限增长）
+  - DualChannelSignaling 初始化参数改为 stream_count=1
+
+4.4 control_service.dart（Flutter client）
+  - 新增 15 秒 video_stream_start 超时 + 自动重试（最多 3 次）
+  - 新增握手诊断信息：handshakeStageDetail、handshakeReceivedTypes、handshakeProgressTime
+  - 新增 _onSignalingStateChanged 监听 signaling 连接状态
+  - 新增 _startHandshakeTimer / _onVideoStreamStartTimeout 方法
+
+4.5 control_screen.dart（Flutter UI）
+  - 新增 _buildVideoHandshakeProgress 方法显示详细握手进度
+  - 显示等待时间（00:05 格式）、已收到消息类型列表、蓝色阶段详情行
+
+4.6 pubspec.yaml
+  - version: 1.2.19+221
+
+
+5. Log 分析（6月10日测试）
+=========================
+agent.out.log 记录了 4 次客户端连接，全部通过 LAN direct（局域网直连）：
+
+  Session 1 (21:56:22):
+    - remote_connected  → 21:56:22.853
+    - video_stream_start sent → 21:56:25.011（encoder 首次初始化耗时 1.8s）
+    - 客户端断开 → 21:56:27.853（约 5s 后）
+    - 用户报告：卡 0%
+
+  Session 2 (22:18:06):
+    - remote_connected  → 22:18:06.560
+    - video_stream_start sent → 22:18:06.748（capture 已在运行，仅 0.2s）
+    - 客户端断开 → 22:18:11.276（约 5s 后）
+    - 用户报告：卡 88%
+
+  Session 3 (22:26:16):
+    - 同上，约 5s 断开
+
+  Session 4 (22:26:52):
+    - 同上，约 5s 断开
+
+关键发现：
+  a) Agent 每次都成功发送了 video_stream_start（通过 media channel）
+  b) 4 次连接全部走 LAN direct（local WiFi），没有用到 Cloudflare 中继
+  c) 每次稳定 ~5 秒断开 — 不是随机网络问题
+  d) 第 1 次卡 0% 是因为 encoder 初始化慢（1.8s），client 等不及
+  e) 第 2 次卡 88% 是因为 capture 已经热启动，但画面依然没出来
+  f) 同时有两个 agent 进程在运行，每次收到双份 remote_connected
+
+
+6. 发现的 Bug
+==============
+
+BUG-1: Client setConnected(true) 从未被调用 ★★★
+  - 文件: control_service.dart
+  - 我新增的 _startHandshakeTimer / 15s 超时 / 握手诊断 全部依赖
+    setConnected(true) 被调用，但整个代码库里没有一处调用它
+  - 已在最新 build 中修复：改为在 setSignalingService 时监听
+    signaling 的 ChangeNotifier，检测到 isConnected 后自动启动定时器
+  - 修复前：15s 定时器永远不启动，诊断信息永远不显示
+
+BUG-2: Agent 缺少 import logging.handlers ★★
+  - 文件: agent_simple.py
+  - 我将日志从 FileHandler 改为 RotatingFileHandler 但忘记 import
+    logging.handlers，导致 logging.handlers.RotatingFileHandler 抛出
+    AttributeError（被 except Exception: pass 静默吞掉）
+  - 后果：agent.out.log 完全没有输出，所有日志丢失
+  - 已修复：添加 import logging.handlers
+
+BUG-3: Agent _video_stream_count 与 stream_count 不匹配 ★★
+  - 文件: agent_simple.py 第 1466 行
+  - self._video_stream_count = 2 但 DualChannelSignaling(stream_count=1)
+  - 当非 LAN direct 模式时，视频帧通过 seq % 2 分发到 media(0) 和 stream-1(1)
+  - stream-1 通道确实存在（stream_count=1 → stream-1 index 0），但只有
+    一个 stream channel，所以 seq 为奇的帧发到 stream_idx=1 不会走到
+    stream-1（因为 stream_idx-1=0），实际没问题
+  - 但逻辑上 _video_stream_count 应该和 stream_count 一致
+
+BUG-4: 两个 Agent 进程同时运行 ★
+  - 本机同时运行了 .venv\Scripts\python.exe 和 E:\Python\64\3.9.5\python.exe
+  - 第二个进程是第一个进程的子进程（ParentProcessId 指向第一个）
+  - 原因未明：agent_simple.py 没有主动 fork 的代码
+  - 后果：每次收到双份 remote_connected，LAN direct 连接也被两份处理
+
+
+7. 疑似根因分析
+===============
+
+7.1 最可能：客户端解码器问题
+  证据：
+    - Agent 每次成功发送 video_stream_start
+    - Session 2+ 进度到 88%（说明 client 收到 start 并在解码）
+    - 但画面始终不出现 → 解码器可能不支持 392x532@H264 或特定编码参数
+    - 建议：尝试降低分辨率或更换编码器配置
+
+7.2 其次：5 秒用户耐心阈值
+  证据：
+    - 4 次全部 ~5 秒断开，高度一致
+    - 没有代码中的 5 秒显式超时
+    - 可能是用户等不到画面手动关闭 app
+    - 也可能是 Flutter 框架的 WebSocket 超时（keepalive/ping 间隔）
+
+7.3 可能性较低：LAN direct 帧丢失
+  证据：
+    - LAN direct 模式下帧走独立 TCP 连接，不经过 stream channel 分发
+    - server 端的 tracePayload 问题只在 binary message 时触发
+    - LAN direct 绕过了 server，不会触发那个 bug
+
+7.4 之前怀疑的 root causes（见历史记录）
+  ① roomId 不匹配 → activeRooms: 0 → 但 LAN direct 不需要 roomId
+  ② remote_connected 只到达 media channel → agent 跳过 → 但 log 显示正确处理了
+  ③ Capture loop 跳过第一个 encode → 可能但不会导致 0%
+  ④ normalizeChannel('stream-1') 返回 '' → 已修复
+  ⑤ server forwardToRoomPeer 失败 → LAN direct 不经过 server
+
+
+8. 待办事项
+============
+优先级 P0（必须）:
+  [ ] 让用户安装最新 APK（修复了 BUG-1，定时器现在能启动了）
+  [ ] 确认 5 秒断连原因：是用户手动关的，还是 app 自动超时？
+  [ ] 尝试降低编码分辨率/码率，验证手机解码器兼容性
+
+优先级 P1（重要）:
+  [ ] 解决两个 agent 进程问题
+      - 检查 _acquire_single_instance_lock 是否正常工作
+      - 或者直接用一个固定的 Python 路径启动
+  [ ] 部署最新 agent_simple.py（修复 BUG-2，日志恢复）
+      - 重启本机 agent 进程
+      - 确认 agent.out.log 有输出
+
+优先级 P2（改进）:
+  [ ] 把 _video_stream_count 和 stream_count 统一
+  [ ] 确认 Cloudflare 中继路径是否正常工作（目前仅测试了 LAN direct）
+  [ ] 考虑增加客户端错误日志输出（到文件或服务器）
+
+部署方法：
+  - Server: docker cp 到 NAS 容器 + docker restart
+  - Agent: 本机关闭旧进程 + 启动新进程（Start-Process cmd.exe /c "..."）
+  - APK: 复制到 NAS /vol3/1000/soft/ 或通过 http://signal.167183.xyz/download.apk 下载
+
+NAS SSH: nopsnogs / 2900@hzc!03210701Qc (192.168.31.77)
+
+
+9. 相关文件清单
+===============
+Flutter Client (F:\projects\pocketWindow\flutter-client\):
+  lib/services/control_service.dart    — 核心控制服务，握手定时器+诊断
+  lib/services/signaling_service.dart   — 信令服务，消息分发
+  lib/services/h264_video_stream_service.dart — H264 视频流解码
+  lib/ui/screens/control_screen.dart    — 握手进度 UI 显示
+  pubspec.yaml                          — 版本 1.2.19+221
+
+Python Agent (F:\projects\pocketWindow\control-agent\src\):
+  agent_simple.py        — 主 agent（6269行）
+  signaling_channels.py  — WebSocket 多通道封装
+  desktop_agent_ui.py    — tkinter UI
+  desktop_agent_presenter.py — UI 数据展示
+
+Server (F:\projects\pocketWindow\server\src\):
+  server.js       — Node.js 信令服务（含 /download.apk 路由）
+  room_channels.js — 房间/通道路由
+
+构建产物:
+  build/app/outputs/flutter-apk/PocketWindow-v1.2.19.apk
+  NAS: /vol3/1000/soft/PocketWindow-v1.2.19.apk
+
+日志:
+  F:\projects\pocketWindow\control-agent\agent.out.log（当前 session）
+  F:\projects\pocketWindow\control-agent\agent_stderr.log（旧版本 stderr）

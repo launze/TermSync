@@ -286,6 +286,17 @@ class WssClient {
         sendMessage("screen.resync_request", workspaceId = workspaceId, paneId = paneId, payload = payload)
     }
 
+    fun requestScreenHistory(workspaceId: String, paneId: String, beforeLine: Long, limit: Int = 2000) {
+        val payload = JSONObject().apply {
+            put("pane_id", paneId)
+            put("request_id", "android-history-${System.currentTimeMillis()}")
+            put("before_line", beforeLine)
+            put("limit", limit)
+            put("encoding", "base64+cells-json")
+        }
+        sendMessage("screen.history_request", workspaceId = workspaceId, paneId = paneId, payload = payload)
+    }
+
     fun ackScreen(workspaceId: String, paneId: String, ackSeq: Long) {
         val payload = JSONObject().apply {
             put("pane_id", paneId)

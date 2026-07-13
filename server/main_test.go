@@ -53,3 +53,32 @@ func TestMatchesReleaseOSDesktop(t *testing.T) {
 		t.Fatal("empty target OS should preserve legacy all-desktop matching")
 	}
 }
+
+func TestLatestDownloadsKeepsNewestPerPlatform(t *testing.T) {
+	items := []downloadItem{
+		{Name: "termsync-desktop-windows-x64-v0.1.10-setup.exe", Platform: "Windows Setup"},
+		{Name: "termsync-desktop-windows-x64-v0.1.12-setup.exe", Platform: "Windows Setup"},
+		{Name: "termsync-desktop-windows-x64-v0.1.11.msi", Platform: "Windows MSI"},
+		{Name: "termsync-desktop-windows-x64-v0.1.12.msi", Platform: "Windows MSI"},
+		{Name: "termsync-android-release-v0.1.10.apk", Platform: "Android"},
+	}
+
+	latest := latestDownloads(items)
+	if len(latest) != 3 {
+		t.Fatalf("len(latestDownloads) = %d, want 3", len(latest))
+	}
+	wantByPlatform := map[string]string{
+		"Windows Setup": "termsync-desktop-windows-x64-v0.1.12-setup.exe",
+		"Windows MSI":   "termsync-desktop-windows-x64-v0.1.12.msi",
+		"Android":       "termsync-android-release-v0.1.10.apk",
+	}
+	for _, item := range latest {
+		if want := wantByPlatform[item.Platform]; item.Name != want {
+			t.Fatalf("latest for %q = %q, want %q", item.Platform, item.Name, want)
+		}
+		delete(wantByPlatform, item.Platform)
+	}
+	if len(wantByPlatform) != 0 {
+		t.Fatalf("missing latest downloads for platforms: %v", wantByPlatform)
+	}
+}

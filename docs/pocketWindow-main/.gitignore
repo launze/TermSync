@@ -1,0 +1,70 @@
+# Node
+**/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Python
+**/__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Flutter/Dart
+flutter-client/.dart_tool/
+flutter-client/build/
+flutter-client/.packages
+flutter-client/.flutter-plugins
+flutter-client/.flutter-plugins-dependencies
+flutter-client/.metadata
+
+# Build outputs
+**/dist/
+**/out/
+**/build-tmp/
+**/build-tmp2/
+**/dist-tmp/
+**/dist-tmp2/
+**/dist-running/
+**/release/
+control-agent/build/
+control-agent/dist/
+control-agent/agent.err.log
+control-agent/agent.out.log
+control-agent/debug_exe_stdout.txt
+server/server.err.log
+server/server.out.log
+*.tmp
+tmp_*.py
+tmp_*.log
+ScreenShot_*.png
+keyboard_overlay_preview.html
+hs_err_pid*.log
+server-deploy.tar.gz
+.codex_tmp/
+
+# Local data
+server/data/
+control-agent/agent_state.json
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets / local config
+.env
+opencode.json
+.ravencode/
+
+# Rotated logs
+control-agent/agent.out.log.*
+control-agent/agent.err.log.*
+
+# Handoff notes
+handoff-*.txt

@@ -236,7 +236,7 @@ func serveHome(downloadsDir, httpPort string) http.HandlerFunc {
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := tmpl.Execute(w, homePageData{
-			Downloads: listDownloads(downloadsDir, downloadBaseURL),
+			Downloads: latestDownloads(listDownloads(downloadsDir, downloadBaseURL)),
 			Generated: time.Now().Format("2006-01-02 15:04:05"),
 		}); err != nil {
 			log.Printf("render home failed: %v", err)
@@ -426,6 +426,41 @@ func listDownloads(downloadsDir, downloadBaseURL string) []downloadItem {
 		})
 	}
 	return items
+}
+
+func latestDownloads(items []downloadItem) []downloadItem {
+	latestByPlatform := make(map[string]downloadItem)
+	latestOrder := make([]string, 0)
+	for _, item := range items {
+		key := item.Platform
+		if key == "" {
+			key = "Download"
+		}
+		current, exists := latestByPlatform[key]
+		if !exists {
+			latestByPlatform[key] = item
+			latestOrder = append(latestOrder, key)
+			continue
+		}
+		if compareDownloadItems(item, current) > 0 {
+			latestByPlatform[key] = item
+		}
+	}
+
+	latest := make([]downloadItem, 0, len(latestOrder))
+	for _, key := range latestOrder {
+		latest = append(latest, latestByPlatform[key])
+	}
+	return latest
+}
+
+func compareDownloadItems(left, right downloadItem) int {
+	leftVersion := versionFromDownloadName(left.Name)
+	rightVersion := versionFromDownloadName(right.Name)
+	if leftVersion != "" || rightVersion != "" {
+		return compareVersion(leftVersion, rightVersion)
+	}
+	return strings.Compare(left.UpdatedAt, right.UpdatedAt)
 }
 
 func versionFromDownloadName(name string) string {

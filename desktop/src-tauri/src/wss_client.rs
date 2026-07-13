@@ -386,6 +386,31 @@ impl WssClientState {
         .await
     }
 
+    pub async fn send_screen_history_response(
+        &self,
+        workspace_id: &str,
+        pane_id: &str,
+        session_id: &str,
+        request_id: &str,
+        target_device_id: &str,
+        encoding: &str,
+        data: &str,
+    ) -> Result<(), String> {
+        self.send_json(v3_message(
+            "screen.history_response",
+            Some(workspace_id),
+            Some(pane_id),
+            Some(session_id),
+            json!({
+                "request_id": request_id,
+                "target_device_id": target_device_id,
+                "encoding": normalize_screen_encoding(encoding),
+                "data": BASE64.encode(data.as_bytes())
+            }),
+        ))
+        .await
+    }
+
     pub async fn send_screen_resync_request(
         &self,
         workspace_id: &str,

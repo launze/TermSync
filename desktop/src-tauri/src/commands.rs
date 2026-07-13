@@ -47,6 +47,17 @@ pub struct ScreenSnapshotPayload {
     pub data: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScreenHistoryPayload {
+    pub workspace_id: String,
+    pub pane_id: String,
+    pub session_id: String,
+    pub request_id: String,
+    pub target_device_id: String,
+    pub encoding: Option<String>,
+    pub data: String,
+}
+
 fn require_session_id(session_id: String) -> Result<String, String> {
     if session_id.trim().is_empty() {
         return Err("session_id is required".to_string());
@@ -386,6 +397,25 @@ pub async fn publish_screen_snapshot(
         )
         .await?;
     Ok("Screen snapshot published".to_string())
+}
+
+#[command]
+pub async fn publish_screen_history(
+    payload: ScreenHistoryPayload,
+    state: State<'_, WssClientState>,
+) -> Result<String, String> {
+    state
+        .send_screen_history_response(
+            payload.workspace_id.trim(),
+            payload.pane_id.trim(),
+            payload.session_id.trim(),
+            payload.request_id.trim(),
+            payload.target_device_id.trim(),
+            payload.encoding.as_deref().unwrap_or("base64+cells-json"),
+            &payload.data,
+        )
+        .await?;
+    Ok("Screen history published".to_string())
 }
 
 #[command]

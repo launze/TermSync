@@ -315,6 +315,10 @@ func (sm *SessionManager) HandleMessage(deviceID string, msgData []byte) error {
 		return sm.handleScreenAck(deviceID, msg)
 	case models.MsgScreenResyncRequest:
 		return sm.handleScreenResyncRequest(deviceID, msg)
+	case models.MsgScreenHistoryRequest:
+		return sm.handleScreenHistoryRequest(deviceID, msg)
+	case models.MsgScreenHistoryResponse:
+		return sm.handleScreenHistoryResponse(deviceID, msg)
 	case models.MsgScreenClear:
 		return sm.handleScreenClear(deviceID, msg)
 	case models.MsgInputSend:
@@ -328,6 +332,72 @@ func (sm *SessionManager) HandleMessage(deviceID string, msgData []byte) error {
 		sm.sendError(deviceID, "unknown_type", fmt.Sprintf("Unknown message type: %s", msg.Type))
 		return nil
 	}
+}
+
+func (sm *SessionManager) handleScreenHistoryRequest(deviceID string, msg models.Message) error {
+	paneID := msg.PaneID
+	if paneID == "" {
+		paneID = strField(msg.Payload, "pane_id", "")
+	}
+	if paneID == "" {
+		sm.sendError(deviceID, "missing_pane_id", "screen.history_request requires pane_id")
+		return nil
+	}
+	sm.mu.RLock()
+	stream := sm.paneStreams[paneID]
+	sm.mu.RUnlock()
+	if stream == nil {
+		sm.sendError(deviceID, "screen_not_found", "Screen stream not found")
+		return nil
+	}
+	if err := sm.requireWorkspaceAccess(deviceID, stream.OwnerID); err != nil {
+		sm.sendError(deviceID, "permission_denied", err.Error())
+		return nil
+	}
+	if deviceID == stream.OwnerID {
+		return nil
+	}
+	if msg.Payload == nil {
+		msg.Payload = map[string]interface{}{}
+	}
+	msg.V = 3
+	msg.WorkspaceID = stream.WorkspaceID
+	msg.PaneID = paneID
+	msg.Payload["requested_by"] = deviceID
+	sm.sendToDevice(stream.OwnerID, msg)
+	return nil
+}
+
+func (sm *SessionManager) handleScreenHistoryResponse(deviceID string, msg models.Message) error {
+	if !sm.isOwnerDevice(deviceID) {
+		sm.sendError(deviceID, "permission_denied", "Only screen owner can publish history")
+		return nil
+	}
+	paneID := msg.PaneID
+	if paneID == "" {
+		paneID = strField(msg.Payload, "pane_id", "")
+	}
+	target := strField(msg.Payload, "target_device_id", "")
+	if paneID == "" || target == "" {
+		sm.sendError(deviceID, "invalid_history_response", "pane_id and target_device_id are required")
+		return nil
+	}
+	sm.mu.RLock()
+	stream := sm.paneStreams[paneID]
+	subscribed := false
+	if stream != nil {
+		_, subscribed = stream.Subscribers[target]
+	}
+	sm.mu.RUnlock()
+	if stream == nil || stream.OwnerID != deviceID || !subscribed {
+		sm.sendError(deviceID, "permission_denied", "History target is not subscribed to this screen")
+		return nil
+	}
+	msg.V = 3
+	msg.WorkspaceID = stream.WorkspaceID
+	msg.PaneID = paneID
+	sm.sendToDevice(target, msg)
+	return nil
 }
 
 func (sm *SessionManager) recordInboundTraffic(deviceID, msgType string, byteCount int) {

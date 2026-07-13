@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  pocketwindow-server:
+    build: .
+    container_name: pocketwindow-server
+    ports:
+      - "58080:58080"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - NODE_ENV=production
+      - PORT=58080
+      - TURN_URL=turn:ha.wwszxc.tax:16903?transport=tcp
+      - TURN_USERNAME=pocketwindow
+      - TURN_CREDENTIAL=pw-turn-2900-2026
+    restart: unless-stopped
+    networks:
+      - pocketwindow-network
+
+networks:
+  pocketwindow-network:
+    driver: bridge

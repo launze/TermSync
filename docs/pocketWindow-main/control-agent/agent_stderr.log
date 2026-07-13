@@ -1,0 +1,66 @@
+2026-06-10 21:14:06,052 INFO MainThread __main__: ScreenCapture config: terminal_capture=windows-capture
+2026-06-10 21:14:06,074 INFO MainThread __main__: PocketWindow agent starting
+2026-06-10 21:14:06,087 INFO MainThread __main__: LAN probe server listening on 0.0.0.0:58081
+2026-06-10 21:14:06,090 INFO MainThread PocketWindowAgent: LAN direct WebSocket server listening on 0.0.0.0:58082
+2026-06-10 21:14:06,301 INFO agent-connection __main__: Found 24 windows
+2026-06-10 21:14:06,304 INFO agent-connection __main__: 1. [\u6574\u4e2a\u684c\u9762]
+2026-06-10 21:14:06,305 INFO agent-connection __main__: 2. [OC | \u4e86\u89e3\u5f53\u524d\u9879\u76ee]
+2026-06-10 21:14:06,306 INFO agent-connection __main__: 3. [Study Buddy Card Prototype \u548c\u53e6\u5916 18 \u4e2a\u9875\u9762 - \u7528\u62371 - Microsoft\u200b Edge]
+2026-06-10 21:14:06,307 INFO agent-connection __main__: 4. [studybuddy]
+2026-06-10 21:14:06,308 INFO agent-connection __main__: 5. [gameRoleMaker]
+2026-06-10 21:14:06,309 INFO agent-connection __main__: 6. [\u65b0\u6807\u7b7e\u9875 - 360\u6781\u901f\u6d4f\u89c8\u5668X 23.1]
+2026-06-10 21:14:06,310 INFO agent-connection __main__: 7. [C:\\Users\\Administrator\\Downloads]
+2026-06-10 21:14:06,313 INFO agent-connection __main__: 8. [F:\\projects\\studybuddy]
+2026-06-10 21:14:06,314 INFO agent-connection __main__: 9. [C:\\Users\\Administrator\\Downloads\\StudyBuddyPetAssets]
+2026-06-10 21:14:06,315 INFO agent-connection __main__: 10. [\u98de\u725b\u5f71\u89c6 \u548c\u53e6\u5916 8 \u4e2a\u9875\u9762 - \u7528\u6237\u914d\u7f6e 1 - Microsoft\u200b Edge]
+2026-06-10 21:14:06,340 INFO agent-connection PocketWindowAgent: Connecting control WebSocket: ws://192.168.31.77:58080/ws
+2026-06-10 21:14:06,344 INFO ws-control websocket: Websocket connected
+2026-06-10 21:14:06,345 INFO ws-control PocketWindowAgent: control WebSocket connected: room=pw-c271573f role=agent
+2026-06-10 21:14:06,347 INFO ws-control __main__: Pairing info payload applied: room_id=pw-c271573f pair_code=539625 device_id=pwdev-4a6202ec80784757b0ca066c15f2806d
+2026-06-10 21:14:06,348 INFO ws-control __main__: Signal message: type=room_joined
+2026-06-10 21:14:06,352 INFO ws-control __main__: Joined room: pw-c271573f
+2026-06-10 21:14:06,401 INFO agent-connection PocketWindowAgent: Connecting media WebSocket channel
+2026-06-10 21:14:06,402 INFO agent-connection PocketWindowAgent: Connecting media WebSocket: ws://192.168.31.77:58080/ws
+2026-06-10 21:14:06,406 INFO ws-media websocket: Websocket connected
+2026-06-10 21:14:06,407 INFO ws-media PocketWindowAgent: media WebSocket connected: room=pw-c271573f role=agent
+2026-06-10 21:14:06,409 INFO ws-media __main__: Signal message: type=room_joined
+2026-06-10 21:14:06,465 INFO agent-connection PocketWindowAgent: Connecting stream-1 WebSocket channel
+2026-06-10 21:14:06,466 INFO agent-connection PocketWindowAgent: Connecting stream-1 WebSocket: ws://192.168.31.77:58080/ws
+2026-06-10 21:14:06,469 INFO ws-stream-1 websocket: Websocket connected
+2026-06-10 21:14:06,471 INFO ws-stream-1 PocketWindowAgent: stream-1 WebSocket connected: room=pw-c271573f role=agent
+2026-06-10 21:14:06,473 INFO ws-stream-1 __main__: Signal message: type=room_joined
+2026-06-10 21:14:06,474 INFO ws-stream-1 __main__: Joined room: pw-c271573f
+2026-06-10 21:14:06,526 INFO agent-connection PocketWindowAgent: Room ID: pw-c271573f
+2026-06-10 21:14:06,527 INFO agent-connection __main__: Waiting for remote connection...
+2026-06-10 21:14:06,894 INFO agent-connection __main__: windows update check skipped in source mode
+2026-06-10 21:14:33,553 INFO Thread-3 PocketWindowAgent: LAN direct client attached: channel=control client_id=pwcli-4d9f2260-f603-5cf7-93b8-e6eadf877b06
+2026-06-10 21:14:33,566 INFO Thread-3 __main__: Signal message: type=remote_connected
+2026-06-10 21:14:33,567 INFO Thread-3 __main__: Remote connected: role=client client_id=pwcli-4d9f2260-f603-5cf7-93b8-e6eadf877b06
+2026-06-10 21:14:33,576 INFO Thread-3 __main__: Video startup burst extended: reason=default-window:client-connected until_ms=1781097277576 active=False
+2026-06-10 21:14:33,577 INFO Thread-4 PocketWindowAgent: LAN direct client attached: channel=control client_id=pwcli-4d9f2260-f603-5cf7-93b8-e6eadf877b06
+2026-06-10 21:14:33,583 INFO Thread-5 PocketWindowAgent: LAN direct client attached: channel=media client_id=pwcli-4d9f2260-f603-5cf7-93b8-e6eadf877b06
+2026-06-10 21:14:33,598 INFO Thread-3 __main__: Default selected target window: [PocketWindow \u7535\u8111\u7aef] (54070130) reason=client-connected
+2026-06-10 21:14:33,600 INFO Thread-4 __main__: Signal message: type=remote_connected
+2026-06-10 21:14:33,604 INFO Thread-4 __main__: Remote connected: role=client client_id=pwcli-4d9f2260-f603-5cf7-93b8-e6eadf877b06
+2026-06-10 21:14:33,605 INFO capture-loop __main__: Capture thread started: room=pw-c271573f hwnd=54070130 title=PocketWindow µçÄÔ¶Ë profile=hybrid
+2026-06-10 21:14:33,607 INFO cursor-loop __main__: Cursor thread started: room=pw-c271573f hwnd=54070130 title=PocketWindow µçÄÔ¶Ë
+2026-06-10 21:14:33,608 INFO capture-loop __main__: Media keepalive sent: reason=capture-loop codec=h264 active=False profile=hybrid
+2026-06-10 21:14:33,611 INFO Thread-4 __main__: Capture thread already running
+2026-06-10 21:14:33,613 INFO Thread-4 __main__: Cursor thread already running
+2026-06-10 21:14:33,783 INFO capture-loop __main__: Capture path switched: hwnd=54070130 title=PocketWindow µçÄÔ¶Ë path=window-dc-client
+2026-06-10 21:14:34,338 INFO capture-loop __main__: Video encoder opened: codec=h264 size=392x532 fps=15 pix_fmt=yuv420p bitrate_kbps=3000 crf=28 bufsize_kbps=6000 bufsize_multiplier=2 preset=veryfast
+2026-06-10 21:14:34,408 INFO cursor-loop __main__: Process handle usage: gdi=40 user=47 hwnd=54070130 mode=window profile=hybrid
+2026-06-10 21:14:34,464 INFO capture-loop __main__: Video stream start sent: codec=h264 size=392x532 fps=15 profile=hybrid active=False
+2026-06-10 21:14:34,466 INFO capture-loop __main__: Capture heartbeat: frames=1 skipped=0 size=392x532 bytes=0 path=window-dc-client hwnd=54070130 profile=hybrid state=high_motion diff=100.000 scale=0.70 q=38 png=7 fps=15.0 bitrate_kbps=3000 crf=28 bufmul=2 pixfmt=yuv420p preset=veryfast min_send_interval=0.0667 loop_sleep=0.0667 fallback=False timing_ms=capture:170.4 prepare:5.0 video:320.5 image:0.0 loop:857.9
+2026-06-10 21:14:34,670 INFO capture-loop __main__: Video encoder opened: codec=h264 size=392x532 fps=10 pix_fmt=yuv420p bitrate_kbps=3000 crf=28 bufsize_kbps=6000 bufsize_multiplier=2 preset=veryfast
+2026-06-10 21:14:35,638 INFO capture-loop __main__: Video encoder opened: codec=h264 size=392x532 fps=15 pix_fmt=yuv420p bitrate_kbps=3000 crf=28 bufsize_kbps=6000 bufsize_multiplier=2 preset=veryfast
+2026-06-10 21:14:35,829 INFO capture-loop __main__: Video encoder opened: codec=h264 size=392x532 fps=10 pix_fmt=yuv420p bitrate_kbps=3000 crf=28 bufsize_kbps=6000 bufsize_multiplier=2 preset=veryfast
+2026-06-10 21:14:35,835 INFO capture-loop __main__: Video stream start sent: codec=h264 size=392x532 fps=1 profile=hybrid active=False
+2026-06-10 21:14:38,571 INFO capture-loop __main__: Video stream start sent: codec=h264 size=392x532 fps=1 profile=hybrid active=False
+2026-06-10 21:14:38,576 INFO Thread-4 PocketWindowAgent: LAN direct client detached: channel=control
+2026-06-10 21:14:38,584 WARNING ws-control PocketWindowAgent: WS dual server error: message=Client not connected
+2026-06-10 21:14:38,584 INFO Thread-4 __main__: Signal message: type=remote_disconnected
+2026-06-10 21:14:38,584 WARNING ws-stream-1 PocketWindowAgent: WS dual server error: message=Client not connected
+2026-06-10 21:14:38,587 INFO Thread-4 __main__: Remote disconnected: role=client client_id=pwcli-4d9f2260-f603-5cf7-93b8-e6eadf877b06
+2026-06-10 21:14:38,592 WARNING ws-control PocketWindowAgent: WS dual server error: message=Client not connected
+2026-06-10 21:15:38,573 INFO Thread-5 PocketWindowAgent: LAN direct client detached: channel=media

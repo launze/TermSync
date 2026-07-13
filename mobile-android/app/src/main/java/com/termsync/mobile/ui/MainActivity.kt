@@ -103,6 +103,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -173,7 +174,7 @@ private data class CodexQuickPrompt(
 )
 
 private val CODEX_QUICK_PROMPTS = listOf(
-    CodexQuickPrompt("继续", "继续当前任务，完成后简要汇报结果。"),
+    CodexQuickPrompt("继续", "继续"),
     CodexQuickPrompt("测试", "运行相关测试，优先汇报失败点和需要我决策的地方。"),
     CodexQuickPrompt("总结", "总结当前进展、已改文件、验证结果和下一步建议。"),
     CodexQuickPrompt("修复失败", "根据刚才的错误继续修复，先定位原因，再做最小改动。"),
@@ -338,6 +339,7 @@ fun TTY1App(viewModel: MainViewModel) {
                         onTerminalFontScaleChange = { viewModel.updateTerminalFontScale(it) },
                         onRequestCloseSession = { viewModel.requestRemoteSessionClose(it) },
                         onTerminalResize = { cols, rows, force -> viewModel.requestSelectedSessionResize(cols, rows, force) },
+                        onRequestHistory = { beforeLine -> viewModel.requestSelectedScreenHistory(beforeLine) },
                         onSessionSelected = { viewModel.selectSession(it) },
                         onDebug = { msg -> viewModel.addDebugLine(msg) },
                         onClose = { viewModel.selectSession(null) }
@@ -1295,6 +1297,7 @@ fun TerminalViewScreen(
     onTerminalFontScaleChange: (Float) -> Unit,
     onRequestCloseSession: (String) -> Unit,
     onTerminalResize: (Int, Int, Boolean) -> Unit,
+    onRequestHistory: (Long) -> Unit,
     onSessionSelected: (String) -> Unit,
     onDebug: (String) -> Unit,
     onClose: () -> Unit
@@ -1318,6 +1321,7 @@ fun TerminalViewScreen(
         mutableStateOf(CommandPanelSection.Favorites.key)
     }
     val focusManager = LocalFocusManager.current
+    val inputSubmitScope = rememberCoroutineScope()
     fun rememberQuickAction(kind: ComposerQuickActionKind) {
         quickActionOrder += 1
         val key = kind.name
@@ -1331,16 +1335,30 @@ fun TerminalViewScreen(
         if (input.isNotBlank()) {
             val submitted = input
             inputHistory = (listOf(submitted) + inputHistory.filterNot { it == submitted }).take(12)
-            onSubmitCommand(submitted)
+            inputSubmitScope.launch {
+                sendTuiSubmission(submitted, onSendRawInput)
+            }
             input = ""
             focusManager.clearFocus()
         }
+    }
+    fun submitQuickInput(value: String) {
+        val submitted = value.trim()
+        if (submitted.isBlank()) return
+        inputHistory = (listOf(submitted) + inputHistory.filterNot { it == submitted }).take(12)
+        inputSubmitScope.launch {
+            sendTuiSubmission(submitted, onSendRawInput)
+        }
+        input = ""
+        focusManager.clearFocus()
     }
     fun sendCurrentInputToTerminal() {
         if (input.isNotBlank()) {
             val submitted = input
             inputHistory = (listOf(submitted) + inputHistory.filterNot { it == submitted }).take(12)
-            onSendRawInput(buildTuiSubmitPayload(submitted))
+            inputSubmitScope.launch {
+                sendTuiSubmission(submitted, onSendRawInput)
+            }
             input = ""
             focusManager.clearFocus()
         } else {
@@ -1544,6 +1562,7 @@ fun TerminalViewScreen(
                         copyMode = copyMode,
                         scrollToBottomRequest = scrollToBottomRequest,
                         onTerminalResize = onTerminalResize,
+                        onRequestHistory = onRequestHistory,
                         onScrollAtBottom = { terminalAtBottom = it },
                         onTuiDetected = {},
                         onReaderCommand = onSubmitCommand,
@@ -1605,6 +1624,7 @@ fun TerminalViewScreen(
                 input = input,
                 onInputChange = { input = it },
                 onSubmit = { submitCurrentInput() },
+                onSubmitText = { submitQuickInput(it) },
                 inputHistory = inputHistory,
                 quickActionUsage = quickActionUsage,
                 onQuickActionUsed = ::rememberQuickAction,
@@ -1789,15 +1809,23 @@ fun SpecialKeyButton(label: String, onClick: () -> Unit) {
     }
 }
 
-private fun buildTuiSubmitPayload(input: String): String {
+private fun buildTuiTextPayload(input: String): String {
     val text = input.replace("\r\n", "\n").replace("\r", "\n")
-    if (text.isBlank()) return "\r"
+    if (text.isBlank()) return ""
     val pasteSafeText = text.replace("\u001B", "")
     return if (pasteSafeText.contains('\n')) {
-        "\u001B[200~$pasteSafeText\u001B[201~\r"
+        "\u001B[200~$pasteSafeText\u001B[201~"
     } else {
-        "$pasteSafeText\r"
+        pasteSafeText
     }
+}
+
+private suspend fun sendTuiSubmission(input: String, sendRawInput: (String) -> Unit) {
+    val payload = buildTuiTextPayload(input)
+    if (payload.isBlank()) return
+    sendRawInput(payload)
+    delay(if (input.contains('\n') || input.contains('\r')) 80L else 40L)
+    sendRawInput("\r")
 }
 
 @Composable
@@ -1874,6 +1902,7 @@ private fun MobileTerminalComposer(
     input: String,
     onInputChange: (String) -> Unit,
     onSubmit: () -> Unit,
+    onSubmitText: (String) -> Unit,
     inputHistory: List<String>,
     quickActionUsage: Map<String, ComposerQuickActionUsage>,
     onQuickActionUsed: (ComposerQuickActionKind) -> Unit,
@@ -1926,13 +1955,7 @@ private fun MobileTerminalComposer(
                             when (action.kind) {
                                 ComposerQuickActionKind.ContinuePrompt -> {
                                     val prompt = CODEX_QUICK_PROMPTS.first().prompt
-                                    onInputChange(
-                                        if (input.isBlank()) {
-                                            prompt
-                                        } else {
-                                            input.trimEnd() + "\n" + prompt
-                                        }
-                                    )
+                                    onSubmitText(prompt)
                                 }
                                 ComposerQuickActionKind.CommandLibrary -> onOpenCommandLibrary()
                                 ComposerQuickActionKind.Favorite -> onToggleFavorite()
@@ -2575,6 +2598,7 @@ private class TerminalAndroidBridge(
     private val context: Context,
     private val onResize: (Int, Int, Boolean) -> Unit,
     private val onScrollAtBottom: (Boolean) -> Unit,
+    private val onRequestHistory: (Long) -> Unit,
     private val onTuiDetected: () -> Unit,
     private val onReaderCommand: (String) -> Unit,
     private val onDebug: (String) -> Unit
@@ -2605,6 +2629,12 @@ private class TerminalAndroidBridge(
         mainHandler.post {
             onScrollAtBottom(atBottom)
         }
+    }
+
+    @JavascriptInterface
+    fun requestHistory(beforeLine: Long) {
+        if (beforeLine <= 0L) return
+        mainHandler.post { onRequestHistory(beforeLine) }
     }
 
     @JavascriptInterface
@@ -2649,6 +2679,7 @@ fun TerminalWebView(
     copyMode: Boolean,
     scrollToBottomRequest: Long,
     onTerminalResize: (Int, Int, Boolean) -> Unit,
+    onRequestHistory: (Long) -> Unit,
     onScrollAtBottom: (Boolean) -> Unit,
     onTuiDetected: () -> Unit,
     onReaderCommand: (String) -> Unit,
@@ -2668,6 +2699,7 @@ fun TerminalWebView(
             context = context,
             onResize = onTerminalResize,
             onScrollAtBottom = onScrollAtBottom,
+            onRequestHistory = onRequestHistory,
             onTuiDetected = onTuiDetected,
             onReaderCommand = onReaderCommand,
             onDebug = onDebug
@@ -2853,7 +2885,7 @@ private suspend fun WebView.applyTerminalPayloadBase64(
     encoding: String
 ): String {
     if (base64.length <= WEBVIEW_JS_PAYLOAD_CHUNK_SIZE) {
-        val js = if (encoding == "base64+cells-json") {
+        val js = if (encoding.startsWith("base64+cells")) {
             "window.termsyncRenderCellsBase64(\"$base64\");"
         } else if (mode == "append") {
             "window.termsyncAppendBase64(\"$base64\");"

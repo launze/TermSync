@@ -1,0 +1,2102 @@
+diff --git a/control-agent/src/agent_simple.py b/control-agent/src/agent_simple.py
+index d4be49c..846282c 100644
+--- a/control-agent/src/agent_simple.py
++++ b/control-agent/src/agent_simple.py
+@@ -1380,12 +1380,11 @@ class PocketWindowAgent:
+         self._stream_resolution_scale = 1.0
+         self._dynamic_fps_limit = 20.0
+         self._static_fps_limit = 2.0
+-        self._scroll_mode_active = False
+-        self._scroll_video_scale = 0.70
+-        self._scroll_video_bitrate_kbps = 4000
+-        self._scroll_video_fps = 24.0
+-        self._scroll_video_crf = '26'
+-        self._scroll_video_vbv_multiplier = 3
++        self._scroll_video_scale = 0.55
++        self._scroll_video_bitrate_kbps = 1200
++        self._scroll_video_fps = 18.0
++        self._scroll_video_crf = '34'
++        self._scroll_video_vbv_multiplier = 2
+         self._scroll_video_pixel_format = 'yuv420p'
+         self._scroll_video_preset = 'veryfast'
+         self._motion_boost_until = 0.0
+@@ -2584,8 +2583,6 @@ exit /b 1
+ 
+     def _is_motion_boost_active(self, now: Optional[float] = None) -> bool:
+         current = now if now is not None else time.time()
+-        if self._scroll_mode_active:
+-            return True
+         return current < self._motion_boost_until
+ 
+     def _capture_class_name(self) -> str:
+@@ -2715,8 +2712,6 @@ exit /b 1
+     def _resolve_stream_state(self, profile: dict, diff_value: float, now: float) -> str:
+         if self._stream_profile_id in {'lan', 'smooth_hd'}:
+             return self.STREAM_STATE_HIGH_MOTION
+-        if self._scroll_mode_active:
+-            return self.STREAM_STATE_HIGH_MOTION
+         if self._is_motion_boost_active(now):
+             return self.STREAM_STATE_HIGH_MOTION
+         if diff_value >= 12.0 or self._last_change_percent >= 8.0:
+@@ -2916,24 +2911,12 @@ exit /b 1
+ 
+     def _is_h264_forced(self, now: Optional[float] = None) -> bool:
+         current = now if now is not None else time.time()
+-        return self._scroll_mode_active or current < self._force_h264_until or current < self._video_congested_until
++        return current < self._force_h264_until or current < self._video_congested_until
+ 
+     def _apply_transport_congestion_params(self, encode_params: dict, now: float) -> dict:
+-        if now >= self._video_congested_until:
+-            if self._video_congestion_level != 0:
+-                self._video_congestion_level = 0
+-            return encode_params
+-        params = dict(encode_params)
+-        level = max(1, int(self._video_congestion_level or 1))
+-        max_fps = 24.0 if self._scroll_mode_active else 18.0
+-        if level >= 2:
+-            max_fps = 18.0 if self._scroll_mode_active else 12.0
+-        target_fps = min(float(params.get('target_fps', max_fps) or max_fps), max_fps)
+-        target_fps = max(8.0, target_fps)
+-        params['target_fps'] = target_fps
+-        params['min_send_interval'] = max(float(params.get('min_send_interval', 0.0)), 1.0 / target_fps)
+-        params['loop_sleep'] = max(float(params.get('loop_sleep', 0.0)), 1.0 / target_fps)
+-        return params
++        if self._video_congestion_level != 0 and now >= self._video_congested_until:
++            self._video_congestion_level = 0
++        return encode_params
+ 
+     def _handle_video_frame_ack(self, data: dict) -> None:
+         try:
+@@ -2949,21 +2932,18 @@ exit /b 1
+         self._last_video_ack_delay_ms = delay_ms
+         burst_count = int(data.get('client_ws_burst_count') or 0)
+         gap_ms = int(data.get('client_ws_message_gap_ms') or 0)
+-        congested = delay_ms >= 900 or burst_count >= 12 or gap_ms >= 500
+-        severe = delay_ms >= 1800 or burst_count >= 24 or gap_ms >= 900
++        congested = delay_ms >= 900 or gap_ms >= 500
++        severe = delay_ms >= 1800 or gap_ms >= 900
+         if congested:
+-            self._video_congestion_level = max(self._video_congestion_level, 2 if severe else 1)
+-            self._video_congested_until = max(self._video_congested_until, now + (4.0 if severe else 2.0))
+-            self._force_h264_video('video_ack_congestion', 5.0 if severe else 3.0)
+             if now - self._last_video_congestion_log_at >= 1.0:
+                 self._last_video_congestion_log_at = now
+                 logger.info(
+-                    'Video congestion from ACK: seq=%s delay_ms=%s burst=%s gap_ms=%s level=%s',
++                    'Video congestion observed from ACK: seq=%s delay_ms=%s burst=%s gap_ms=%s level=%s action=log_only',
+                     seq,
+                     delay_ms,
+                     burst_count,
+                     gap_ms,
+-                    self._video_congestion_level,
++                    2 if severe else 1,
+                 )
+             self._write_scroll_diagnostic(
+                 'desktop_video_congestion_ack',
+@@ -2974,25 +2954,22 @@ exit /b 1
+                     'delay_ms': delay_ms,
+                     'burst_count': burst_count,
+                     'gap_ms': gap_ms,
+-                    'level': self._video_congestion_level,
++                    'level': 2 if severe else 1,
++                    'action': 'log_only',
+                 },
+             )
+ 
+     def _handle_video_congestion(self, data: dict) -> None:
+-        now = time.time()
+         delay_ms = int(data.get('server_to_client_receive_ms') or data.get('desktop_to_client_receive_ms') or 0)
+         burst_count = int(data.get('client_ws_burst_count') or 0)
+         gap_ms = int(data.get('client_ws_message_gap_ms') or 0)
+-        severe = delay_ms >= 1800 or burst_count >= 24 or gap_ms >= 900
+-        self._video_congestion_level = max(self._video_congestion_level, 2 if severe else 1)
+-        self._video_congested_until = max(self._video_congested_until, now + (5.0 if severe else 3.0))
+-        self._force_h264_video('client_video_congestion', 6.0 if severe else 4.0)
++        severe = delay_ms >= 1800 or gap_ms >= 900
+         logger.info(
+-            'Video congestion reported: delay_ms=%s burst=%s gap_ms=%s level=%s reason=%s',
++            'Video congestion reported: delay_ms=%s burst=%s gap_ms=%s level=%s reason=%s action=log_only',
+             delay_ms,
+             burst_count,
+             gap_ms,
+-            self._video_congestion_level,
++            2 if severe else 1,
+             data.get('reason'),
+         )
+         self._write_scroll_diagnostic(
+@@ -3002,8 +2979,9 @@ exit /b 1
+                 'delay_ms': delay_ms,
+                 'burst_count': burst_count,
+                 'gap_ms': gap_ms,
+-                'level': self._video_congestion_level,
++                'level': 2 if severe else 1,
+                 'reason': data.get('reason'),
++                'action': 'log_only',
+             },
+         )
+ 
+@@ -3044,7 +3022,6 @@ exit /b 1
+             int(state_params.get('jpeg_quality', 72)),
+             state_params.get('encode_format', 'jpg'),
+             float(state_params.get('loop_sleep', 0.03)),
+-            self._scroll_mode_active,
+         )
+ 
+     def _encode_frame(self, frame: np.ndarray, encode_params: dict, diff_value: float) -> Optional[bytes]:
+@@ -3350,8 +3327,6 @@ exit /b 1
+         self._h264_encoder.reset()
+ 
+     def _should_suppress_image_fallback_for_video_transition(self, now: float) -> bool:
+-        if self._scroll_mode_active:
+-            return True
+         if self._h264_stream_started and self._video_stream_started_codec in {'h264', 'h265'}:
+             return now - self._last_video_stream_start_sent_at < 3.0
+         return False
+@@ -4629,7 +4604,6 @@ exit /b 1
+                     'client': diagnostic,
+                     'delta': int(delta),
+                     'wheel_delta': int(wheel_delta) if wheel_delta is not None else None,
+-                    'scroll_mode': self._scroll_mode_active,
+                 },
+             )
+             success = self._mouse_wheel(int(delta), int(wheel_delta) if wheel_delta is not None else None)
+@@ -4644,7 +4618,6 @@ exit /b 1
+                     'wheel_delta': int(wheel_delta) if wheel_delta is not None else None,
+                     'success': success,
+                     'method': self._last_mouse_wheel_method,
+-                    'scroll_mode': self._scroll_mode_active,
+                 },
+             )
+             if success:
+@@ -4669,44 +4642,11 @@ exit /b 1
+             )
+             self._send_control_response(command, True)
+         elif command == 'set_scroll_mode':
+-            self._scroll_mode_active = params.get('active') is True
+-            if self._scroll_mode_active:
+-                self._activate_motion_boost(2.0)
+-                self._force_h264_video('scroll_mode_active', 4.0)
+-            else:
+-                self._h265_retry_after = 0.0
+-            self._force_next_frame.set()
+             self._write_scroll_diagnostic(
+-                'scroll_mode_changed',
+-                {
+-                    'source': 'desktop',
+-                    'active': self._scroll_mode_active,
+-                    'profile': self._stream_profile_id,
+-                    'dynamic_fps': self._dynamic_fps_limit,
+-                    'static_fps': self._static_fps_limit,
+-                },
+-            )
+-            logger.info(
+-                'Scroll mode changed: active=%s profile=%s dynamic_fps=%.2f static_fps=%.2f quality_scale=%.2f resolution_scale=%.2f scroll_scale=%.2f scroll_bitrate=%s scroll_fps=%.1f scroll_crf=%s scroll_vbv=%s scroll_pixfmt=%s scroll_preset=%s',
+-                self._scroll_mode_active,
+-                self._stream_profile_id,
+-                self._dynamic_fps_limit,
+-                self._static_fps_limit,
+-                self._stream_quality_scale,
+-                self._stream_resolution_scale,
+-                self._scroll_video_scale,
+-                self._scroll_video_bitrate_kbps,
+-                self._scroll_video_fps,
+-                self._scroll_video_crf,
+-                self._scroll_video_vbv_multiplier,
+-                self._scroll_video_pixel_format,
+-                self._scroll_video_preset,
+-            )
+-            self._send_control_response(
+-                command,
+-                True,
+-                {'active': self._scroll_mode_active},
++                'scroll_mode_ignored',
++                {'source': 'desktop'},
+             )
++            self._send_control_response(command, True, {'active': False})
+         elif command == 'request_video_restart':
+             reason = str(params.get('reason') or 'client-request')
+             force_h264 = params.get('force_h264') is not False
+@@ -4718,9 +4658,8 @@ exit /b 1
+             )
+         elif command == 'set_scroll_video_tuning':
+             try:
+-                scale = float(params.get('scale', self._scroll_video_scale))
++                target_window_width = int(float(params.get('target_window_width', 0)))
+                 bitrate_kbps = int(float(params.get('bitrate_kbps', self._scroll_video_bitrate_kbps)))
+-                fps = float(params.get('fps', self._scroll_video_fps))
+                 crf = str(params.get('crf', self._scroll_video_crf)).strip()
+                 vbv_multiplier = int(float(params.get('vbv_multiplier', self._scroll_video_vbv_multiplier)))
+                 pixel_format = str(params.get('pixel_format', self._scroll_video_pixel_format)).strip().lower()
+@@ -4731,19 +4670,17 @@ exit /b 1
+                     pixel_format = 'yuv420p'
+                 if preset not in {'ultrafast', 'superfast', 'veryfast', 'faster', 'fast'}:
+                     preset = 'veryfast'
+-                self._scroll_video_scale = min(1.0, max(0.30, scale))
+-                self._scroll_video_bitrate_kbps = min(60000, max(128, bitrate_kbps))
+-                self._scroll_video_fps = min(60.0, max(5.0, fps))
++                if target_window_width > 0:
++                    self._scroll_video_bitrate_kbps = min(60000, max(128, bitrate_kbps))
+                 self._scroll_video_crf = str(min(38, max(0, int(float(crf)))))
+                 self._scroll_video_vbv_multiplier = min(8, max(2, vbv_multiplier))
+                 self._scroll_video_pixel_format = pixel_format
+                 self._scroll_video_preset = preset
+                 self._force_next_frame.set()
+                 logger.info(
+-                    'Scroll video tuning changed: scale=%.2f bitrate_kbps=%s fps=%.1f crf=%s vbv_multiplier=%s pixel_format=%s preset=%s',
+-                    self._scroll_video_scale,
++                    'Scroll video tuning changed: target_window_width=%s bitrate_kbps=%s crf=%s vbv_multiplier=%s pixel_format=%s preset=%s',
++                    target_window_width,
+                     self._scroll_video_bitrate_kbps,
+-                    self._scroll_video_fps,
+                     self._scroll_video_crf,
+                     self._scroll_video_vbv_multiplier,
+                     self._scroll_video_pixel_format,
+@@ -5107,18 +5044,33 @@ exit /b 1
+             viewport_width = max(1, int(params.get('viewport_width', 0)))
+             viewport_height = max(1, int(params.get('viewport_height', 0)))
+             padding = max(0, int(params.get('padding', 24)))
+-            window_scale_percent = int(params.get('window_scale_percent') or 0)
+-            if window_scale_percent > 0:
+-                window_scale_percent = max(30, min(100, window_scale_percent))
++            target_client_width_param = int(params.get('target_client_width') or 0)
++            if target_client_width_param > 0:
++                target_client_width_param = max(240, min(1600, target_client_width_param))
++            target_aspect_ratio = float(params.get('target_aspect_ratio') or 0.0)
+             if viewport_width <= 0 or viewport_height <= 0:
+                 return False
++            if target_aspect_ratio <= 0.01:
++                target_aspect_ratio = viewport_width / viewport_height
++            dpi_scale = 1.0
++            try:
++                get_dpi_for_window = ctypes.windll.user32.GetDpiForWindow
++                get_dpi_for_window.argtypes = [ctypes.wintypes.HWND]
++                get_dpi_for_window.restype = ctypes.wintypes.UINT
++                dpi = int(get_dpi_for_window(hwnd))
++                if dpi > 0:
++                    dpi_scale = max(0.5, min(4.0, dpi / 96.0))
++            except Exception:
++                dpi_scale = 1.0
+             logger.info(
+-                'fit_window request: hwnd=%s viewport=%sx%s padding=%s window_scale_percent=%s',
++                'fit_window request: hwnd=%s viewport=%sx%s padding=%s target_client_width=%s target_aspect=%.4f dpi_scale=%.3f',
+                 hwnd,
+                 viewport_width,
+                 viewport_height,
+                 padding,
+-                window_scale_percent,
++                target_client_width_param,
++                target_aspect_ratio,
++                dpi_scale,
+             )
+ 
+             if self._original_window_rect is None:
+@@ -5138,15 +5090,10 @@ exit /b 1
+             client_height = max(1, current_client_rect[3] - current_client_rect[1])
+             border_width = max(0, current_width - client_width)
+             border_height = max(0, current_height - client_height)
+-            aspect_ratio = viewport_width / viewport_height
++            aspect_ratio = target_aspect_ratio
+             frame_space = self.capture.last_frame_space or 'client'
+             if self.capture._should_force_client_space(hwnd):
+                 frame_space = 'client'
+-            try:
+-                window_class_name = win32gui.GetClassName(hwnd)
+-            except Exception:
+-                window_class_name = ''
+-
+             screen_w = win32api.GetSystemMetrics(0)
+             screen_h = win32api.GetSystemMetrics(1)
+ 
+@@ -5154,41 +5101,34 @@ exit /b 1
+             max_window_height = max(240, screen_h - padding * 2)
+             max_client_width = max(160, max_window_width - border_width)
+             max_client_height = max(160, max_window_height - border_height)
+-
+-            if window_scale_percent > 0:
+-                scale = window_scale_percent / 100.0
++            expected_capture_width = 0
++            expected_capture_height = 0
++
++            if target_client_width_param > 0:
++                expected_capture_width = target_client_width_param
++                expected_capture_height = max(1, int(round(expected_capture_width / aspect_ratio)))
++                target_client_width = max(160, int(round(expected_capture_width / dpi_scale)))
++                target_client_height = max(160, int(round(expected_capture_height / dpi_scale)))
++                if target_client_width > max_client_width:
++                    ratio = max_client_width / target_client_width
++                    target_client_width = max_client_width
++                    target_client_height = max(160, int(round(target_client_height * ratio)))
++                    expected_capture_width = max(1, int(round(target_client_width * dpi_scale)))
++                    expected_capture_height = max(1, int(round(target_client_height * dpi_scale)))
++                if target_client_height > max_client_height:
++                    ratio = max_client_height / target_client_height
++                    target_client_height = max_client_height
++                    target_client_width = max(160, int(round(target_client_width * ratio)))
++                    expected_capture_width = max(1, int(round(target_client_width * dpi_scale)))
++                    expected_capture_height = max(1, int(round(target_client_height * dpi_scale)))
++                target_client_width -= target_client_width % 2
++                target_client_height -= target_client_height % 2
++                expected_capture_width = max(1, int(round(target_client_width * dpi_scale)))
++                expected_capture_height = max(1, int(round(target_client_height * dpi_scale)))
+                 if frame_space == 'window':
+-                    min_window_width = border_width + 320
+-                    if window_class_name == 'CASCADIA_HOSTING_WINDOW_CLASS':
+-                        min_window_width = max(min_window_width, 480)
+-                    min_window_height = border_height + 240
+-                    target_width = max(min_window_width, int(round(viewport_width * scale)))
+-                    target_height = max(min_window_height, int(round(viewport_height * scale)))
+-                    if target_width / max(1, target_height) > aspect_ratio:
+-                        target_height = max(target_height, int(round(target_width / aspect_ratio)))
+-                    elif target_width / max(1, target_height) < aspect_ratio:
+-                        target_width = max(target_width, int(round(target_height * aspect_ratio)))
+-                    if target_width > max_window_width:
+-                        ratio = max_window_width / target_width
+-                        target_width = max_window_width
+-                        target_height = max(min_window_height, int(round(target_height * ratio)))
+-                    if target_height > max_window_height:
+-                        ratio = max_window_height / target_height
+-                        target_height = max_window_height
+-                        target_width = max(min_window_width, int(round(target_width * ratio)))
+-                    target_client_width = max(160, target_width - border_width)
+-                    target_client_height = max(160, target_height - border_height)
++                    target_width = target_client_width + border_width
++                    target_height = target_client_height + border_height
+                 else:
+-                    target_client_width = max(320, int(round(viewport_width * scale)))
+-                    target_client_height = max(240, int(round(viewport_height * scale)))
+-                    if target_client_width > max_client_width:
+-                        ratio = max_client_width / target_client_width
+-                        target_client_width = max_client_width
+-                        target_client_height = max(240, int(round(target_client_height * ratio)))
+-                    if target_client_height > max_client_height:
+-                        ratio = max_client_height / target_client_height
+-                        target_client_height = max_client_height
+-                        target_client_width = max(320, int(round(target_client_width * ratio)))
+                     target_width = target_client_width + border_width
+                     target_height = target_client_height + border_height
+             elif frame_space == 'window':
+@@ -5232,7 +5172,7 @@ exit /b 1
+             )
+             if size_matches:
+                 logger.info(
+-                    'Fit window skipped; size already matches target: hwnd=%s outer=%sx%s client=%sx%s viewport=%sx%s frame_space=%s',
++                    'Fit window skipped; size already matches target: hwnd=%s outer=%sx%s client=%sx%s viewport=%sx%s frame_space=%s dpi_scale=%.3f expected_capture=%sx%s',
+                     hwnd,
+                     current_width,
+                     current_height,
+@@ -5241,6 +5181,9 @@ exit /b 1
+                     viewport_width,
+                     viewport_height,
+                     frame_space,
++                    dpi_scale,
++                    expected_capture_width,
++                    expected_capture_height,
+                 )
+                 return True
+ 
+@@ -5259,7 +5202,7 @@ exit /b 1
+             self._move_cursor_to_window_center(hwnd)
+ 
+             logger.info(
+-                'Fit window outer %sx%s -> %sx%s, client %sx%s -> %sx%s, viewport=%sx%s, border=%sx%s, frame_space=%s',
++                'Fit window outer %sx%s -> %sx%s, client %sx%s -> %sx%s, viewport=%sx%s, border=%sx%s, frame_space=%s dpi_scale=%.3f expected_capture=%sx%s',
+                 current_width,
+                 current_height,
+                 target_width,
+@@ -5273,6 +5216,9 @@ exit /b 1
+                 border_width,
+                 border_height,
+                 frame_space,
++                dpi_scale,
++                expected_capture_width,
++                expected_capture_height,
+             )
+             return True
+         except Exception as exc:
+@@ -5534,14 +5480,10 @@ exit /b 1
+         if normalized_wheel_delta == 0:
+             normalized_wheel_delta = 120 if delta > 0 else -120
+         self._last_mouse_wheel_method = ''
+-        if not self._scroll_mode_active:
+-            self._scroll_mode_active = True
+-            self._activate_motion_boost(2.0)
+-            self._force_next_frame.set()
++        self._force_next_frame.set()
+         logger.info(
+-            'mouse_wheel requested: delta=%s scroll_mode=%s mode=%s hwnd=%s',
++            'mouse_wheel requested: delta=%s mode=%s hwnd=%s',
+             delta,
+-            self._scroll_mode_active,
+             self.target_mode,
+             self.target_hwnd,
+         )
+@@ -6021,9 +5963,7 @@ exit /b 1
+                     encode_params = self._video_peak_limiter.tune_params(
+                         self._stream_profile_id,
+                         encode_params,
+-                        scroll_mode_active=self._scroll_mode_active,
+-                        diff_value=diff_value,
+-                        scroll_tuning=self._scroll_video_tuning(),
++                        tuning=self._scroll_video_tuning(),
+                     )
+                     loop_sleep = float(encode_params.get('loop_sleep', 0.03))
+                     should_send = self._should_send_frame(diff_value, encode_params, now)
+@@ -6190,11 +6130,7 @@ exit /b 1
+                         continue
+ 
+                     visible = payload.get('visible') is True
+-                    should_send = False
+-                    if self._scroll_mode_active:
+-                        should_send = visible != self._last_cursor_visible
+-                    else:
+-                        should_send = visible or self._last_cursor_visible is not True
++                    should_send = visible or self._last_cursor_visible is not True
+                     if should_send:
+                         self._send_peer_control(payload)
+                         self._cursor_updates_sent += 1
+diff --git a/control-agent/src/video_peak_limiter.py b/control-agent/src/video_peak_limiter.py
+index 1be4965..8917569 100644
+--- a/control-agent/src/video_peak_limiter.py
++++ b/control-agent/src/video_peak_limiter.py
+@@ -52,32 +52,30 @@ class VideoPeakLimiter:
+         profile_id: str,
+         encode_params: dict,
+         *,
+-        scroll_mode_active: bool,
+-        diff_value: float,
+-        scroll_tuning: Optional[dict] = None,
++        tuning: Optional[dict] = None,
+     ) -> dict:
+         config = self.config_for(profile_id)
+         params = dict(encode_params)
+-        if scroll_mode_active and scroll_tuning:
+-            target_fps = min(60.0, max(1.0, float(scroll_tuning.get('fps', 15.0) or 15.0)))
++        if tuning:
++            target_fps = min(60.0, max(1.0, float(tuning.get('fps', 15.0) or 15.0)))
+             requested_scale = min(
+                 1.0,
+-                max(config.min_scale, float(scroll_tuning.get('scale', config.min_scale) or config.min_scale)),
++                max(config.min_scale, float(tuning.get('scale', config.min_scale) or config.min_scale)),
+             )
+             scale = requested_scale
+             bitrate_kbps = max(
+                 128,
+-                int(float(scroll_tuning.get('bitrate_kbps', config.target_bitrate_kbps) or config.target_bitrate_kbps)),
++                int(float(tuning.get('bitrate_kbps', config.target_bitrate_kbps) or config.target_bitrate_kbps)),
+             )
+-            crf = str(scroll_tuning.get('crf', params.get('crf', '24')) or '24')
++            crf = str(tuning.get('crf', params.get('crf', '24')) or '24')
+             bufsize_multiplier = max(
+                 2,
+-                min(8, int(float(scroll_tuning.get('vbv_multiplier', 6 if profile_id == 'lan' else 3) or 3))),
++                min(8, int(float(tuning.get('vbv_multiplier', 6 if profile_id == 'lan' else 3) or 3))),
+             )
+-            pixel_format = str(scroll_tuning.get('pixel_format', 'yuv420p') or 'yuv420p').strip().lower()
++            pixel_format = str(tuning.get('pixel_format', 'yuv420p') or 'yuv420p').strip().lower()
+             if pixel_format not in {'yuv420p', 'yuv444p'}:
+                 pixel_format = 'yuv420p'
+-            preset = str(scroll_tuning.get('preset', 'veryfast') or 'veryfast').strip().lower()
++            preset = str(tuning.get('preset', 'veryfast') or 'veryfast').strip().lower()
+             if preset not in {'ultrafast', 'superfast', 'veryfast', 'faster', 'fast'}:
+                 preset = 'veryfast'
+             params['target_fps'] = target_fps
+@@ -87,7 +85,6 @@ class VideoPeakLimiter:
+             params['bufsize_multiplier'] = bufsize_multiplier
+             params['pixel_format'] = pixel_format
+             params['preset'] = preset
+-            params['scroll_fixed_tuning'] = True
+             params['min_send_interval'] = 1.0 / target_fps
+             params['loop_sleep'] = 1.0 / target_fps
+             params['peak_bytes_per_second'] = config.bytes_per_second
+diff --git a/control-agent/version.json b/control-agent/version.json
+index 51e10a6..3628313 100644
+--- a/control-agent/version.json
++++ b/control-agent/version.json
+@@ -1,5 +1,5 @@
+ {
+-  "version": "1.1.87",
+-  "build": 87,
++  "version": "1.1.100",
++  "build": 100,
+   "channel": "stable"
+ }
+diff --git a/flutter-client/lib/services/app_update_service.dart b/flutter-client/lib/services/app_update_service.dart
+index 660b110..92158b1 100644
+--- a/flutter-client/lib/services/app_update_service.dart
++++ b/flutter-client/lib/services/app_update_service.dart
+@@ -124,11 +124,7 @@ class AppUpdateService {
+     if (!Platform.isAndroid) {
+       throw Exception('当前平台不支持安装 Android 更新包');
+     }
+-    final baseDir = Directory('/storage/emulated/0/Download');
+-    final targetDir = await baseDir.exists()
+-        ? baseDir
+-        : (await getDownloadsDirectory()) ??
+-            await getApplicationDocumentsDirectory();
++    final targetDir = await getApplicationDocumentsDirectory();
+     final fileName = release.fileName.trim().isEmpty
+         ? 'pocketwindow-update.apk'
+         : release.fileName.trim();
+@@ -153,7 +149,7 @@ class AppUpdateService {
+       if (await partialFile.exists()) {
+         resumeBytes = await partialFile.length();
+         if (release.fileSize > 0 && resumeBytes >= release.fileSize) {
+-          await partialFile.delete();
++          await _deleteIfExists(partialFile);
+           resumeBytes = 0;
+         }
+       }
+@@ -168,7 +164,7 @@ class AppUpdateService {
+       final response = await client.send(request);
+       final canResume = resumeBytes > 0 && response.statusCode == 206;
+       if (resumeBytes > 0 && response.statusCode == 200) {
+-        await partialFile.delete();
++        await _deleteIfExists(partialFile);
+         resumeBytes = 0;
+       }
+       if (response.statusCode < 200 || response.statusCode >= 300) {
+@@ -213,14 +209,12 @@ class AppUpdateService {
+         final actualSha256 = await _sha256OfFile(partialFile);
+         if (actualSha256.toLowerCase() !=
+             release.sha256.trim().toLowerCase()) {
+-          await partialFile.delete();
++          await _deleteIfExists(partialFile);
+           throw Exception('Update package checksum failed');
+         }
+       }
+-      if (await targetFile.exists()) {
+-        await targetFile.delete();
+-      }
+-      await partialFile.rename(targetFile.path);
++      await targetFile.writeAsBytes(await partialFile.readAsBytes(), flush: true);
++      await _deleteIfExists(partialFile);
+       onProgress?.call(1.0);
+       return AppUpdateResult(
+         release: release,
+@@ -251,6 +245,19 @@ class AppUpdateService {
+     return digest.toString();
+   }
+ 
++  Future<void> _deleteIfExists(File file) async {
++    try {
++      if (await file.exists()) {
++        await file.delete();
++      }
++    } on FileSystemException catch (error) {
++      if (error.osError?.errorCode == 2) {
++        return;
++      }
++      rethrow;
++    }
++  }
++
+   Future<AndroidInstallerLaunchStatus> openInstaller(String filePath) async {
+     if (!Platform.isAndroid) {
+       throw Exception('当前平台不支持 APK 安装');
+diff --git a/flutter-client/lib/services/control_service.dart b/flutter-client/lib/services/control_service.dart
+index c8b937e..1631ff3 100644
+--- a/flutter-client/lib/services/control_service.dart
++++ b/flutter-client/lib/services/control_service.dart
+@@ -82,7 +82,6 @@ class ControlService with ChangeNotifier {
+   int _scrollVideoVbvMultiplier = 3;
+   String _scrollVideoPixelFormat = 'yuv420p';
+   String _scrollVideoPreset = 'veryfast';
+-  bool _scrollModeActive = false;
+   int _lastImageFrameSeq = 0;
+   final ListQueue<_FrameStat> _frameStats = ListQueue<_FrameStat>();
+   final ListQueue<_EventStat> _cursorStats = ListQueue<_EventStat>();
+@@ -162,7 +161,6 @@ class ControlService with ChangeNotifier {
+   int get scrollVideoBitrateKbps => _scrollVideoBitrateKbps;
+   double get scrollVideoFps => _scrollVideoFps;
+   int get scrollVideoCrf => _scrollVideoCrf;
+-  bool get scrollModeActive => _scrollModeActive;
+   DirectTransportService? get directTransport => _directTransport;
+   H264VideoStreamService get h264VideoStream => _h264VideoStream;
+   String get connectionDiagId => _connectionDiagId;
+@@ -432,18 +430,9 @@ class ControlService with ChangeNotifier {
+             } else if (crf is String) {
+               _scrollVideoCrf = int.tryParse(crf) ?? _scrollVideoCrf;
+             }
+-            _statusMessage = '滚动视频参数已更新';
++            _statusMessage = '视频参数已更新';
+           } else {
+-            _statusMessage = '滚动视频参数更新失败';
+-          }
+-          notifyListeners();
+-          break;
+-        case 'set_scroll_mode':
+-          if (success) {
+-            _scrollModeActive = data['active'] == true;
+-          } else {
+-            _scrollModeActive = false;
+-            _statusMessage = '婊氬姩妯″紡鍒囨崲澶辫触';
++            _statusMessage = '视频参数更新失败';
+           }
+           notifyListeners();
+           break;
+@@ -1201,7 +1190,6 @@ class ControlService with ChangeNotifier {
+     final burstCount = ackPayload['client_ws_burst_count'];
+     final gapMs = ackPayload['client_ws_message_gap_ms'];
+     if ((serverToClientMs is int && serverToClientMs >= 900) ||
+-        (burstCount is int && burstCount >= 12) ||
+         (gapMs is int && gapMs >= 500)) {
+       service.sendVideoCongestion({
+         ...ackPayload,
+@@ -1222,7 +1210,7 @@ class ControlService with ChangeNotifier {
+   }) {
+     final nowMs = DateTime.now().millisecondsSinceEpoch;
+     if (nowMs - _lastMediaReconnectTsMs < 2500) return;
+-    if (serverToClientMs < 1800 && burstCount < 24 && gapMs < 900) return;
++    if (serverToClientMs < 1800 && gapMs < 900) return;
+     _lastMediaReconnectTsMs = nowMs;
+     sendScrollDiagnostic({
+       'event': 'media_reconnect_suppressed',
+@@ -1246,24 +1234,6 @@ class ControlService with ChangeNotifier {
+     sendControl('set_video_paused', {'paused': paused});
+   }
+ 
+-  void setScrollMode(bool active) {
+-    if (_scrollModeActive == active) {
+-      if (active) {
+-        sendControl('set_scroll_mode', {'active': true});
+-        if (!_h264VideoStream.available) {
+-          requestVideoRestart(reason: 'scroll-mode-keepalive');
+-        }
+-      }
+-      return;
+-    }
+-    _scrollModeActive = active;
+-    notifyListeners();
+-    sendControl('set_scroll_mode', {'active': active});
+-    if (active && !_h264VideoStream.available) {
+-      requestVideoRestart(reason: 'scroll-mode-video-inactive');
+-    }
+-  }
+-
+   void keyPress(int keyCode) {
+     sendControl('key_press', {'key_code': keyCode});
+   }
+@@ -1341,18 +1311,15 @@ class ControlService with ChangeNotifier {
+     );
+   }
+ 
+-  void setScrollVideoTuning({
+-    required double scale,
++  Future<Map<String, dynamic>> setScrollVideoTuning({
++    required int targetWindowWidth,
+     required int bitrateKbps,
+-    required double fps,
+     required int crf,
+-    int vbvMultiplier = 3,
+-    String pixelFormat = 'yuv420p',
+-    String preset = 'veryfast',
++    required int vbvMultiplier,
++    required String pixelFormat,
++    required String preset,
+   }) {
+-    _scrollVideoScale = scale.clamp(0.30, 1.0);
+     _scrollVideoBitrateKbps = bitrateKbps.clamp(128, 60000);
+-    _scrollVideoFps = fps.clamp(5.0, 60.0);
+     _scrollVideoCrf = crf.clamp(0, 38);
+     _scrollVideoVbvMultiplier = vbvMultiplier.clamp(2, 8);
+     _scrollVideoPixelFormat =
+@@ -1366,14 +1333,13 @@ class ControlService with ChangeNotifier {
+     }.contains(preset)
+         ? preset
+         : 'veryfast';
+-    _statusMessage = '正在更新滚动视频参数...';
++    _statusMessage = '正在更新视频参数...';
+     notifyListeners();
+-    sendControl(
++    return _sendControlForResult(
+       'set_scroll_video_tuning',
+       {
+-        'scale': _scrollVideoScale,
++        'target_window_width': targetWindowWidth.clamp(240, 1600),
+         'bitrate_kbps': _scrollVideoBitrateKbps,
+-        'fps': _scrollVideoFps,
+         'crf': _scrollVideoCrf,
+         'vbv_multiplier': _scrollVideoVbvMultiplier,
+         'pixel_format': _scrollVideoPixelFormat,
+@@ -1397,7 +1363,8 @@ class ControlService with ChangeNotifier {
+     required double viewportWidth,
+     required double viewportHeight,
+     double padding = 24,
+-    int windowScalePercent = 100,
++    int? targetClientWidth,
++    double? targetAspectRatio,
+   }) {
+     _statusMessage = '正在切换全屏...';
+     notifyListeners();
+@@ -1407,7 +1374,10 @@ class ControlService with ChangeNotifier {
+         'viewport_width': viewportWidth.round(),
+         'viewport_height': viewportHeight.round(),
+         'padding': padding.round(),
+-        'window_scale_percent': windowScalePercent.clamp(30, 100),
++        if (targetClientWidth != null)
++          'target_client_width': targetClientWidth.clamp(240, 1600),
++        if (targetAspectRatio != null && targetAspectRatio > 0)
++          'target_aspect_ratio': targetAspectRatio,
+       },
+     );
+   }
+diff --git a/flutter-client/lib/ui/screens/control_screen.dart b/flutter-client/lib/ui/screens/control_screen.dart
+index bc11bf4..defc790 100644
+--- a/flutter-client/lib/ui/screens/control_screen.dart
++++ b/flutter-client/lib/ui/screens/control_screen.dart
+@@ -36,45 +36,278 @@ enum _KeyboardModifier {
+ }
+ 
+ class _ScrollVideoTuning {
+-  final double scale;
++  final int targetWindowWidth;
+   final int bitrateKbps;
+-  final double fps;
+   final int crf;
+   final int vbvMultiplier;
+   final String pixelFormat;
+   final String preset;
+-  final int restoreDelayMs;
+ 
+   const _ScrollVideoTuning({
+-    required this.scale,
++    required this.targetWindowWidth,
+     required this.bitrateKbps,
+-    required this.fps,
+     required this.crf,
+     required this.vbvMultiplier,
+     required this.pixelFormat,
+     required this.preset,
+-    required this.restoreDelayMs,
+   });
+ 
+   _ScrollVideoTuning copyWith({
+-    double? scale,
++    int? targetWindowWidth,
+     int? bitrateKbps,
+-    double? fps,
+     int? crf,
+     int? vbvMultiplier,
+     String? pixelFormat,
+     String? preset,
+-    int? restoreDelayMs,
+   }) {
+     return _ScrollVideoTuning(
+-      scale: scale ?? this.scale,
++      targetWindowWidth: targetWindowWidth ?? this.targetWindowWidth,
+       bitrateKbps: bitrateKbps ?? this.bitrateKbps,
+-      fps: fps ?? this.fps,
+       crf: crf ?? this.crf,
+       vbvMultiplier: vbvMultiplier ?? this.vbvMultiplier,
+       pixelFormat: pixelFormat ?? this.pixelFormat,
+       preset: preset ?? this.preset,
+-      restoreDelayMs: restoreDelayMs ?? this.restoreDelayMs,
++    );
++  }
++}
++
++class _VideoSettingsPage extends StatefulWidget {
++  final StreamProfile profile;
++  final _ScrollVideoTuning initialTuning;
++  final bool isLanProfile;
++
++  const _VideoSettingsPage({
++    required this.profile,
++    required this.initialTuning,
++    required this.isLanProfile,
++  });
++
++  @override
++  State<_VideoSettingsPage> createState() => _VideoSettingsPageState();
++}
++
++class _VideoSettingsPageState extends State<_VideoSettingsPage> {
++  late int _width;
++  late int _bitrate;
++  late int _crf;
++  late int _vbv;
++  late String _pixelFormat;
++  late String _preset;
++  bool _saving = false;
++
++  @override
++  void initState() {
++    super.initState();
++    _width = widget.initialTuning.targetWindowWidth;
++    _bitrate = widget.initialTuning.bitrateKbps;
++    _crf = widget.initialTuning.crf;
++    _vbv = widget.initialTuning.vbvMultiplier;
++    _pixelFormat = widget.initialTuning.pixelFormat;
++    _preset = widget.initialTuning.preset;
++  }
++
++  String _profileLabel(StreamProfile p) {
++    switch (p) {
++      case StreamProfile.hybrid:
++        return '混合模式';
++      case StreamProfile.smoothHd:
++        return '高清流畅模式';
++      case StreamProfile.lan:
++        return '局域网模式';
++    }
++  }
++
++  Future<void> _save() async {
++    if (_saving) return;
++    setState(() => _saving = true);
++    try {
++      final controlService = context.read<ControlService>();
++      await controlService.setScrollVideoTuning(
++        targetWindowWidth: _width,
++        bitrateKbps: _bitrate,
++        crf: _crf,
++        vbvMultiplier: _vbv,
++        pixelFormat: _pixelFormat,
++        preset: _preset,
++      );
++      if (mounted) {
++        Navigator.of(context).pop(true);
++      }
++    } catch (e) {
++      if (mounted) {
++        ScaffoldMessenger.of(context).showSnackBar(
++          SnackBar(content: Text('保存失败：$e')),
++        );
++        setState(() => _saving = false);
++      }
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final maxBitrate = widget.isLanProfile ? 60000 : 12000;
++    final bitrateDivisions = widget.isLanProfile ? 374 : 297;
++
++    return Scaffold(
++      appBar: AppBar(
++        leading: IconButton(
++          icon: const Icon(Icons.arrow_back),
++          onPressed: () => Navigator.of(context).pop(),
++        ),
++        title: Text('${_profileLabel(widget.profile)} 参数设置'),
++        actions: [
++          TextButton(
++            onPressed: _saving ? null : _save,
++            child: _saving
++                ? const SizedBox(
++                    width: 18,
++                    height: 18,
++                    child: CircularProgressIndicator(strokeWidth: 2),
++                  )
++                : const Text('保存'),
++          ),
++        ],
++      ),
++      body: ListView(
++        padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
++        children: [
++          Text(
++            '参数按画质模式单独保存，每个模式可独立调整，保存后自动应用并恢复连接。',
++            style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
++          ),
++          const SizedBox(height: 16),
++          _buildSlider(
++            title: '目标窗口宽度',
++            value: _width.toDouble(),
++            min: 240,
++            max: 1600,
++            divisions: 68,
++            valueText: '$_width px',
++            description: '电脑窗口的宽度，高度根据手机显示比例自动算出。数值越小越省带宽、响应更轻；越大文字越细腻，但流量和编码压力更高。',
++            onChanged: (v) => setState(() => _width = (v / 20).round() * 20),
++          ),
++          _buildSlider(
++            title: '码率上限',
++            value: _bitrate.toDouble(),
++            min: 128,
++            max: maxBitrate.toDouble(),
++            divisions: bitrateDivisions,
++            valueText: '$_bitrate kbps',
++            description: '视频编码每秒钟允许的最大数据量。越高画面越清晰不易出色块，但更吃网络带宽；越低越省流量，但文字区域容易糊或出现色块。',
++            onChanged: (v) => setState(() => _bitrate = (v / 40).round() * 40),
++          ),
++          _buildSlider(
++            title: 'CRF 画质系数',
++            value: _crf.toDouble(),
++            min: 0,
++            max: 38,
++            divisions: 38,
++            valueText: _crf == 0 ? '0 近无损' : '$_crf',
++            description: '控制画质和码率的平衡。0 为近无损（码率最高），38 为最差画质（码率最低）。数值越小画质越好但码率越高，数值越大越省流量但更容易出现色块和模糊。建议 28~35 之间调整。',
++            onChanged: (v) => setState(() => _crf = v.round()),
++          ),
++          _buildSlider(
++            title: '码率缓冲倍数',
++            value: _vbv.toDouble(),
++            min: 2,
++            max: 8,
++            divisions: 6,
++            valueText: '${_vbv}x',
++            description: '码率波动的缓冲空间。倍数越大越能扛住复杂画面（短暂峰值流量更高），但网络波动时更容易卡顿；倍数越小码率越平稳，但复杂画面下更容易压出色块。',
++            onChanged: (v) => setState(() => _vbv = v.round()),
++          ),
++          const SizedBox(height: 8),
++          const Text('像素格式', style: TextStyle(fontSize: 14)),
++          const SizedBox(height: 4),
++          Text(
++            'yuv420p 兼容性最好、更省流量，适合大多数场景；yuv444p 保留完整色彩信息，文字和界面边缘更清晰，但码率更高。',
++            style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
++          ),
++          const SizedBox(height: 4),
++          SegmentedButton<String>(
++            segments: const [
++              ButtonSegment(value: 'yuv420p', label: Text('yuv420p（推荐）')),
++              ButtonSegment(value: 'yuv444p', label: Text('yuv444p（文字增强）')),
++            ],
++            selected: {_pixelFormat},
++            onSelectionChanged: (v) => setState(() => _pixelFormat = v.first),
++          ),
++          const SizedBox(height: 16),
++          const Text('编码速度', style: TextStyle(fontSize: 14)),
++          const SizedBox(height: 4),
++          Text(
++            '越快延迟越低，但同等码率下画质稍差；越慢压缩效率更高、同码率画质更好，但编码耗时增加可能拖低帧率。',
++            style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
++          ),
++          const SizedBox(height: 4),
++          SegmentedButton<String>(
++            segments: const [
++              ButtonSegment(value: 'ultrafast', label: Text('ultrafast')),
++              ButtonSegment(value: 'superfast', label: Text('superfast')),
++              ButtonSegment(value: 'veryfast', label: Text('veryfast')),
++              ButtonSegment(value: 'faster', label: Text('faster')),
++              ButtonSegment(value: 'fast', label: Text('fast')),
++            ],
++            selected: {_preset},
++            onSelectionChanged: (v) => setState(() => _preset = v.first),
++          ),
++          const SizedBox(height: 24),
++          SizedBox(
++            width: double.infinity,
++            height: 48,
++            child: FilledButton(
++              onPressed: _saving ? null : _save,
++              child: _saving
++                  ? const SizedBox(
++                      width: 20,
++                      height: 20,
++                      child: CircularProgressIndicator(
++                        strokeWidth: 2,
++                        color: Colors.white,
++                      ),
++                    )
++                  : const Text('保存并应用', style: TextStyle(fontSize: 16)),
++            ),
++          ),
++        ],
++      ),
++    );
++  }
++
++  Widget _buildSlider({
++    required String title,
++    required double value,
++    required double min,
++    required double max,
++    required int divisions,
++    required String valueText,
++    required String description,
++    required ValueChanged<double> onChanged,
++  }) {
++    return Column(
++      crossAxisAlignment: CrossAxisAlignment.start,
++      children: [
++        Row(
++          children: [
++            Expanded(child: Text(title, style: const TextStyle(fontSize: 14))),
++            Text(valueText, style: const TextStyle(fontWeight: FontWeight.w600)),
++          ],
++        ),
++        const SizedBox(height: 2),
++        Text(
++          description,
++          style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
++        ),
++        Slider(
++          value: value,
++          min: min,
++          max: max,
++          divisions: divisions,
++          label: valueText,
++          onChanged: onChanged,
++        ),
++        const SizedBox(height: 8),
++      ],
+     );
+   }
+ }
+@@ -122,7 +355,6 @@ class _ControlScreenState extends State<ControlScreen>
+   static const double _terminalScrollThresholdFling = 2.0;
+   static const double _terminalScrollMaxCarryThresholds = 4.0;
+   static const int _terminalScrollWheelUnit = 28;
+-  static const int _terminalScrollBoostKeepAliveMs = 350;
+   static const double _bottomButtonHeight = 38.0;
+   static const Size _mouseBallSize = Size(44, 44);
+   static const Size _mousePanelSize = Size(172, 118);
+@@ -161,18 +393,7 @@ class _ControlScreenState extends State<ControlScreen>
+   static const String _qcCustomTitle = '自定义命令';
+   static const String _quickCommandsPrefsKey = 'control.quick_commands';
+   static const String _sendHistoryPrefsKey = 'control.send_history';
+-  static const List<int> _windowScalePercentOptions = [
+-    30,
+-    40,
+-    50,
+-    60,
+-    70,
+-    80,
+-    90,
+-    100,
+-  ];
+-  static const int _defaultWindowScalePercent = 50;
+-
++  static const int _videoTuningDefaultsVersion = 2;
+   final TransformationController _transformationController =
+       TransformationController();
+   final TextEditingController _textController = TextEditingController();
+@@ -185,7 +406,6 @@ class _ControlScreenState extends State<ControlScreen>
+   bool _showOverlay = true;
+   int _lastMoveTsMs = 0;
+   bool _draggingDirectMouse = false;
+-  Timer? _scrollBoostRestoreTimer;
+   Timer? _visualExpectationTimer;
+   Timer? _handshakeRecoveryTimer;
+   Timer? _autoSelectWindowTimer;
+@@ -222,7 +442,6 @@ class _ControlScreenState extends State<ControlScreen>
+   double? _keyboardPanelTop;
+   bool _captureSelectionMode = false;
+   bool _initialFitRequested = false;
+-  int _windowScalePercent = _defaultWindowScalePercent;
+   late String _activeRoomId;
+   late String _activeDeviceLocalIp;
+   late List<String> _activeDeviceLocalIps;
+@@ -238,56 +457,37 @@ class _ControlScreenState extends State<ControlScreen>
+   _KeyboardPage _keyboardPage = _KeyboardPage.letters;
+   final Set<_KeyboardModifier> _keyboardModifiers = <_KeyboardModifier>{};
+   StreamProfile _preferredStreamProfile = StreamProfile.hybrid;
+-  double _preferredQualityScale = 1.0;
+-  double _preferredResolutionScale = 1.0;
+-  double _preferredDynamicFpsLimit = 20.0;
+-  double _preferredStaticFpsLimit = 2.0;
+-  double _preferredScrollVideoScale = 0.62;
+-  int _preferredScrollVideoBitrateKbps = 1800;
+-  double _preferredScrollVideoFps = 15.0;
+-  int _preferredScrollVideoCrf = 35;
+-  int _preferredScrollVideoVbvMultiplier = 3;
+-  String _preferredScrollVideoPixelFormat = 'yuv420p';
+-  String _preferredScrollVideoPreset = 'veryfast';
+-  int _preferredScrollRestoreDelayMs = 250;
++  int _preferredTargetWindowWidth = 300;
+   final Map<StreamProfile, _ScrollVideoTuning> _scrollVideoTunings =
+       <StreamProfile, _ScrollVideoTuning>{
+     StreamProfile.hybrid: const _ScrollVideoTuning(
+-      scale: 0.70,
+-      bitrateKbps: 4000,
+-      fps: 24.0,
+-      crf: 26,
+-      vbvMultiplier: 3,
++      targetWindowWidth: 300,
++      bitrateKbps: 600,
++      crf: 35,
++      vbvMultiplier: 2,
+       pixelFormat: 'yuv420p',
+-      preset: 'veryfast',
+-      restoreDelayMs: 250,
++      preset: 'ultrafast',
+     ),
+     StreamProfile.smoothHd: const _ScrollVideoTuning(
+-      scale: 0.85,
+-      bitrateKbps: 10000,
+-      fps: 40.0,
+-      crf: 22,
+-      vbvMultiplier: 4,
++      targetWindowWidth: 320,
++      bitrateKbps: 1000,
++      crf: 33,
++      vbvMultiplier: 2,
+       pixelFormat: 'yuv420p',
+-      preset: 'veryfast',
+-      restoreDelayMs: 250,
++      preset: 'ultrafast',
+     ),
+     StreamProfile.lan: const _ScrollVideoTuning(
+-      scale: 1.0,
+-      bitrateKbps: 60000,
+-      fps: 60.0,
+-      crf: 18,
+-      vbvMultiplier: 6,
++      targetWindowWidth: 360,
++      bitrateKbps: 3000,
++      crf: 30,
++      vbvMultiplier: 2,
+       pixelFormat: 'yuv420p',
+-      preset: 'veryfast',
+-      restoreDelayMs: 250,
++      preset: 'ultrafast',
+     ),
+   };
+-  bool _scrollBoostActive = false;
+   double _terminalScrollAccumDy = 0.0;
+   int _lastTerminalScrollSampleTsMs = 0;
+   int _lastTerminalScrollEmitTsMs = 0;
+-  int _lastScrollBoostKeepAliveTsMs = 0;
+   bool _terminalScrollGesturePrimed = false;
+   String? _terminalScrollGestureId;
+   int _terminalScrollWheelSeq = 0;
+@@ -298,7 +498,6 @@ class _ControlScreenState extends State<ControlScreen>
+   String _rawScrollSurface = '';
+   bool _rawScrollRecognized = false;
+ 
+-  bool get _showTuningControls => false;
+ 
+   @override
+   void initState() {
+@@ -359,7 +558,6 @@ class _ControlScreenState extends State<ControlScreen>
+   @override
+   void dispose() {
+     WidgetsBinding.instance.removeObserver(this);
+-    _scrollBoostRestoreTimer?.cancel();
+     _visualExpectationTimer?.cancel();
+     _handshakeRecoveryTimer?.cancel();
+     _autoSelectWindowTimer?.cancel();
+@@ -413,28 +611,6 @@ class _ControlScreenState extends State<ControlScreen>
+               style: _topActionButtonStyle(),
+               child: const Text('恢复'),
+             ),
+-            PopupMenuButton<int>(
+-              tooltip: '窗口比例',
+-              padding: EdgeInsets.zero,
+-              initialValue: _windowScalePercent,
+-              onSelected: _handleWindowScaleChanged,
+-              itemBuilder: (context) => _windowScalePercentOptions
+-                  .map(
+-                    (percent) => PopupMenuItem<int>(
+-                      value: percent,
+-                      child: Text('窗口 $percent%'),
+-                    ),
+-                  )
+-                  .toList(growable: false),
+-              child: Padding(
+-                padding:
+-                    const EdgeInsets.symmetric(horizontal: 4, vertical: 12),
+-                child: Text(
+-                  '窗口 $_windowScalePercent%',
+-                  style: const TextStyle(fontSize: 13),
+-                ),
+-              ),
+-            ),
+             PopupMenuButton<InputMode>(
+               tooltip: '切换模式',
+               padding: EdgeInsets.zero,
+@@ -492,23 +668,12 @@ class _ControlScreenState extends State<ControlScreen>
+                 );
+               },
+             ),
+-            if (_showTuningControls)
+-              TextButton(
+-                style: _topActionButtonStyle(),
+-                onPressed: _openBitrateSheet,
+-                child: const Text('码率'),
+-              ),
+-            if (_showTuningControls)
+-              TextButton(
+-                style: _topActionButtonStyle(),
+-                onPressed: _openFpsSheet,
+-                child: const Text('帧率'),
+-              ),
++
+             IconButton(
+-              tooltip: '滚动调试',
++              tooltip: '视频参数',
+               visualDensity: VisualDensity.compact,
+               padding: EdgeInsets.zero,
+-              onPressed: _openScrollVideoTuningSheet,
++              onPressed: _openVideoSettingsPage,
+               icon: const Icon(Icons.tune, size: 20),
+             ),
+             TextButton(
+@@ -1819,436 +1984,30 @@ class _ControlScreenState extends State<ControlScreen>
+     };
+   }
+ 
+-  Future<void> _openBitrateSheet() async {
+-    final controlService = context.read<ControlService>();
+-    double localQuality = controlService.qualityScale;
+-    double localResolution = controlService.resolutionScale;
+-    await showModalBottomSheet<void>(
+-      context: context,
+-      showDragHandle: true,
+-      builder: (context) {
+-        return StatefulBuilder(
+-          builder: (context, setModalState) {
+-            return Padding(
+-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+-              child: Column(
+-                mainAxisSize: MainAxisSize.min,
+-                crossAxisAlignment: CrossAxisAlignment.start,
+-                children: [
+-                  Text('码率强度 ${(localQuality * 100).round()}%'),
+-                  Slider(
+-                    value: localQuality,
+-                    min: 0.15,
+-                    max: 1.0,
+-                    divisions: 17,
+-                    label: '${(localQuality * 100).round()}%',
+-                    onChanged: (value) {
+-                      setModalState(() {
+-                        localQuality = value;
+-                      });
+-                    },
+-                    onChangeEnd: (value) {
+-                      _preferredQualityScale = value;
+-                      _preferredResolutionScale = localResolution;
+-                      _preferredDynamicFpsLimit =
+-                          controlService.dynamicFpsLimit;
+-                      _preferredStaticFpsLimit = controlService.staticFpsLimit;
+-                      _usingLocalNetworkPreset = false;
+-                      controlService.setStreamTuning(
+-                        qualityScale: value,
+-                        resolutionScale: localResolution,
+-                        dynamicFpsLimit: controlService.dynamicFpsLimit,
+-                        staticFpsLimit: controlService.staticFpsLimit,
+-                      );
+-                      _persistPreferences();
+-                    },
+-                  ),
+-                  const SizedBox(height: 8),
+-                  Text('混合模式活动分辨率 ${(localResolution * 100).round()}%'),
+-                  Slider(
+-                    value: localResolution,
+-                    min: 0.20,
+-                    max: 1.0,
+-                    divisions: 16,
+-                    label: '${(localResolution * 100).round()}%',
+-                    onChanged: (value) {
+-                      setModalState(() {
+-                        localResolution = value;
+-                      });
+-                    },
+-                    onChangeEnd: (value) {
+-                      _preferredQualityScale = localQuality;
+-                      _preferredResolutionScale = value;
+-                      _preferredDynamicFpsLimit =
+-                          controlService.dynamicFpsLimit;
+-                      _preferredStaticFpsLimit = controlService.staticFpsLimit;
+-                      _usingLocalNetworkPreset = false;
+-                      controlService.setStreamTuning(
+-                        qualityScale: localQuality,
+-                        resolutionScale: value,
+-                        dynamicFpsLimit: controlService.dynamicFpsLimit,
+-                        staticFpsLimit: controlService.staticFpsLimit,
+-                      );
+-                      _persistPreferences();
+-                    },
+-                  ),
+-                ],
+-              ),
+-            );
+-          },
+-        );
+-      },
+-    );
+-  }
++  Future<void> _openVideoSettingsPage() async {
++    final profile = _preferredStreamProfile;
++    final initialTuning = _scrollVideoTuningFor(profile);
+ 
+-  Future<void> _openFpsSheet() async {
+-    final controlService = context.read<ControlService>();
+-    double localDynamic = controlService.dynamicFpsLimit;
+-    double localStatic = controlService.staticFpsLimit;
+-    await showModalBottomSheet<void>(
+-      context: context,
+-      showDragHandle: true,
+-      builder: (context) {
+-        return StatefulBuilder(
+-          builder: (context, setModalState) {
+-            return Padding(
+-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+-              child: Column(
+-                mainAxisSize: MainAxisSize.min,
+-                crossAxisAlignment: CrossAxisAlignment.start,
+-                children: [
+-                  Text('活动态目标帧率 ${localDynamic.toStringAsFixed(1)} FPS'),
+-                  Slider(
+-                    value: localDynamic,
+-                    min: 1,
+-                    max: 30,
+-                    divisions: 29,
+-                    label: localDynamic.toStringAsFixed(0),
+-                    onChanged: (value) {
+-                      setModalState(() {
+-                        localDynamic = value;
+-                      });
+-                    },
+-                    onChangeEnd: (value) {
+-                      _preferredQualityScale = controlService.qualityScale;
+-                      _preferredResolutionScale =
+-                          controlService.resolutionScale;
+-                      _preferredDynamicFpsLimit = value;
+-                      _preferredStaticFpsLimit = localStatic;
+-                      _usingLocalNetworkPreset = false;
+-                      controlService.setStreamTuning(
+-                        qualityScale: controlService.qualityScale,
+-                        resolutionScale: controlService.resolutionScale,
+-                        dynamicFpsLimit: value,
+-                        staticFpsLimit: localStatic,
+-                      );
+-                      _persistPreferences();
+-                    },
+-                  ),
+-                  Text('静止态保底刷新 ${localStatic.toStringAsFixed(1)} FPS'),
+-                  Slider(
+-                    value: localStatic,
+-                    min: 1,
+-                    max: 10,
+-                    divisions: 9,
+-                    label: localStatic.toStringAsFixed(0),
+-                    onChanged: (value) {
+-                      setModalState(() {
+-                        localStatic = value;
+-                      });
+-                    },
+-                    onChangeEnd: (value) {
+-                      _preferredQualityScale = controlService.qualityScale;
+-                      _preferredResolutionScale =
+-                          controlService.resolutionScale;
+-                      _preferredDynamicFpsLimit = localDynamic;
+-                      _preferredStaticFpsLimit = value;
+-                      _usingLocalNetworkPreset = false;
+-                      controlService.setStreamTuning(
+-                        qualityScale: controlService.qualityScale,
+-                        resolutionScale: controlService.resolutionScale,
+-                        dynamicFpsLimit: localDynamic,
+-                        staticFpsLimit: value,
+-                      );
+-                      _persistPreferences();
+-                    },
+-                  ),
+-                ],
+-              ),
+-            );
+-          },
+-        );
+-      },
++    final result = await Navigator.of(context).push<bool>(
++      MaterialPageRoute(
++        builder: (context) => _VideoSettingsPage(
++          profile: profile,
++          initialTuning: initialTuning,
++          isLanProfile: profile == StreamProfile.lan,
++        ),
++      ),
+     );
+-  }
+ 
+-  Future<void> _openScrollVideoTuningSheet() async {
+-    final controlService = context.read<ControlService>();
+-    final profile = _preferredStreamProfile;
+-    final initialTuning = _scrollVideoTuningFor(profile);
+-    double localScale = initialTuning.scale;
+-    int localBitrate = initialTuning.bitrateKbps;
+-    double localFps = initialTuning.fps;
+-    int localCrf = initialTuning.crf;
+-    int localVbvMultiplier = initialTuning.vbvMultiplier;
+-    String localPixelFormat = initialTuning.pixelFormat;
+-    String localPreset = initialTuning.preset;
+-    int localRestoreDelayMs = initialTuning.restoreDelayMs;
+-
+-    void apply() {
+-      _scrollVideoTunings[profile] = _ScrollVideoTuning(
+-        scale: localScale,
+-        bitrateKbps: localBitrate,
+-        fps: localFps,
+-        crf: localCrf,
+-        vbvMultiplier: localVbvMultiplier,
+-        pixelFormat: localPixelFormat,
+-        preset: localPreset,
+-        restoreDelayMs: localRestoreDelayMs,
+-      );
+-      _syncPreferredScrollVideoTuning(profile);
+-      controlService.setScrollVideoTuning(
+-        scale: localScale,
+-        bitrateKbps: localBitrate,
+-        fps: localFps,
+-        crf: localCrf,
+-        vbvMultiplier: localVbvMultiplier,
+-        pixelFormat: localPixelFormat,
+-        preset: localPreset,
+-      );
++    _syncPreferredScrollVideoTuning(profile);
++    if (result == true && mounted) {
+       _persistPreferences();
++      final savedViewport = _lastPreviewLayoutSize;
++      await _handleManualRecoveryPressed();
++      if (mounted) {
++        _stableFitViewportSize = savedViewport;
++        _fitWindowToPhone(auto: true);
++      }
+     }
+-
+-    await showModalBottomSheet<void>(
+-      context: context,
+-      isScrollControlled: true,
+-      showDragHandle: true,
+-      builder: (context) {
+-        return StatefulBuilder(
+-          builder: (context, setModalState) {
+-            Widget sliderRow({
+-              required String title,
+-              required String valueText,
+-              required double value,
+-              required double min,
+-              required double max,
+-              required int divisions,
+-              required ValueChanged<double> onChanged,
+-              required ValueChanged<double> onChangeEnd,
+-            }) {
+-              return Column(
+-                crossAxisAlignment: CrossAxisAlignment.start,
+-                children: [
+-                  Row(
+-                    children: [
+-                      Expanded(child: Text(title)),
+-                      Text(valueText),
+-                    ],
+-                  ),
+-                  Slider(
+-                    value: value,
+-                    min: min,
+-                    max: max,
+-                    divisions: divisions,
+-                    label: valueText,
+-                    onChanged: onChanged,
+-                    onChangeEnd: onChangeEnd,
+-                  ),
+-                ],
+-              );
+-            }
+-
+-            return SafeArea(
+-              child: SingleChildScrollView(
+-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+-                child: Column(
+-                  mainAxisSize: MainAxisSize.min,
+-                  crossAxisAlignment: CrossAxisAlignment.start,
+-                  children: [
+-                    const Text(
+-                      '滚动视频调试',
+-                      style:
+-                          TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+-                    ),
+-                    const SizedBox(height: 12),
+-                    sliderRow(
+-                      title: '滚动分辨率比例',
+-                      valueText: '${(localScale * 100).round()}%',
+-                      value: localScale,
+-                      min: 0.30,
+-                      max: 1.0,
+-                      divisions: 70,
+-                      onChanged: (value) {
+-                        setModalState(() => localScale = value);
+-                      },
+-                      onChangeEnd: (_) => apply(),
+-                    ),
+-                    sliderRow(
+-                      title: '滚动码率上限',
+-                      valueText: '$localBitrate kbps',
+-                      value: localBitrate.toDouble(),
+-                      min: 128,
+-                      max: profile == StreamProfile.lan ? 60000 : 12000,
+-                      divisions: profile == StreamProfile.lan ? 374 : 297,
+-                      onChanged: (value) {
+-                        setModalState(() {
+-                          localBitrate = (value / 40).round() * 40;
+-                        });
+-                      },
+-                      onChangeEnd: (_) => apply(),
+-                    ),
+-                    sliderRow(
+-                      title: '滚动目标帧率',
+-                      valueText: '${localFps.toStringAsFixed(0)} FPS',
+-                      value: localFps,
+-                      min: 5,
+-                      max: 60,
+-                      divisions: 55,
+-                      onChanged: (value) {
+-                        setModalState(() => localFps = value);
+-                      },
+-                      onChangeEnd: (_) => apply(),
+-                    ),
+-                    sliderRow(
+-                      title: '滚动 CRF',
+-                      valueText:
+-                          localCrf == 0 ? '0 near lossless' : '$localCrf',
+-                      value: localCrf.toDouble(),
+-                      min: 0,
+-                      max: 38,
+-                      divisions: 38,
+-                      onChanged: (value) {
+-                        setModalState(() => localCrf = value.round());
+-                      },
+-                      onChangeEnd: (_) => apply(),
+-                    ),
+-                    sliderRow(
+-                      title: 'VBV buffer x',
+-                      valueText: '${localVbvMultiplier}x',
+-                      value: localVbvMultiplier.toDouble(),
+-                      min: 2,
+-                      max: 8,
+-                      divisions: 6,
+-                      onChanged: (value) {
+-                        setModalState(() {
+-                          localVbvMultiplier = value.round();
+-                        });
+-                      },
+-                      onChangeEnd: (_) => apply(),
+-                    ),
+-                    const SizedBox(height: 8),
+-                    DropdownButtonFormField<String>(
+-                      initialValue:
+-                          localPixelFormat == 'yuv444p' ? 'yuv444p' : 'yuv420p',
+-                      decoration: const InputDecoration(
+-                        labelText: 'Pixel format',
+-                        border: OutlineInputBorder(),
+-                      ),
+-                      items: const [
+-                        DropdownMenuItem(
+-                          value: 'yuv420p',
+-                          child: Text('yuv420p'),
+-                        ),
+-                        DropdownMenuItem(
+-                          value: 'yuv444p',
+-                          child: Text('yuv444p test'),
+-                        ),
+-                      ],
+-                      onChanged: (value) {
+-                        if (value == null) return;
+-                        setModalState(() => localPixelFormat = value);
+-                        apply();
+-                      },
+-                    ),
+-                    const SizedBox(height: 12),
+-                    DropdownButtonFormField<String>(
+-                      initialValue: {
+-                        'ultrafast',
+-                        'superfast',
+-                        'veryfast',
+-                        'faster',
+-                        'fast',
+-                      }.contains(localPreset)
+-                          ? localPreset
+-                          : 'veryfast',
+-                      decoration: const InputDecoration(
+-                        labelText: 'Encoder preset',
+-                        border: OutlineInputBorder(),
+-                      ),
+-                      items: const [
+-                        DropdownMenuItem(
+-                          value: 'ultrafast',
+-                          child: Text('ultrafast'),
+-                        ),
+-                        DropdownMenuItem(
+-                          value: 'superfast',
+-                          child: Text('superfast'),
+-                        ),
+-                        DropdownMenuItem(
+-                          value: 'veryfast',
+-                          child: Text('veryfast'),
+-                        ),
+-                        DropdownMenuItem(
+-                          value: 'faster',
+-                          child: Text('faster'),
+-                        ),
+-                        DropdownMenuItem(
+-                          value: 'fast',
+-                          child: Text('fast'),
+-                        ),
+-                      ],
+-                      onChanged: (value) {
+-                        if (value == null) return;
+-                        setModalState(() => localPreset = value);
+-                        apply();
+-                      },
+-                    ),
+-                    const SizedBox(height: 12),
+-                    sliderRow(
+-                      title: '停止后恢复延迟',
+-                      valueText: '$localRestoreDelayMs ms',
+-                      value: localRestoreDelayMs.toDouble(),
+-                      min: 100,
+-                      max: 1200,
+-                      divisions: 22,
+-                      onChanged: (value) {
+-                        setModalState(() {
+-                          localRestoreDelayMs = (value / 50).round() * 50;
+-                        });
+-                      },
+-                      onChangeEnd: (_) => apply(),
+-                    ),
+-                    const SizedBox(height: 8),
+-                    Row(
+-                      mainAxisAlignment: MainAxisAlignment.end,
+-                      children: [
+-                        TextButton(
+-                          onPressed: () {
+-                            final defaults = _defaultScrollVideoTuning(profile);
+-                            setModalState(() {
+-                              localScale = defaults.scale;
+-                              localBitrate = defaults.bitrateKbps;
+-                              localFps = defaults.fps;
+-                              localCrf = defaults.crf;
+-                              localVbvMultiplier = defaults.vbvMultiplier;
+-                              localPixelFormat = defaults.pixelFormat;
+-                              localPreset = defaults.preset;
+-                              localRestoreDelayMs = defaults.restoreDelayMs;
+-                            });
+-                            apply();
+-                          },
+-                          child: const Text('恢复默认'),
+-                        ),
+-                      ],
+-                    ),
+-                  ],
+-                ),
+-              ),
+-            );
+-          },
+-        );
+-      },
+-    );
+   }
+ 
+   void _sendText() {
+@@ -2463,19 +2222,6 @@ class _ControlScreenState extends State<ControlScreen>
+     });
+   }
+ 
+-  void _handleWindowScaleChanged(int percent) {
+-    final normalized = percent.clamp(30, 100).toInt();
+-    setState(() {
+-      _windowScalePercent = normalized;
+-    });
+-    _persistPreferences();
+-    final controlService = context.read<ControlService>();
+-    if (controlService.selectedHwnd != null &&
+-        controlService.selectedHwnd != -1) {
+-      _fitWindowToPhone(auto: true);
+-    }
+-  }
+-
+   void _fitWindowToPhone({bool auto = false}) {
+     final controlService = context.read<ControlService>();
+     if (controlService.selectedHwnd == null ||
+@@ -2507,15 +2253,19 @@ class _ControlScreenState extends State<ControlScreen>
+       viewportSize.width * pixelRatio,
+       viewportSize.height * pixelRatio,
+     );
++    final targetWindowWidth = _preferredTargetWindowWidth.clamp(240, 1600);
++    final targetAspectRatio =
++        physicalViewportSize.width / physicalViewportSize.height;
+ 
+     controlService.setStatus(
+-      '窗口 $_windowScalePercent% ${physicalViewportSize.width.round()}x${physicalViewportSize.height.round()}',
++      '窗口 ${targetWindowWidth}px ${physicalViewportSize.width.round()}x${physicalViewportSize.height.round()}',
+     );
+     controlService.fitWindowToViewport(
+       viewportWidth: physicalViewportSize.width,
+       viewportHeight: physicalViewportSize.height,
+       padding: 0,
+-      windowScalePercent: _windowScalePercent,
++      targetClientWidth: targetWindowWidth,
++      targetAspectRatio: targetAspectRatio,
+     );
+     controlService.sendScrollDiagnostic({
+       'event': 'fit_window_to_phone_sent',
+@@ -2526,7 +2276,8 @@ class _ControlScreenState extends State<ControlScreen>
+       'logical_width': viewportSize.width,
+       'logical_height': viewportSize.height,
+       'device_pixel_ratio': pixelRatio,
+-      'window_scale_percent': _windowScalePercent,
++      'target_client_width': targetWindowWidth,
++      'target_aspect_ratio': targetAspectRatio,
+       'auto': auto,
+       'keyboard_active': _keyboardInsetsActive(),
+       'fit_persisted_before': _fitViewportPersisted,
+@@ -2571,8 +2322,6 @@ class _ControlScreenState extends State<ControlScreen>
+     context.read<ControlService>().setVideoPaused(mode == InputMode.textOnly);
+     if (mode == InputMode.touchpad) {
+       context.read<ControlService>().centerCursor();
+-    } else {
+-      _deactivateScrollBoost();
+     }
+     _terminalScrollGesturePrimed = false;
+   }
+@@ -2679,43 +2428,6 @@ class _ControlScreenState extends State<ControlScreen>
+     }
+   }
+ 
+-  void _activateScrollBoost(ControlService controlService) {
+-    _scrollBoostRestoreTimer?.cancel();
+-    final nowMs = DateTime.now().millisecondsSinceEpoch;
+-    if (_scrollBoostActive &&
+-        nowMs - _lastScrollBoostKeepAliveTsMs <
+-            _terminalScrollBoostKeepAliveMs) {
+-      return;
+-    }
+-    _scrollBoostActive = true;
+-    _lastScrollBoostKeepAliveTsMs = nowMs;
+-    controlService.setScrollMode(true);
+-  }
+-
+-  void _scheduleScrollBoostRestore() {
+-    _scrollBoostRestoreTimer?.cancel();
+-    if (!_scrollBoostActive) {
+-      return;
+-    }
+-    _scrollBoostRestoreTimer = Timer(
+-      Duration(milliseconds: _preferredScrollRestoreDelayMs),
+-      () {
+-        _deactivateScrollBoost();
+-      },
+-    );
+-  }
+-
+-  void _deactivateScrollBoost() {
+-    _scrollBoostRestoreTimer?.cancel();
+-    _scrollBoostRestoreTimer = null;
+-    if (!_scrollBoostActive || !mounted) {
+-      return;
+-    }
+-    _scrollBoostActive = false;
+-    _lastScrollBoostKeepAliveTsMs = 0;
+-    context.read<ControlService>().setScrollMode(false);
+-  }
+-
+   void _startTerminalScrollGesture(
+     ControlService controlService,
+     String surface,
+@@ -2752,7 +2464,6 @@ class _ControlScreenState extends State<ControlScreen>
+         _rawScrollSurface = surface;
+         _rawScrollRecognized = false;
+         _startTerminalScrollGesture(controlService, surface);
+-        _activateScrollBoost(controlService);
+         controlService.sendScrollDiagnostic({
+           'event': 'raw_pointer_down',
+           'gesture_id': _terminalScrollGestureId,
+@@ -3115,7 +2826,6 @@ class _ControlScreenState extends State<ControlScreen>
+     int dtMs,
+     int nowMs,
+   ) {
+-    _activateScrollBoost(controlService);
+     _terminalScrollAccumDy += deltaY;
+     _sendScrollTouchDiagnostic(controlService, deltaY, velocity, dtMs, nowMs);
+     if (!_terminalScrollGesturePrimed && deltaY.abs() >= 1.0) {
+@@ -3178,7 +2888,6 @@ class _ControlScreenState extends State<ControlScreen>
+     _terminalScrollWheelSeq = 0;
+     _terminalScrollTotalDy = 0.0;
+     _terminalScrollTouchUpdates = 0;
+-    _scheduleScrollBoostRestore();
+   }
+ 
+   ButtonStyle _topActionButtonStyle() {
+@@ -4072,7 +3781,7 @@ class _ControlScreenState extends State<ControlScreen>
+         .padLeft(3, '0');
+     final targetFrameFps = (controlService.streamProfile == StreamProfile.lan ||
+                 controlService.streamProfile == StreamProfile.smoothHd ||
+-                controlService.scrollModeActive
++                false
+             ? 60.0
+             : controlService.fps > 0
+                 ? controlService.dynamicFpsLimit
+@@ -4110,7 +3819,7 @@ class _ControlScreenState extends State<ControlScreen>
+         .padLeft(3, '0');
+     final targetFrameFps = (controlService.streamProfile == StreamProfile.lan ||
+                 controlService.streamProfile == StreamProfile.smoothHd ||
+-                controlService.scrollModeActive
++                false
+             ? 60.0
+             : controlService.fps > 0
+                 ? controlService.dynamicFpsLimit
+@@ -4164,14 +3873,9 @@ class _ControlScreenState extends State<ControlScreen>
+     final controlService = context.read<ControlService>();
+     final prefs = await SharedPreferences.getInstance();
+     if (!mounted) return;
+-    final qualityScale = prefs.getDouble('control.quality_scale');
+-    final resolutionScale = prefs.getDouble('control.resolution_scale');
+-    final dynamicFpsLimit = prefs.getDouble('control.dynamic_fps_limit');
+-    final staticFpsLimit = prefs.getDouble('control.static_fps_limit');
+     final streamProfileName = prefs.getString('control.stream_profile');
+     final overlayVisible = prefs.getBool('control.show_overlay');
+     final inputModeName = prefs.getString('control.input_mode');
+-    final windowScalePercent = prefs.getInt('control.window_scale_percent');
+     final lastSelectedHwnd = prefs.getInt('control.last_selected_hwnd');
+     final lastSelectedTitle = prefs.getString('control.last_selected_title');
+     final fitPrefix = 'control.fit_viewport.$_activeRoomId';
+@@ -4180,6 +3884,8 @@ class _ControlScreenState extends State<ControlScreen>
+     final fitPersisted = prefs.getBool('$fitPrefix.persisted') ?? false;
+     final quickCommandsJson = prefs.getString(_quickCommandsPrefsKey);
+     final sendHistory = prefs.getStringList(_sendHistoryPrefsKey);
++    final videoTuningDefaultsVersion =
++        prefs.getInt('control.video_tuning_defaults_version') ?? 0;
+ 
+     if (overlayVisible != null) {
+       _showOverlay = overlayVisible;
+@@ -4190,9 +3896,6 @@ class _ControlScreenState extends State<ControlScreen>
+         orElse: () => InputMode.browse,
+       );
+     }
+-    if (windowScalePercent != null) {
+-      _windowScalePercent = windowScalePercent.clamp(30, 100).toInt();
+-    }
+     if (lastSelectedHwnd != null) {
+       _lastSelectedHwnd = lastSelectedHwnd;
+     }
+@@ -4220,14 +3923,19 @@ class _ControlScreenState extends State<ControlScreen>
+       (item) => item.name == streamProfileName,
+       orElse: () => StreamProfile.hybrid,
+     );
+-    _preferredQualityScale = qualityScale ?? controlService.qualityScale;
+-    _preferredResolutionScale =
+-        resolutionScale ?? controlService.resolutionScale;
+-    _preferredDynamicFpsLimit =
+-        dynamicFpsLimit ?? controlService.dynamicFpsLimit;
+-    _preferredStaticFpsLimit = staticFpsLimit ?? controlService.staticFpsLimit;
+-    for (final profile in StreamProfile.values) {
+-      _scrollVideoTunings[profile] = _loadScrollVideoTuning(prefs, profile);
++    if (videoTuningDefaultsVersion < _videoTuningDefaultsVersion) {
++      for (final profile in StreamProfile.values) {
++        _scrollVideoTunings[profile] = _defaultScrollVideoTuning(profile);
++      }
++      await _persistScrollVideoTunings(prefs);
++      await prefs.setInt(
++        'control.video_tuning_defaults_version',
++        _videoTuningDefaultsVersion,
++      );
++    } else {
++      for (final profile in StreamProfile.values) {
++        _scrollVideoTunings[profile] = _loadScrollVideoTuning(prefs, profile);
++      }
+     }
+     _syncPreferredScrollVideoTuning(_preferredStreamProfile);
+ 
+@@ -4271,16 +3979,13 @@ class _ControlScreenState extends State<ControlScreen>
+     if (!mounted) return;
+     await prefs.setString(
+         'control.stream_profile', _preferredStreamProfile.name);
+-    await prefs.setDouble('control.quality_scale', _preferredQualityScale);
+-    await prefs.setDouble(
+-        'control.resolution_scale', _preferredResolutionScale);
+-    await prefs.setDouble(
+-        'control.dynamic_fps_limit', _preferredDynamicFpsLimit);
+-    await prefs.setDouble('control.static_fps_limit', _preferredStaticFpsLimit);
+     await _persistScrollVideoTunings(prefs);
++    await prefs.setInt(
++      'control.video_tuning_defaults_version',
++      _videoTuningDefaultsVersion,
++    );
+     await prefs.setBool('control.show_overlay', _showOverlay);
+     await prefs.setString('control.input_mode', _inputMode.name);
+-    await prefs.setInt('control.window_scale_percent', _windowScalePercent);
+     if (_lastSelectedHwnd != null) {
+       await prefs.setInt('control.last_selected_hwnd', _lastSelectedHwnd!);
+     }
+@@ -4316,36 +4021,30 @@ class _ControlScreenState extends State<ControlScreen>
+     switch (profile) {
+       case StreamProfile.hybrid:
+         return const _ScrollVideoTuning(
+-          scale: 0.70,
+-          bitrateKbps: 4000,
+-          fps: 24.0,
+-          crf: 26,
+-          vbvMultiplier: 3,
++          targetWindowWidth: 300,
++          bitrateKbps: 600,
++          crf: 35,
++          vbvMultiplier: 2,
+           pixelFormat: 'yuv420p',
+-          preset: 'veryfast',
+-          restoreDelayMs: 250,
++          preset: 'ultrafast',
+         );
+       case StreamProfile.smoothHd:
+         return const _ScrollVideoTuning(
+-          scale: 0.85,
+-          bitrateKbps: 10000,
+-          fps: 40.0,
+-          crf: 22,
+-          vbvMultiplier: 4,
++          targetWindowWidth: 320,
++          bitrateKbps: 1000,
++          crf: 33,
++          vbvMultiplier: 2,
+           pixelFormat: 'yuv420p',
+-          preset: 'veryfast',
+-          restoreDelayMs: 250,
++          preset: 'ultrafast',
+         );
+       case StreamProfile.lan:
+         return const _ScrollVideoTuning(
+-          scale: 1.0,
+-          bitrateKbps: 60000,
+-          fps: 60.0,
+-          crf: 18,
+-          vbvMultiplier: 6,
++          targetWindowWidth: 360,
++          bitrateKbps: 3000,
++          crf: 30,
++          vbvMultiplier: 2,
+           pixelFormat: 'yuv420p',
+-          preset: 'veryfast',
+-          restoreDelayMs: 250,
++          preset: 'ultrafast',
+         );
+     }
+   }
+@@ -4356,14 +4055,7 @@ class _ControlScreenState extends State<ControlScreen>
+ 
+   void _syncPreferredScrollVideoTuning(StreamProfile profile) {
+     final tuning = _scrollVideoTuningFor(profile);
+-    _preferredScrollVideoScale = tuning.scale;
+-    _preferredScrollVideoBitrateKbps = tuning.bitrateKbps;
+-    _preferredScrollVideoFps = tuning.fps;
+-    _preferredScrollVideoCrf = tuning.crf;
+-    _preferredScrollVideoVbvMultiplier = tuning.vbvMultiplier;
+-    _preferredScrollVideoPixelFormat = tuning.pixelFormat;
+-    _preferredScrollVideoPreset = tuning.preset;
+-    _preferredScrollRestoreDelayMs = tuning.restoreDelayMs;
++    _preferredTargetWindowWidth = tuning.targetWindowWidth;
+   }
+ 
+   _ScrollVideoTuning _loadScrollVideoTuning(
+@@ -4372,33 +4064,13 @@ class _ControlScreenState extends State<ControlScreen>
+   ) {
+     final defaults = _defaultScrollVideoTuning(profile);
+     final suffix = _profilePrefsName(profile);
+-    final legacyScale = profile == StreamProfile.hybrid
+-        ? prefs.getDouble('control.scroll_video_scale')
+-        : null;
+-    final legacyBitrate = profile == StreamProfile.hybrid
+-        ? prefs.getInt('control.scroll_video_bitrate_kbps')
+-        : null;
+-    final legacyFps = profile == StreamProfile.hybrid
+-        ? prefs.getDouble('control.scroll_video_fps')
+-        : null;
+-    final legacyCrf = profile == StreamProfile.hybrid
+-        ? prefs.getInt('control.scroll_video_crf')
+-        : null;
+-    final legacyDelay = profile == StreamProfile.hybrid
+-        ? prefs.getInt('control.scroll_restore_delay_ms')
+-        : null;
+     return _ScrollVideoTuning(
+-      scale: prefs.getDouble('control.scroll_video.$suffix.scale') ??
+-          legacyScale ??
+-          defaults.scale,
++      targetWindowWidth:
++          prefs.getInt('control.scroll_video.$suffix.target_window_width') ??
++              defaults.targetWindowWidth,
+       bitrateKbps: prefs.getInt('control.scroll_video.$suffix.bitrate_kbps') ??
+-          legacyBitrate ??
+           defaults.bitrateKbps,
+-      fps: prefs.getDouble('control.scroll_video.$suffix.fps') ??
+-          legacyFps ??
+-          defaults.fps,
+       crf: prefs.getInt('control.scroll_video.$suffix.crf') ??
+-          legacyCrf ??
+           defaults.crf,
+       vbvMultiplier:
+           prefs.getInt('control.scroll_video.$suffix.vbv_multiplier') ??
+@@ -4408,10 +4080,6 @@ class _ControlScreenState extends State<ControlScreen>
+               defaults.pixelFormat,
+       preset: prefs.getString('control.scroll_video.$suffix.preset') ??
+           defaults.preset,
+-      restoreDelayMs:
+-          prefs.getInt('control.scroll_video.$suffix.restore_delay_ms') ??
+-              legacyDelay ??
+-              defaults.restoreDelayMs,
+     );
+   }
+ 
+@@ -4419,10 +4087,10 @@ class _ControlScreenState extends State<ControlScreen>
+     for (final profile in StreamProfile.values) {
+       final tuning = _scrollVideoTuningFor(profile);
+       final suffix = _profilePrefsName(profile);
+-      await prefs.setDouble('control.scroll_video.$suffix.scale', tuning.scale);
++      await prefs.setInt('control.scroll_video.$suffix.target_window_width',
++          tuning.targetWindowWidth);
+       await prefs.setInt(
+           'control.scroll_video.$suffix.bitrate_kbps', tuning.bitrateKbps);
+-      await prefs.setDouble('control.scroll_video.$suffix.fps', tuning.fps);
+       await prefs.setInt('control.scroll_video.$suffix.crf', tuning.crf);
+       await prefs.setInt(
+           'control.scroll_video.$suffix.vbv_multiplier', tuning.vbvMultiplier);
+@@ -4430,8 +4098,10 @@ class _ControlScreenState extends State<ControlScreen>
+           'control.scroll_video.$suffix.pixel_format', tuning.pixelFormat);
+       await prefs.setString(
+           'control.scroll_video.$suffix.preset', tuning.preset);
+-      await prefs.setInt('control.scroll_video.$suffix.restore_delay_ms',
+-          tuning.restoreDelayMs);
++      // legacy cleanup
++      await prefs.remove('control.scroll_video.$suffix.scale');
++      await prefs.remove('control.scroll_video.$suffix.fps');
++      await prefs.remove('control.scroll_video.$suffix.restore_delay_ms');
+     }
+   }
+ 
+@@ -4446,27 +4116,15 @@ class _ControlScreenState extends State<ControlScreen>
+ 
+     controlService.setStreamProfile(_preferredStreamProfile);
+     _usingLocalNetworkPreset = _preferredStreamProfile == StreamProfile.lan;
+-    controlService.setStreamTuning(
+-      qualityScale: _preferredStreamProfile == StreamProfile.lan ? 1.0 : 1.0,
+-      resolutionScale: _preferredStreamProfile == StreamProfile.lan ? 1.0 : 1.0,
+-      dynamicFpsLimit: _preferredStreamProfile == StreamProfile.lan ||
+-              _preferredStreamProfile == StreamProfile.smoothHd
+-          ? 60.0
+-          : 20.0,
+-      staticFpsLimit: _preferredStreamProfile == StreamProfile.lan ||
+-              _preferredStreamProfile == StreamProfile.smoothHd
+-          ? 60.0
+-          : 1.0,
+-    );
+     _syncPreferredScrollVideoTuning(_preferredStreamProfile);
++    final tuning = _scrollVideoTuningFor(_preferredStreamProfile);
+     controlService.setScrollVideoTuning(
+-      scale: _preferredScrollVideoScale,
+-      bitrateKbps: _preferredScrollVideoBitrateKbps,
+-      fps: _preferredScrollVideoFps,
+-      crf: _preferredScrollVideoCrf,
+-      vbvMultiplier: _preferredScrollVideoVbvMultiplier,
+-      pixelFormat: _preferredScrollVideoPixelFormat,
+-      preset: _preferredScrollVideoPreset,
++      targetWindowWidth: tuning.targetWindowWidth,
++      bitrateKbps: tuning.bitrateKbps,
++      crf: tuning.crf,
++      vbvMultiplier: tuning.vbvMultiplier,
++      pixelFormat: tuning.pixelFormat,
++      preset: tuning.preset,
+     );
+   }
+ 
+diff --git a/flutter-client/pubspec.yaml b/flutter-client/pubspec.yaml
+index 429fa71..b13949b 100644
+--- a/flutter-client/pubspec.yaml
++++ b/flutter-client/pubspec.yaml
+@@ -1,7 +1,7 @@
+ name: pocketwindow
+ description: PocketWindow Flutter Client
+ publish_to: "none"
+-version: 1.1.144+144
++version: 1.2.5+207
+ 
+ environment:
+   sdk: ">=3.0.0 <4.0.0"
