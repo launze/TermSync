@@ -3,7 +3,14 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+#[cfg(target_os = "windows")]
+use std::process::Stdio;
+
 use arboard::Clipboard;
+#[cfg(target_os = "windows")]
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::Local;
 use image::{ColorType, ImageFormat};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -573,7 +580,7 @@ pub fn install_desktop_update(path: String) -> Result<String, String> {
         return Err("更新安装包不存在，请重新下载".to_string());
     }
     open_path(&path)?;
-    Ok("Installer opened".to_string())
+    Ok("Installer scheduled".to_string())
 }
 
 fn safe_download_file_name(value: &str) -> String {
@@ -596,15 +603,35 @@ fn safe_download_file_name(value: &str) -> String {
 fn open_path(path: &PathBuf) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("powershell")
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let script = windows_installer_script(path, std::process::id());
+        let encoded_script = BASE64.encode(
+            script
+                .encode_utf16()
+                .flat_map(|unit| unit.to_le_bytes())
+                .collect::<Vec<_>>(),
+        );
+        let child = std::process::Command::new("powershell.exe")
             .args([
                 "-NoProfile",
-                "-Command",
-                "Start-Process -LiteralPath $args[0]",
-                &path.to_string_lossy(),
+                "-NonInteractive",
+                "-WindowStyle",
+                "Hidden",
+                "-EncodedCommand",
+                &encoded_script,
             ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn()
-            .map_err(|error| format!("打开安装包失败: {error}"))?;
+            .map_err(|error| format!("启动更新程序失败: {error}"))?;
+        crate::log_debug(&format!(
+            "update:installer-scheduled helper_pid={} parent_pid={} path={}",
+            child.id(),
+            std::process::id(),
+            path.display()
+        ));
         return Ok(());
     }
 
@@ -624,6 +651,34 @@ fn open_path(path: &PathBuf) -> Result<(), String> {
             .spawn()
             .map_err(|error| format!("打开安装包失败: {error}"))?;
         return Ok(());
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_installer_script(path: &PathBuf, parent_pid: u32) -> String {
+    let escaped_path = path.to_string_lossy().replace('\'', "''");
+    format!(
+        "$ErrorActionPreference = 'Stop'; \
+         Wait-Process -Id {parent_pid} -ErrorAction SilentlyContinue; \
+         Start-Process -FilePath '{escaped_path}' -Verb RunAs"
+    )
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+    use super::windows_installer_script;
+    use std::path::PathBuf;
+
+    #[test]
+    fn windows_installer_script_waits_and_quotes_path() {
+        let script = windows_installer_script(
+            &PathBuf::from(r"C:\Users\Test User\Term'Sync setup.exe"),
+            1234,
+        );
+        assert!(script.contains("Wait-Process -Id 1234"));
+        assert!(script.contains("-FilePath 'C:\\Users\\Test User\\Term''Sync setup.exe'"));
+        assert!(script.contains("-Verb RunAs"));
+        assert!(!script.contains("-LiteralPath"));
     }
 }
 

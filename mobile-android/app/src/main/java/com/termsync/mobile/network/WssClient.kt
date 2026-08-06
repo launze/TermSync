@@ -5,9 +5,12 @@ import com.termsync.mobile.TermSyncApplication
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -46,23 +49,32 @@ data class WssMessage(
  * that callbacks from a stale (replaced) connection never overwrite the state
  * of the current connection.
  */
-class WssClient {
+class WssClient internal constructor(
+    private val client: OkHttpClient = buildDefaultClient()
+) {
+    private data class QueuedMessage(
+        val generation: Long,
+        val message: WssMessage
+    )
+
     companion object {
         private const val TAG = "WssClient"
         const val HEARTBEAT_INTERVAL = 30_000L // 30 seconds
+
+        private fun buildDefaultClient(): OkHttpClient = OkHttpClient.Builder()
+            .sslSocketFactory(TermSyncApplication.sslContext.socketFactory, TermSyncApplication.trustManager)
+            .pingInterval(30, TimeUnit.SECONDS)
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(0, TimeUnit.MILLISECONDS)
+            .build()
     }
 
     /** Monotonic generation counter – incremented on every connect(). */
     private val connectionGeneration = AtomicLong(0)
 
     private val activeSocket = AtomicReference<WebSocket?>(null)
-    private val client: OkHttpClient = OkHttpClient.Builder()
-        .sslSocketFactory(TermSyncApplication.sslContext.socketFactory, TermSyncApplication.trustManager)
-        .pingInterval(30, TimeUnit.SECONDS)
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(0, TimeUnit.MILLISECONDS)
-        .build()
-    private val messageBuffer = MutableSharedFlow<WssMessage>(extraBufferCapacity = 100)
+    // Retain early auth events and preserve OkHttp callback order.
+    private val messageQueue = Channel<QueuedMessage>(Channel.UNLIMITED)
     private var heartbeatJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO)
 
@@ -79,7 +91,9 @@ class WssClient {
     var lastError: String? = null
         private set
 
-    val messages: SharedFlow<WssMessage> = messageBuffer
+    val messages: Flow<WssMessage> = messageQueue.receiveAsFlow()
+        .filter { it.generation == connectionGeneration.get() }
+        .map { it.message }
 
     /**
      * Connect to TTY1 server via WSS
@@ -101,13 +115,11 @@ class WssClient {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 if (connectionGeneration.get() != gen) return  // stale
                 Log.d(TAG, "WebSocket connected (gen=$gen)")
-                isConnected = true
-
-                // Send authentication message
-                sendAuth(token)
-
-                // Start heartbeat
-                startHeartbeat(gen)
+                // The transport is not usable until auth_response succeeds.
+                if (!sendAuth(webSocket, token, gen)) {
+                    lastError = "Failed to enqueue authentication"
+                    webSocket.cancel()
+                }
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
@@ -127,9 +139,18 @@ class WssClient {
                     // Handle auth response
                     if (msg.type == "auth_response") {
                         msg.payload?.let { payload ->
-                            deviceId = payload.optString("device_id")
-                            val deviceType = payload.optString("device_type")
-                            Log.d(TAG, "Authenticated as device: $deviceId (type: $deviceType)")
+                            val success = payload.optBoolean("success", false)
+                            isConnected = success
+                            if (success) {
+                                deviceId = payload.optString("device_id")
+                                val deviceType = payload.optString("device_type")
+                                Log.d(TAG, "Authenticated as device: $deviceId (type: $deviceType)")
+                                startHeartbeat(gen)
+                            } else {
+                                deviceId = null
+                                lastError = payload.optString("message", "Authentication failed")
+                                stopHeartbeat()
+                            }
                         }
                     }
 
@@ -142,9 +163,7 @@ class WssClient {
                         }
                     }
 
-                    scope.launch {
-                        messageBuffer.emit(msg)
-                    }
+                    publishMessage(msg, gen)
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to parse message", e)
                 }
@@ -158,41 +177,41 @@ class WssClient {
                 if (connectionGeneration.get() != gen) return  // stale
                 Log.d(TAG, "WebSocket closing: $code - $reason (gen=$gen)")
                 isConnected = false
+                activeSocket.compareAndSet(webSocket, null)
                 stopHeartbeat()
-                scope.launch {
-                    messageBuffer.emit(
-                        WssMessage(
-                            type = "connection.closed",
-                            id = null,
-                            workspaceId = null,
-                            paneId = null,
-                            sessionId = null,
-                            timestamp = System.currentTimeMillis() / 1000,
-                            payload = JSONObject().put("message", reason)
-                        )
-                    )
-                }
+                publishMessage(
+                    WssMessage(
+                        type = "connection.closed",
+                        id = null,
+                        workspaceId = null,
+                        paneId = null,
+                        sessionId = null,
+                        timestamp = System.currentTimeMillis() / 1000,
+                        payload = JSONObject().put("message", reason)
+                    ),
+                    gen
+                )
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 if (connectionGeneration.get() != gen) return  // stale
                 Log.e(TAG, "WebSocket error (gen=$gen)", t)
                 isConnected = false
+                activeSocket.compareAndSet(webSocket, null)
                 lastError = t.message
                 stopHeartbeat()
-                scope.launch {
-                    messageBuffer.emit(
-                        WssMessage(
-                            type = "connection.error",
-                            id = null,
-                            workspaceId = null,
-                            paneId = null,
-                            sessionId = null,
-                            timestamp = System.currentTimeMillis() / 1000,
-                            payload = JSONObject().put("message", t.message ?: "Unknown websocket error")
-                        )
-                    )
-                }
+                publishMessage(
+                    WssMessage(
+                        type = "connection.error",
+                        id = null,
+                        workspaceId = null,
+                        paneId = null,
+                        sessionId = null,
+                        timestamp = System.currentTimeMillis() / 1000,
+                        payload = JSONObject().put("message", t.message ?: "Unknown websocket error")
+                    ),
+                    gen
+                )
             }
         })
 
@@ -207,6 +226,7 @@ class WssClient {
         connectionGeneration.incrementAndGet()
         activeSocket.getAndSet(null)?.close(1000, "Client disconnecting")
         isConnected = false
+        deviceId = null
         stopHeartbeat()
     }
 
@@ -219,10 +239,10 @@ class WssClient {
         paneId: String? = null,
         sessionId: String? = null,
         payload: JSONObject? = null
-    ) {
+    ): Boolean {
         if (!isConnected) {
-            Log.w(TAG, "Not connected, dropping $type")
-            return
+            Log.w(TAG, "Not authenticated, dropping $type")
+            return false
         }
 
         val json = JSONObject().apply {
@@ -236,21 +256,34 @@ class WssClient {
             payload?.let { put("payload", it) }
         }
 
-        activeSocket.get()?.send(json.toString())
+        val socket = activeSocket.get()
+        val sent = socket?.send(json.toString()) == true
+        if (!sent) {
+            Log.w(TAG, "Failed to enqueue $type")
+            failActiveConnection(socket, "Failed to send $type")
+        }
+        return sent
     }
 
     /**
      * Send authentication message - protocol v3
      */
-    private fun sendAuth(token: String) {
+    private fun sendAuth(webSocket: WebSocket, token: String, generation: Long): Boolean {
         val payload = JSONObject().apply {
             put("token", token)
             put("device_type", "mobile")
             put("client_instance_id", "android-${android.os.Process.myPid()}")
-            put("connection_generation", connectionGeneration.get())
+            put("connection_generation", generation)
             put("supported_protocols", org.json.JSONArray().put(3))
         }
-        sendMessage("auth", payload = payload)
+        val json = JSONObject().apply {
+            put("type", "auth")
+            put("v", 3)
+            put("id", "android-${System.currentTimeMillis()}-$generation")
+            put("timestamp", System.currentTimeMillis() / 1000)
+            put("payload", payload)
+        }
+        return webSocket.send(json.toString())
     }
 
     // ─── Protocol v3: Mobile viewer helpers ───────────────────────────────
@@ -258,35 +291,31 @@ class WssClient {
     /**
      * Request visible v3 workspaces. The server responds with workspace.list_res.
      */
-    fun requestSessionList() {
-        sendMessage("workspace.list")
-    }
+    fun requestSessionList(): Boolean = sendMessage("workspace.list")
 
-    fun subscribeWorkspace(workspaceId: String) {
+    fun subscribeWorkspace(workspaceId: String): Boolean =
         sendMessage("workspace.subscribe", workspaceId = workspaceId, payload = JSONObject().put("workspace_id", workspaceId))
-    }
 
-    fun subscribeScreen(workspaceId: String, paneId: String) {
+    fun subscribeScreen(workspaceId: String, paneId: String): Boolean {
         val payload = JSONObject()
             .put("pane_id", paneId)
             .put("encoding", "base64+cells-json")
-        sendMessage("screen.subscribe", workspaceId = workspaceId, paneId = paneId, payload = payload)
+        return sendMessage("screen.subscribe", workspaceId = workspaceId, paneId = paneId, payload = payload)
     }
 
-    fun unsubscribeScreen(workspaceId: String, paneId: String) {
+    fun unsubscribeScreen(workspaceId: String, paneId: String): Boolean =
         sendMessage("screen.unsubscribe", workspaceId = workspaceId, paneId = paneId, payload = JSONObject().put("pane_id", paneId))
-    }
 
-    fun requestScreenResync(workspaceId: String, paneId: String, lastSeq: Long) {
+    fun requestScreenResync(workspaceId: String, paneId: String, lastSeq: Long): Boolean {
         val payload = JSONObject().apply {
             put("pane_id", paneId)
             put("last_seq", lastSeq)
             put("encoding", "base64+cells-json")
         }
-        sendMessage("screen.resync_request", workspaceId = workspaceId, paneId = paneId, payload = payload)
+        return sendMessage("screen.resync_request", workspaceId = workspaceId, paneId = paneId, payload = payload)
     }
 
-    fun requestScreenHistory(workspaceId: String, paneId: String, beforeLine: Long, limit: Int = 2000) {
+    fun requestScreenHistory(workspaceId: String, paneId: String, beforeLine: Long, limit: Int = 2000): Boolean {
         val payload = JSONObject().apply {
             put("pane_id", paneId)
             put("request_id", "android-history-${System.currentTimeMillis()}")
@@ -294,15 +323,15 @@ class WssClient {
             put("limit", limit)
             put("encoding", "base64+cells-json")
         }
-        sendMessage("screen.history_request", workspaceId = workspaceId, paneId = paneId, payload = payload)
+        return sendMessage("screen.history_request", workspaceId = workspaceId, paneId = paneId, payload = payload)
     }
 
-    fun ackScreen(workspaceId: String, paneId: String, ackSeq: Long) {
+    fun ackScreen(workspaceId: String, paneId: String, ackSeq: Long): Boolean {
         val payload = JSONObject().apply {
             put("pane_id", paneId)
             put("ack_seq", ackSeq)
         }
-        sendMessage("screen.ack", workspaceId = workspaceId, paneId = paneId, payload = payload)
+        return sendMessage("screen.ack", workspaceId = workspaceId, paneId = paneId, payload = payload)
     }
 
     fun subscribeToSession(sessionId: String) {
@@ -313,22 +342,22 @@ class WssClient {
         Log.d(TAG, "requestTerminalReplay ignored in v3: $sessionId")
     }
 
-    fun requestRemoteSessionCreate(desktopId: String, title: String? = null) {
+    fun requestRemoteSessionCreate(desktopId: String, title: String? = null): Boolean {
         val workspaceId = "$desktopId:default"
         val payload = JSONObject().apply {
             put("action", "new_tab")
             title?.takeIf { it.isNotBlank() }?.let { put("title", it) }
         }
-        sendMessage("layout.action_request", workspaceId = workspaceId, payload = payload)
+        return sendMessage("layout.action_request", workspaceId = workspaceId, payload = payload)
     }
 
-    fun requestRemoteSessionClose(workspaceId: String, paneId: String, sessionId: String) {
+    fun requestRemoteSessionClose(workspaceId: String, paneId: String, sessionId: String): Boolean {
         val payload = JSONObject().apply {
             put("action", "close_pane")
             put("pane_id", paneId)
             put("session_id", sessionId)
         }
-        sendMessage("layout.action_request", workspaceId = workspaceId, paneId = paneId, sessionId = sessionId, payload = payload)
+        return sendMessage("layout.action_request", workspaceId = workspaceId, paneId = paneId, sessionId = sessionId, payload = payload)
     }
 
     /**
@@ -338,14 +367,14 @@ class WssClient {
         Log.d(TAG, "unsubscribeFromSession ignored in v3: $sessionId")
     }
 
-    fun sendTerminalInput(workspaceId: String, paneId: String, sessionId: String, input: String, inputId: String) {
+    fun sendTerminalInput(workspaceId: String, paneId: String, sessionId: String, input: String, inputId: String): Boolean {
         val payload = JSONObject().apply {
             put("input_id", inputId)
             put("encoding", "base64")
             put("mode", "raw")
             put("data", Base64.encodeToString(input.toByteArray(Charsets.UTF_8), Base64.NO_WRAP))
         }
-        sendMessage("input.send", workspaceId = workspaceId, paneId = paneId, sessionId = sessionId, payload = payload)
+        return sendMessage("input.send", workspaceId = workspaceId, paneId = paneId, sessionId = sessionId, payload = payload)
     }
 
     /**
@@ -372,9 +401,7 @@ class WssClient {
     /**
      * Send heartbeat to keep connection alive.
      */
-    fun sendHeartbeat() {
-        sendMessage("heartbeat")
-    }
+    fun sendHeartbeat(): Boolean = sendMessage("heartbeat")
 
     /**
      * Start periodic heartbeat bound to a specific connection generation.
@@ -399,6 +426,35 @@ class WssClient {
     private fun stopHeartbeat() {
         heartbeatJob?.cancel()
         heartbeatJob = null
+    }
+
+    private fun publishMessage(
+        message: WssMessage,
+        generation: Long = connectionGeneration.get()
+    ) {
+        val result = messageQueue.trySend(QueuedMessage(generation, message))
+        if (result.isFailure) {
+            Log.e(TAG, "Failed to queue ${message.type}", result.exceptionOrNull())
+        }
+    }
+
+    private fun failActiveConnection(socket: WebSocket?, message: String) {
+        if (!_isConnected.compareAndSet(true, false)) return
+        lastError = message
+        activeSocket.compareAndSet(socket, null)
+        socket?.cancel()
+        stopHeartbeat()
+        publishMessage(
+            WssMessage(
+                type = "connection.error",
+                id = null,
+                workspaceId = null,
+                paneId = null,
+                sessionId = null,
+                timestamp = System.currentTimeMillis() / 1000,
+                payload = JSONObject().put("message", message)
+            )
+        )
     }
 
     private fun normalizeUrl(url: String): String {

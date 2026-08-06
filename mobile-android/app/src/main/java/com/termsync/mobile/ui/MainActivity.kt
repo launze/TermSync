@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -1809,22 +1810,26 @@ fun SpecialKeyButton(label: String, onClick: () -> Unit) {
     }
 }
 
-private fun buildTuiTextPayload(input: String): String {
+internal fun buildTuiSubmissionPayload(input: String, includeSubmitKey: Boolean = true): String {
     val text = input.replace("\r\n", "\n").replace("\r", "\n")
     if (text.isBlank()) return ""
     val pasteSafeText = text.replace("\u001B", "")
-    return if (pasteSafeText.contains('\n')) {
+    if (pasteSafeText.isBlank()) return ""
+    val payload = if (pasteSafeText.contains('\n')) {
         "\u001B[200~$pasteSafeText\u001B[201~"
     } else {
         pasteSafeText
     }
+    return if (includeSubmitKey) "$payload\r" else payload
 }
 
 private suspend fun sendTuiSubmission(input: String, sendRawInput: (String) -> Unit) {
-    val payload = buildTuiTextPayload(input)
+    val payload = buildTuiSubmissionPayload(input, includeSubmitKey = false)
     if (payload.isBlank()) return
     sendRawInput(payload)
-    delay(if (input.contains('\n') || input.contains('\r')) 80L else 40L)
+    // Codex processes pasted text asynchronously. Give it a turn before
+    // sending Enter so the key submits the newly pasted prompt.
+    delay(if (input.contains('\n') || input.contains('\r')) 100L else 60L)
     sendRawInput("\r")
 }
 
@@ -2569,29 +2574,37 @@ private fun installDownloadedApk(context: Context, filePath: String) {
         Toast.makeText(context, "安装包不存在，请重新下载", Toast.LENGTH_SHORT).show()
         return
     }
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !context.packageManager.canRequestPackageInstalls()) {
-        context.startActivity(
-            Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
-                data = Uri.parse("package:${context.packageName}")
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-        )
-        Toast.makeText(context, "请允许安装未知来源应用后再点安装", Toast.LENGTH_LONG).show()
-        return
-    }
+    try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !context.packageManager.canRequestPackageInstalls()) {
+            context.startActivity(
+                Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+                    data = Uri.parse("package:${context.packageName}")
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+            )
+            Toast.makeText(context, "请允许安装未知来源应用后再点安装", Toast.LENGTH_LONG).show()
+            return
+        }
 
-    val uri = FileProvider.getUriForFile(
-        context,
-        "${context.packageName}.fileprovider",
-        apk
-    )
-    context.startActivity(
-        Intent(Intent.ACTION_VIEW).apply {
+        val uri = FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.fileprovider",
+            apk
+        )
+        val installIntent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, "application/vnd.android.package-archive")
+            clipData = ClipData.newRawUri("TermSync update", uri)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-    )
+        context.startActivity(installIntent)
+    } catch (e: ActivityNotFoundException) {
+        Toast.makeText(context, "系统未找到可用的安装程序", Toast.LENGTH_LONG).show()
+    } catch (e: IllegalArgumentException) {
+        Toast.makeText(context, "安装包路径无效，请重新下载", Toast.LENGTH_LONG).show()
+    } catch (e: SecurityException) {
+        Toast.makeText(context, "没有安装权限，请允许安装未知来源应用后重试", Toast.LENGTH_LONG).show()
+    }
 }
 
 private class TerminalAndroidBridge(

@@ -54,6 +54,27 @@ func TestMatchesReleaseOSDesktop(t *testing.T) {
 	}
 }
 
+func TestMatchesReleasePlatformAcceptsDirectDesktopOS(t *testing.T) {
+	tests := []struct {
+		name     string
+		platform string
+		want     bool
+	}{
+		{name: "termsync-desktop-windows-x64-v0.1.14-setup.exe", platform: "windows", want: true},
+		{name: "termsync-desktop-windows-x64-v0.1.14.msi", platform: "windows", want: true},
+		{name: "termsync-desktop-macos-arm64-v0.1.14.dmg", platform: "macos", want: true},
+		{name: "termsync-desktop-linux-x64-v0.1.14.AppImage", platform: "linux", want: true},
+		{name: "termsync-desktop-linux-x64-v0.1.14.deb", platform: "windows", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.platform+"/"+tt.name, func(t *testing.T) {
+			if got := matchesReleasePlatform(tt.name, tt.platform); got != tt.want {
+				t.Fatalf("matchesReleasePlatform(%q, %q) = %v, want %v", tt.name, tt.platform, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestLatestDownloadsKeepsNewestPerPlatform(t *testing.T) {
 	items := []downloadItem{
 		{Name: "termsync-desktop-windows-x64-v0.1.10-setup.exe", Platform: "Windows Setup"},

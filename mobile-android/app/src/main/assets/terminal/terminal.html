@@ -305,6 +305,7 @@
     var boundViewport = null;
     var followOutput = true;
     var userPinnedToBottom = true;
+    var userBrowsingHistory = false;
     var viewportTouchY = null;
     var FALLBACK_SYNC_DEBOUNCE_MS = 280;
     var FALLBACK_MAX_LINES = 2400;
@@ -787,7 +788,7 @@
       var previousTop = fallbackEl.scrollTop || 0;
       var previousLeft = fallbackEl.scrollLeft || 0;
       var previousAtBottom = isAtBottomEl(fallbackEl);
-      var shouldFollow = userPinnedToBottom || previousAtBottom || !wasCellsFrame;
+      var shouldFollow = !userBrowsingHistory && (userPinnedToBottom || previousAtBottom || !wasCellsFrame);
       lastCellsFrame = frame;
       var font = frame.font || {};
       var lineHeight = Math.max(1, Math.min(1.5, Number(font.lineHeight) || 1.08));
@@ -826,6 +827,7 @@
       if (shouldFollow) {
         fallbackEl.scrollTop = fallbackEl.scrollHeight;
         fallbackEl.scrollLeft = 0;
+        userBrowsingHistory = false;
       } else {
         fallbackEl.scrollLeft = Math.min(previousLeft, Math.max(0, fallbackEl.scrollWidth - fallbackEl.clientWidth));
       }
@@ -993,7 +995,9 @@
 
     function renderReaderDom(autoScroll) {
       if (!readerEl) return;
-      var shouldFollow = typeof autoScroll === "boolean" ? autoScroll : isNearBottomEl(readerEl);
+      var shouldFollow = !userBrowsingHistory && (
+        typeof autoScroll === "boolean" ? autoScroll : isNearBottomEl(readerEl)
+      );
       var blocks = splitReaderBlocks(readerBuffer);
       var header = "<div class=\"reader-head\"><strong>终端输出</strong><span>" + blocks.length + " 段输出</span></div>";
       var html = blocks.map(function(block) {
@@ -1117,7 +1121,7 @@
     function writeReader(data, mode, shouldFollowOutput) {
       if (!readerEl) return "ERR:no_reader";
       var wasAtBottom = isNearBottomEl(readerEl);
-      var shouldFollow = mode === "render" || !!shouldFollowOutput || wasAtBottom;
+      var shouldFollow = !userBrowsingHistory && (mode === "render" || !!shouldFollowOutput || wasAtBottom);
       if (mode === "render") {
         readerBuffer = terminalTextToPlain(trimInitialRenderText(data || ""), "");
       } else if (data) {
@@ -1351,7 +1355,7 @@
       if (fallbackEl && fallbackEl.classList.contains("cells-frame")) {
         scheduleCellsVirtualWindowUpdate();
       }
-      userPinnedToBottom = isAtBottomEl(viewport());
+      userPinnedToBottom = !userBrowsingHistory && isAtBottomEl(viewport());
       requestOlderHistoryIfNeeded();
       reportScrollAtBottom(false);
     }
@@ -1375,12 +1379,34 @@
     function handleViewportTouchMove(event) {
       var touch = event.touches && event.touches[0];
       if (!touch || viewportTouchY === null) return;
-      if (touch.clientY > viewportTouchY + 1) userPinnedToBottom = false;
+      if (touch.clientY > viewportTouchY + 1) {
+        userBrowsingHistory = true;
+        userPinnedToBottom = false;
+      }
       viewportTouchY = touch.clientY;
     }
 
+    function handleViewportTouchEnd() {
+      viewportTouchY = null;
+      if (isAtBottomEl(viewport())) {
+        userBrowsingHistory = false;
+        userPinnedToBottom = true;
+      }
+      reportScrollAtBottom(false);
+    }
+
     function handleViewportWheel(event) {
-      if (event.deltaY < 0) userPinnedToBottom = false;
+      if (event.deltaY < 0) {
+        userBrowsingHistory = true;
+        userPinnedToBottom = false;
+      } else if (event.deltaY > 0) {
+        requestAnimationFrame(function() {
+          if (isAtBottomEl(viewport())) {
+            userBrowsingHistory = false;
+            userPinnedToBottom = true;
+          }
+        });
+      }
     }
 
     function reportScrollAtBottom(force) {
@@ -1401,14 +1427,16 @@
         boundViewport.removeEventListener("scroll", handleViewportScroll);
         boundViewport.removeEventListener("touchstart", handleViewportTouchStart);
         boundViewport.removeEventListener("touchmove", handleViewportTouchMove);
+        boundViewport.removeEventListener("touchend", handleViewportTouchEnd);
         boundViewport.removeEventListener("wheel", handleViewportWheel);
       }
       boundViewport = el;
       boundViewport.addEventListener("scroll", handleViewportScroll, { passive: true });
       boundViewport.addEventListener("touchstart", handleViewportTouchStart, { passive: true });
       boundViewport.addEventListener("touchmove", handleViewportTouchMove, { passive: true });
+      boundViewport.addEventListener("touchend", handleViewportTouchEnd, { passive: true });
       boundViewport.addEventListener("wheel", handleViewportWheel, { passive: true });
-      userPinnedToBottom = isAtBottomEl(boundViewport);
+      userPinnedToBottom = !userBrowsingHistory && isAtBottomEl(boundViewport);
       reportScrollAtBottom(true);
     }
 
@@ -1737,6 +1765,7 @@
       } else if (term) {
         term.scrollToBottom();
       }
+      userBrowsingHistory = false;
       userPinnedToBottom = true;
       if (fallbackEl) {
         if (fallbackEl.classList.contains("cells-frame")) {

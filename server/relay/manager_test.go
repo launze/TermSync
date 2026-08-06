@@ -187,8 +187,9 @@ func TestLayoutSnapshotCreatesWorkspaceAndIndexesPanes(t *testing.T) {
 	if ws.OwnerID != "desktop-1" || ws.Version != 1 {
 		t.Fatalf("unexpected workspace: %#v", ws)
 	}
-	if sm.paneWorkspace["pane-1"] != "desktop-1:default" {
-		t.Fatalf("pane should be indexed to workspace, got %q", sm.paneWorkspace["pane-1"])
+	key := screenStreamKey("desktop-1:default", "pane-1")
+	if sm.paneWorkspace[key] != "desktop-1:default" {
+		t.Fatalf("pane should be indexed to workspace, got %q", sm.paneWorkspace[key])
 	}
 }
 
@@ -232,8 +233,9 @@ func TestLayoutPatchUpdatesWorkspaceSnapshot(t *testing.T) {
 	if ws.Version != 2 {
 		t.Fatalf("expected version 2, got %d", ws.Version)
 	}
-	if sm.paneWorkspace["pane-2"] != "desktop-1:default" {
-		t.Fatalf("pane should be indexed from patch, got %q", sm.paneWorkspace["pane-2"])
+	key := screenStreamKey("desktop-1:default", "pane-2")
+	if sm.paneWorkspace[key] != "desktop-1:default" {
+		t.Fatalf("pane should be indexed from patch, got %q", sm.paneWorkspace[key])
 	}
 }
 
@@ -285,8 +287,9 @@ func TestLayoutPatchRemovesStalePaneStreams(t *testing.T) {
 	if _, ok := sm.paneStreams["pane-1"]; ok {
 		t.Fatal("stale pane stream should be removed")
 	}
-	if sm.paneWorkspace["pane-2"] != "desktop-1:default" {
-		t.Fatalf("new pane should be indexed, got %q", sm.paneWorkspace["pane-2"])
+	newKey := screenStreamKey("desktop-1:default", "pane-2")
+	if sm.paneWorkspace[newKey] != "desktop-1:default" {
+		t.Fatalf("new pane should be indexed, got %q", sm.paneWorkspace[newKey])
 	}
 
 	if err := sm.HandleMessage("desktop-1", marshalMsg(t, models.Message{
@@ -354,8 +357,72 @@ func TestViewerWorkspaceAndScreenSubscribe(t *testing.T) {
 	})); err != nil {
 		t.Fatalf("screen.subscribe failed: %v", err)
 	}
-	if sm.paneStreams["pane-1"].Subscribers["pc-1"] == nil {
+	stream := sm.paneStreams[screenStreamKey("desktop-1:default", "pane-1")]
+	if stream == nil || stream.Subscribers["pc-1"] == nil {
 		t.Fatal("viewer should be subscribed to pane screen")
+	}
+}
+
+func TestScreenStreamsAreScopedByWorkspace(t *testing.T) {
+	sm, cleanup := newTestManager(t)
+	defer cleanup()
+	seedDevice(t, sm, "desktop-1", "desktop-token-1", "desktop")
+	seedDevice(t, sm, "desktop-2", "desktop-token-2", "desktop")
+	seedDevice(t, sm, "mobile-2", "mobile-token-2", "mobile")
+	seedPairing(t, sm, "desktop-2", "mobile-2")
+
+	for _, ownerID := range []string{"desktop-1", "desktop-2"} {
+		workspaceID := ownerID + ":default"
+		if err := sm.HandleMessage(ownerID, marshalMsg(t, models.Message{
+			Type:        string(models.MsgLayoutSnapshot),
+			V:           3,
+			WorkspaceID: workspaceID,
+			Payload: map[string]interface{}{
+				"layout_version": 1.0,
+				"snapshot": map[string]interface{}{
+					"root": map[string]interface{}{"pane_id": "1"},
+				},
+			},
+		})); err != nil {
+			t.Fatalf("layout.snapshot for %s failed: %v", ownerID, err)
+		}
+		if err := sm.HandleMessage(ownerID, marshalMsg(t, models.Message{
+			Type:        string(models.MsgScreenDelta),
+			V:           3,
+			WorkspaceID: workspaceID,
+			PaneID:      "1",
+			SessionID:   ownerID + "-session",
+			Payload: map[string]interface{}{
+				"seq":      1.0,
+				"prev_seq": 0.0,
+				"data":     "YQ==",
+			},
+		})); err != nil {
+			t.Fatalf("screen.delta for %s failed: %v", ownerID, err)
+		}
+	}
+
+	first := sm.paneStreams[screenStreamKey("desktop-1:default", "1")]
+	second := sm.paneStreams[screenStreamKey("desktop-2:default", "1")]
+	if first == nil || second == nil {
+		t.Fatal("same pane id should create one stream per workspace")
+	}
+	if first.OwnerID != "desktop-1" || second.OwnerID != "desktop-2" {
+		t.Fatalf("unexpected stream owners: first=%q second=%q", first.OwnerID, second.OwnerID)
+	}
+	if err := sm.HandleMessage("mobile-2", marshalMsg(t, models.Message{
+		Type:        string(models.MsgScreenSubscribe),
+		V:           3,
+		WorkspaceID: "desktop-2:default",
+		PaneID:      "1",
+	})); err != nil {
+		t.Fatalf("screen.subscribe for second workspace failed: %v", err)
+	}
+	if second.Subscribers["mobile-2"] == nil {
+		t.Fatal("viewer should subscribe to the requested workspace stream")
+	}
+	if first.Subscribers["mobile-2"] != nil {
+		t.Fatal("viewer must not subscribe to the same pane id in another workspace")
 	}
 }
 
@@ -564,6 +631,23 @@ func TestScreenUnsubscribeRemovesViewerFromDeltaFanout(t *testing.T) {
 	}
 	if _, ok := sm.paneStreams["pane-1"].Subscribers["pc-1"]; ok {
 		t.Fatal("viewer should be removed from screen subscribers")
+	}
+
+	if err := sm.HandleMessage("pc-1", marshalMsg(t, models.Message{
+		Type:        string(models.MsgScreenAck),
+		V:           3,
+		ID:          "late-ack-after-unsubscribe",
+		WorkspaceID: "desktop-1:default",
+		PaneID:      "pane-1",
+		Timestamp:   time.Now().Unix(),
+		Payload: map[string]interface{}{
+			"ack_seq": 1.0,
+		},
+	})); err != nil {
+		t.Fatalf("late screen.ack failed: %v", err)
+	}
+	if _, ok := sm.paneStreams["pane-1"].Subscribers["pc-1"]; ok {
+		t.Fatal("late ack must not recreate an unsubscribed viewer")
 	}
 
 	if err := sm.HandleMessage("desktop-1", marshalMsg(t, models.Message{

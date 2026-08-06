@@ -348,6 +348,12 @@ func matchesReleasePlatform(name, platform string) bool {
 	switch platform {
 	case "android", "mobile":
 		return ext == ".apk"
+	case "windows", "win32", "win":
+		return ext == ".exe" || ext == ".msi" || strings.Contains(lower, "windows")
+	case "macos", "darwin", "mac":
+		return ext == ".dmg" || strings.Contains(lower, "macos") || strings.Contains(lower, "darwin")
+	case "linux":
+		return ext == ".deb" || ext == ".appimage" || strings.Contains(lower, "linux")
 	case "desktop", "pc":
 		return ext == ".exe" || ext == ".msi" || ext == ".deb" || ext == ".appimage" ||
 			ext == ".dmg" || ext == ".zip" || strings.Contains(lower, "windows") ||

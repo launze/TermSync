@@ -745,10 +745,13 @@
             z-index: 3000;
         }
         .modal-overlay.visible { display: flex; }
+        #settingsModal { z-index: 3300; }
         .modal {
             background-color: #2d2d2d; border: 1px solid #3c3c3c;
             border-radius: 6px; padding: 20px;
             min-width: 400px; max-width: 500px;
+            max-height: calc(100vh - 32px); overflow-y: auto;
+            box-sizing: border-box;
             box-shadow: 0 4px 16px rgba(0,0,0,0.5);
         }
         .modal h3 { color: #ffffff; margin-bottom: 16px; font-size: 16px; }
@@ -1254,7 +1257,7 @@
             </div>
             <div class="form-group">
                 <label>默认 Shell</label>
-                <select id="settingShell" onchange="window.app.updateCustomShellVisibility()">
+                <select id="settingShell" onpointerdown="openNativeSelect(this, event)" onchange="window.app.updateCustomShellVisibility()">
                     <option value="pwsh">PowerShell 7 (pwsh)</option>
                     <option value="powershell">Windows PowerShell</option>
                     <option value="cmd">命令提示符 (cmd)</option>
@@ -1529,6 +1532,16 @@
                 .replace(/'/g, '&#39;');
         }
 
+        function openNativeSelect(select, event) {
+            if (!select || typeof select.showPicker !== 'function') return;
+            try {
+                select.showPicker();
+                event?.preventDefault();
+            } catch (_) {
+                // Let the WebView's normal select behavior handle unsupported cases.
+            }
+        }
+
         function stripAnsi(text) {
             return String(text || '')
                 .replace(/\u001B\][^\u0007]*(\u0007|\u001B\\)/g, ' ')
@@ -1610,6 +1623,9 @@
         const SAVED_TABS_STORAGE_KEY = 'TermSync-saved-tabs';
         const WORKSPACE_STORAGE_KEY = 'TermSync-workspace';
         const WORKSPACE_BACKUP_LIMIT = 8;
+        const WORKSPACE_REPLAY_STORAGE_SUFFIX = ':replay';
+        const WORKSPACE_REPLAY_TOTAL_LIMIT = 512 * 1024;
+        const WORKSPACE_REPLAY_SESSION_LIMIT = 128 * 1024;
         const SAVED_TABS_LIMIT = 30;
         const RUNNING_OUTPUT_IDLE_MS = 3500;
         const COMMAND_CATEGORY_LABELS = {
@@ -3256,6 +3272,7 @@
                 this.workspaceMode = normalizeClientMode(this.settings.get('clientMode'));
                 this.workspaceKey = this.getWorkspaceStorageKey();
                 this.workspaceSaveTimer = null;
+                this.workspaceReplaySaveTimer = null;
                 this.sessionSyncTimer = null;
                 this.sessionActivity = new Map();
                 this.sessionMetaSendTimers = new Map();
@@ -3311,6 +3328,7 @@
                 this.desktopUpdate = {
                     checking: false,
                     downloading: false,
+                    installing: false,
                     currentVersion: '',
                     latest: null,
                     downloaded: null,
@@ -5113,6 +5131,10 @@
                         clearTimeout(this.workspaceSaveTimer);
                         this.workspaceSaveTimer = null;
                     }
+                    if (this.workspaceReplaySaveTimer) {
+                        clearTimeout(this.workspaceReplaySaveTimer);
+                        this.workspaceReplaySaveTimer = null;
+                    }
                     this.saveWorkspace();
                 });
                 window.addEventListener('pagehide', () => this.saveWorkspace());
@@ -5122,8 +5144,17 @@
                 if (this.workspaceSaveTimer) clearTimeout(this.workspaceSaveTimer);
                 this.workspaceSaveTimer = setTimeout(() => {
                     this.workspaceSaveTimer = null;
-                    this.saveWorkspace();
+                    this.saveWorkspace({ persistReplay: false });
+                    this.scheduleWorkspaceReplaySave();
                 }, 150);
+            }
+
+            scheduleWorkspaceReplaySave() {
+                if (this.workspaceReplaySaveTimer) clearTimeout(this.workspaceReplaySaveTimer);
+                this.workspaceReplaySaveTimer = setTimeout(() => {
+                    this.workspaceReplaySaveTimer = null;
+                    this.persistWorkspaceReplayBuffers();
+                }, 2000);
             }
 
             currentWorkspaceMode() {
@@ -5138,6 +5169,10 @@
                 return key + ':backups';
             }
 
+            getWorkspaceReplayStorageKey(key = this.workspaceKey) {
+                return key + WORKSPACE_REPLAY_STORAGE_SUFFIX;
+            }
+
             refreshWorkspaceStorageKey() {
                 this.workspaceKey = this.getWorkspaceStorageKey();
             }
@@ -5150,9 +5185,7 @@
                     nextTabId: this.nextTabId,
                     activeTabId: this.activeTabId,
                     activePaneId: this.activePaneId,
-                    replayBuffers: Object.fromEntries(
-                        Array.from(this.replayBuffers.entries()).filter(([, value]) => !!value)
-                    ),
+                    replayBuffers: {},
                     tabs: Array.from(this.tabs.values()).map((tab) => ({
                         id: tab.id,
                         title: tab.title,
@@ -5245,6 +5278,75 @@
                 }
             }
 
+            buildPersistedReplayBuffers() {
+                const orderedSessionIds = [];
+                const seen = new Set();
+                const addSession = (sessionId) => {
+                    const normalized = String(sessionId || '');
+                    if (!normalized || seen.has(normalized) || !this.replayBuffers.get(normalized)) return;
+                    seen.add(normalized);
+                    orderedSessionIds.push(normalized);
+                };
+                if (this.activePaneId !== null) addSession(this.sessionIdForPane(this.activePaneId));
+                for (const tab of this.tabs.values()) {
+                    for (const paneId of tab.panes) addSession(this.sessionIdForPane(paneId));
+                }
+                for (const sessionId of this.replayBuffers.keys()) addSession(sessionId);
+
+                let remaining = WORKSPACE_REPLAY_TOTAL_LIMIT;
+                const buffers = {};
+                for (const sessionId of orderedSessionIds) {
+                    if (remaining <= 0) break;
+                    const limit = Math.min(WORKSPACE_REPLAY_SESSION_LIMIT, remaining);
+                    const value = trimReplayBuffer(this.replayBuffers.get(sessionId), limit);
+                    if (!value) continue;
+                    buffers[sessionId] = value;
+                    remaining -= value.length;
+                }
+                return buffers;
+            }
+
+            readWorkspaceReplayBuffers(key = this.workspaceKey) {
+                try {
+                    const raw = localStorage.getItem(this.getWorkspaceReplayStorageKey(key));
+                    if (!raw) return {};
+                    const parsed = JSON.parse(raw);
+                    const buffers = parsed?.buffers && typeof parsed.buffers === 'object'
+                        ? parsed.buffers
+                        : {};
+                    return Object.fromEntries(
+                        Object.entries(buffers)
+                            .filter(([sessionId, value]) => !!sessionId && typeof value === 'string' && value.length > 0)
+                            .map(([sessionId, value]) => [
+                                sessionId,
+                                trimReplayBuffer(value, WORKSPACE_REPLAY_SESSION_LIMIT)
+                            ])
+                    );
+                } catch (err) {
+                    console.warn('Read workspace replay failed:', key, err);
+                    return {};
+                }
+            }
+
+            persistWorkspaceReplayBuffers(key = this.workspaceKey) {
+                const storageKey = this.getWorkspaceReplayStorageKey(key);
+                const buffers = this.buildPersistedReplayBuffers();
+                try {
+                    if (Object.keys(buffers).length === 0) {
+                        localStorage.removeItem(storageKey);
+                        return;
+                    }
+                    localStorage.setItem(storageKey, JSON.stringify({
+                        version: 1,
+                        savedAt: Date.now(),
+                        buffers
+                    }));
+                } catch (err) {
+                    localStorage.removeItem(storageKey);
+                    console.warn('Persist workspace replay failed; layout remains saved:', err);
+                }
+            }
+
             persistWorkspaceBackup(state, key = this.workspaceKey) {
                 if (!this.isValidWorkspaceState(state)) return;
                 const backupState = this.workspaceBackupState(state);
@@ -5262,7 +5364,7 @@
                 }
             }
 
-            saveWorkspace() {
+            saveWorkspace(options = {}) {
                 this.refreshWorkspaceStorageKey();
                 try {
                     const state = this.buildWorkspaceState();
@@ -5272,6 +5374,9 @@
                     }
                     localStorage.setItem(this.workspaceKey, JSON.stringify(state));
                     this.persistWorkspaceBackup(state, this.workspaceKey);
+                    if (options.persistReplay !== false) {
+                        this.persistWorkspaceReplayBuffers(this.workspaceKey);
+                    }
                 } catch (err) {
                     console.warn('Save workspace failed:', err);
                 }
@@ -5282,6 +5387,11 @@
                     clearTimeout(this.workspaceSaveTimer);
                     this.workspaceSaveTimer = null;
                 }
+                if (this.workspaceReplaySaveTimer) {
+                    clearTimeout(this.workspaceReplaySaveTimer);
+                    this.workspaceReplaySaveTimer = null;
+                }
+                this.saveWorkspace({ persistReplay: false });
                 await this.syncLocalSessionMetadata({ persist: false });
                 this.saveWorkspace();
             }
@@ -5587,8 +5697,13 @@
 
                 this.tabs.clear();
                 this.terminals.clear();
+                const persistedReplayBuffers = this.readWorkspaceReplayBuffers(this.workspaceKey);
                 this.replayBuffers = new Map(
-                    Object.entries(saved.replayBuffers || {})
+                    Object.entries(
+                        Object.keys(persistedReplayBuffers).length > 0
+                            ? persistedReplayBuffers
+                            : (saved.replayBuffers || {})
+                    )
                         .filter(([, value]) => typeof value === 'string' && value.length > 0)
                 );
 
@@ -8850,8 +8965,8 @@
                 const downloadBtn = document.getElementById('desktopDownloadUpdateBtn');
                 if (!statusEl || !metaEl || !checkBtn || !downloadBtn) return;
 
-                const { checking, downloading, currentVersion, latest, downloaded, message } = this.desktopUpdate;
-                checkBtn.disabled = checking || downloading;
+                const { checking, downloading, installing, currentVersion, latest, downloaded, message } = this.desktopUpdate;
+                checkBtn.disabled = checking || downloading || installing;
                 checkBtn.textContent = checking ? '检查中' : '检查更新';
                 const current = currentVersion || '未知';
                 const hasUpdate = latest?.available &&
@@ -8868,12 +8983,12 @@
                     ? [latest.file_name, latest.size, latest.updated_at].filter(Boolean).join(' · ')
                     : '';
                 downloadBtn.style.display = hasUpdate ? '' : 'none';
-                downloadBtn.disabled = downloading;
-                downloadBtn.textContent = downloading ? '下载中' : (readyToInstall ? '安装' : '下载更新');
+                downloadBtn.disabled = downloading || installing;
+                downloadBtn.textContent = installing ? '准备安装' : (downloading ? '下载中' : (readyToInstall ? '安装' : '下载更新'));
             }
 
             async checkDesktopUpdate(silent = false) {
-                if (this.desktopUpdate.checking || this.desktopUpdate.downloading || typeof invoke === 'undefined') return;
+                if (this.desktopUpdate.checking || this.desktopUpdate.downloading || this.desktopUpdate.installing || typeof invoke === 'undefined') return;
                 const serverUrl = this.settings.get('serverUrl') || DEFAULT_SERVER_URL;
                 this.desktopUpdate = {
                     ...this.desktopUpdate,
@@ -8892,6 +9007,7 @@
                     this.desktopUpdate = {
                         checking: false,
                         downloading: false,
+                        installing: false,
                         currentVersion,
                         latest,
                         downloaded: null,
@@ -8959,9 +9075,28 @@
                     this.showToast('安装包不存在，请重新下载', 'warning');
                     return;
                 }
+                this.desktopUpdate = {
+                    ...this.desktopUpdate,
+                    installing: true,
+                    message: '正在保存工作区并准备安装...'
+                };
+                this.renderDesktopUpdate();
                 try {
+                    await this.saveWorkspaceWithLatestSessionMetadata();
                     await invoke('install_desktop_update', { path });
+                    this.desktopUpdate = {
+                        ...this.desktopUpdate,
+                        message: '安装程序即将启动，TermSync 正在退出...'
+                    };
+                    this.renderDesktopUpdate();
+                    await this.closeWindow();
                 } catch (error) {
+                    this.desktopUpdate = {
+                        ...this.desktopUpdate,
+                        installing: false,
+                        message: '启动安装程序失败: ' + error
+                    };
+                    this.renderDesktopUpdate();
                     this.showToast('打开安装包失败: ' + error, 'error');
                 }
             }

@@ -28,6 +28,8 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import android.util.Base64
+import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
 
 sealed class ConnectionState {
     object Disconnected : ConnectionState()
@@ -146,6 +148,13 @@ private fun String.versionParts(): List<Int> {
         .map { part -> part.takeWhile(Char::isDigit).toIntOrNull() ?: 0 }
 }
 
+internal class TerminalInputIdGenerator(
+    private val instanceId: String = UUID.randomUUID().toString(),
+    private val sequence: AtomicLong = AtomicLong(0)
+) {
+    fun next(): String = "android:$instanceId:${sequence.incrementAndGet()}"
+}
+
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private data class PendingTerminalDelta(
@@ -163,6 +172,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val prefs = application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private val apiClient = ApiClient()
     private val wssClient = WssClient()
+    private val terminalInputIds = TerminalInputIdGenerator()
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     private val _sessions = MutableStateFlow<List<TerminalSession>>(emptyList())
     private val _selectedSessionId = MutableStateFlow<String?>(null)
@@ -210,6 +220,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var reconnectJob: Job? = null
     private var outputCachePersistJob: Job? = null
     private var sessionListRetryJob: Job? = null
+    private var screenSyncRetryJob: Job? = null
     private var manualDisconnect = false
     private var appInForeground = true
     private var reconnectAttempts = 0
@@ -350,10 +361,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         val devType = payload.optString("device_type", "unknown")
                         reconnectAttempts = 0
                         cancelReconnect()
+                        resetConnectionScopedScreenState()
                         _connectionState.value = ConnectionState.Connected(devId, devType)
                         _statusMessage.value = "已连接服务器，正在同步终端列表…"
                         dbg("AUTH OK devId=$devId type=$devType")
                         wssClient.requestSessionList()
+                        restoreSelectedScreenAfterConnect()
                         scheduleSessionListRetry()
                     } else {
                         cancelReconnect()
@@ -368,8 +381,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (workspaces != null && workspaces.length() > 0) {
                     val workspaceId = workspaces.optJSONObject(0)?.optString("workspace_id").orEmpty()
                     if (workspaceId.isNotBlank()) {
-                        wssClient.subscribeWorkspace(workspaceId)
-                        _statusMessage.value = "已订阅远程工作区"
+                        _statusMessage.value = if (wssClient.subscribeWorkspace(workspaceId)) {
+                            "已订阅远程工作区"
+                        } else {
+                            "连接已中断，等待重新同步工作区"
+                        }
                     }
                 } else {
                     _statusMessage.value = "已连接服务器，当前没有可用终端"
@@ -396,6 +412,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val sessionId = msg.sessionId ?: session?.sessionId ?: return
                 val workspaceId = msg.workspaceId ?: session?.workspaceId.orEmpty()
                 val seqKey = v3ScreenKey(workspaceId, paneId)
+                // Ignore frames that were already queued when this pane was
+                // unsubscribed or the app moved to the background. ACKing a
+                // stale frame can recreate the server-side subscription.
+                if (!appInForeground || !v3SubscribedScreens.containsKey(seqKey)) return
                 if (msg.type == "screen.snapshot") {
                     val snapshotSeq = msg.payload?.optLong("snapshot_seq", 0L) ?: 0L
                     v3ScreenSeqByPane[seqKey] = snapshotSeq
@@ -462,6 +482,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val paneId = msg.paneId.orEmpty()
                 val session = _sessions.value.firstOrNull { it.paneId == paneId || it.sessionId == msg.sessionId }
                 val sessionId = msg.sessionId ?: session?.sessionId ?: return
+                val workspaceId = msg.workspaceId ?: session?.workspaceId.orEmpty()
+                if (!appInForeground ||
+                    !v3SubscribedScreens.containsKey(v3ScreenKey(workspaceId, paneId))) return
                 if (_selectedSessionId.value != sessionId) return
                 val encoded = msg.payload?.optString("data").orEmpty()
                 val data = runCatching {
@@ -474,7 +497,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             "connection.error" -> {
                 val message = msg.payload?.optString("message", "Connection failed") ?: "Connection failed"
                 _connectionState.value = ConnectionState.Error(message)
-                v3SubscribedScreens.clear()
+                resetConnectionScopedScreenState()
                 _statusMessage.value = message
                 cancelSessionListRetry()
                 if (_selectedSessionId.value != null) {
@@ -484,7 +507,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             "connection.closed" -> {
                 _connectionState.value = ConnectionState.Disconnected
-                v3SubscribedScreens.clear()
+                resetConnectionScopedScreenState()
                 cancelSessionListRetry()
                 if (_selectedSessionId.value != null) {
                     _terminalStreamStatus.value = "连接已关闭，等待自动重连"
@@ -530,7 +553,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun connectWithToken(url: String, token: String) {
         manualDisconnect = false
         cancelReconnect()
-        v3SubscribedScreens.clear()
+        resetConnectionScopedScreenState()
         _connectionState.value = ConnectionState.Connecting
         _statusMessage.value = "正在连接桌面终端服务…"
         saveConnectionSettings(url, token, _deviceName.value)
@@ -718,6 +741,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         manualDisconnect = true
         cancelReconnect()
         cancelSessionListRetry()
+        cancelScreenSyncRetry()
         unsubscribeSelectedScreen()
         wssClient.disconnect()
         _connectionState.value = ConnectionState.Disconnected
@@ -736,8 +760,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun onAppForeground() {
         appInForeground = true
         val sessionId = _selectedSessionId.value ?: return
+        if (_connectionState.value !is ConnectionState.Connected || !wssClient.isConnected) {
+            _terminalStreamStatus.value = "等待连接恢复后同步屏幕"
+            return
+        }
         _sessions.value.firstOrNull { it.sessionId == sessionId }?.let { session ->
             syncVisibleScreenSubscriptions(session, forceResync = true)
+            scheduleScreenSyncRetry(session.sessionId)
             if (_terminalStreamStatus.value == "已暂停实时屏幕同步") {
                 _terminalStreamStatus.value = "正在同步远程屏幕…"
             }
@@ -755,6 +784,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun selectSession(sessionId: String?) {
         if (sessionId.isNullOrBlank()) {
             dbg("SELECT_SESSION -> null (deselect)")
+            cancelScreenSyncRetry()
             unsubscribeAllScreens()
             _selectedSessionId.value = null
             _terminalOutput.value = ""
@@ -767,6 +797,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         val previousSessionId = _selectedSessionId.value
+        if (previousSessionId != sessionId) {
+            cancelScreenSyncRetry()
+        }
         if (previousSessionId != sessionId) {
             unsubscribeScreensOutsideSelectedTab(sessionId)
         }
@@ -790,6 +823,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         _sessions.value.firstOrNull { it.sessionId == sessionId }?.let { session ->
             syncVisibleScreenSubscriptions(session, forceResync = true)
+            scheduleScreenSyncRetry(session.sessionId)
         }
         
         // 添加超时处理，防止一直等待
@@ -813,6 +847,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _terminalStreamStatus.value = "正在重新同步远程屏幕…"
         _sessions.value.firstOrNull { it.sessionId == sessionId }?.let { session ->
             syncVisibleScreenSubscriptions(session, forceResync = true)
+            scheduleScreenSyncRetry(session.sessionId)
         }
         
         // 添加超时处理
@@ -834,13 +869,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val sessionId = _selectedSessionId.value ?: return
         val session = _sessions.value.firstOrNull { it.sessionId == sessionId } ?: return
         if (session.workspaceId.isBlank() || session.paneId.isBlank()) return
-        wssClient.sendTerminalInput(
+        val sent = wssClient.sendTerminalInput(
             session.workspaceId,
             session.paneId,
             session.sessionId,
             input,
-            "android:${System.currentTimeMillis()}:${input.length}"
+            terminalInputIds.next()
         )
+        if (!sent) {
+            _terminalStreamStatus.value = "连接尚未恢复，输入未发送"
+        }
     }
 
     fun requestSelectedScreenHistory(beforeLine: Long) {
@@ -851,8 +889,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val key = v3ScreenKey(session.workspaceId, session.paneId)
         val now = System.currentTimeMillis()
         if (now - (v3HistoryRequestedAt[key] ?: 0L) < 750L) return
-        v3HistoryRequestedAt[key] = now
-        wssClient.requestScreenHistory(session.workspaceId, session.paneId, beforeLine)
+        if (wssClient.requestScreenHistory(session.workspaceId, session.paneId, beforeLine)) {
+            v3HistoryRequestedAt[key] = now
+        }
     }
 
     fun submitCommand(command: String) {
@@ -884,13 +923,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val sessionId = _selectedSessionId.value ?: return
         val session = _sessions.value.firstOrNull { it.sessionId == sessionId } ?: return
         if (session.workspaceId.isBlank() || session.paneId.isBlank()) return
-        wssClient.sendTerminalInput(
+        val sent = wssClient.sendTerminalInput(
             session.workspaceId,
             session.paneId,
             session.sessionId,
             key.escapeSequence,
-            "android:${System.currentTimeMillis()}:${key.name}"
+            terminalInputIds.next()
         )
+        if (!sent) {
+            _terminalStreamStatus.value = "连接尚未恢复，按键未发送"
+        }
     }
 
     fun requestSelectedSessionResize(cols: Int, rows: Int, force: Boolean = false) {
@@ -933,9 +975,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _statusMessage.value = "请先连接服务器"
             return
         }
-        _statusMessage.value = "已请求桌面新建终端…"
-        wssClient.requestRemoteSessionCreate(desktopId, title)
-        scheduleSessionListRetry(2500L)
+        if (wssClient.requestRemoteSessionCreate(desktopId, title)) {
+            _statusMessage.value = "已请求桌面新建终端…"
+            scheduleSessionListRetry(2500L)
+        } else {
+            _statusMessage.value = "连接正在恢复，新建终端请求未发送"
+        }
     }
 
     fun requestRemoteSessionClose(sessionId: String) {
@@ -949,8 +994,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _statusMessage.value = "缺少远程终端布局信息"
             return
         }
-        _statusMessage.value = "已请求桌面关闭终端…"
-        wssClient.requestRemoteSessionClose(session.workspaceId, session.paneId, session.sessionId)
+        _statusMessage.value = if (wssClient.requestRemoteSessionClose(
+                session.workspaceId,
+                session.paneId,
+                session.sessionId
+            )) {
+            "已请求桌面关闭终端…"
+        } else {
+            "连接正在恢复，关闭终端请求未发送"
+        }
     }
 
     fun closeSession(sessionId: String) {
@@ -1030,6 +1082,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun syncVisibleScreenSubscriptions(session: TerminalSession, forceResync: Boolean = false) {
         if (!appInForeground) return
+        if (_connectionState.value !is ConnectionState.Connected || !wssClient.isConnected) {
+            _terminalStreamStatus.value = "等待连接恢复后同步屏幕"
+            return
+        }
         val visibleSessions = visibleSessionsForDetail(session)
         val desiredKeys = visibleSessions
             .filter { it.workspaceId.isNotBlank() && it.paneId.isNotBlank() }
@@ -1040,18 +1096,48 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             v3SubscribedScreens.remove(key)?.let { subscription ->
                 wssClient.unsubscribeScreen(subscription.workspaceId, subscription.paneId)
             }
+            clearScreenSyncState(key)
         }
 
         desiredKeys.forEach { (key, subscription) ->
             if (!v3SubscribedScreens.containsKey(key)) {
+                // Register before sending. The server may answer subscribe
+                // immediately; registering afterwards can drop that snapshot
+                // as an apparently stale frame.
                 v3SubscribedScreens[key] = subscription
-                wssClient.subscribeScreen(subscription.workspaceId, subscription.paneId)
-                requestScreenResyncThrottled(subscription.workspaceId, subscription.paneId, 0L)
+                if (wssClient.subscribeScreen(subscription.workspaceId, subscription.paneId)) {
+                    requestScreenResyncThrottled(subscription.workspaceId, subscription.paneId, 0L)
+                } else {
+                    v3SubscribedScreens.remove(key)
+                    _terminalStreamStatus.value = "等待连接恢复后同步屏幕"
+                }
             } else if (forceResync) {
                 val lastSeq = v3ScreenSeqByPane[key] ?: 0L
                 requestScreenResyncThrottled(subscription.workspaceId, subscription.paneId, lastSeq)
             }
         }
+    }
+
+    private fun scheduleScreenSyncRetry(sessionId: String) {
+        screenSyncRetryJob?.cancel()
+        screenSyncRetryJob = viewModelScope.launch {
+            // A detail-page transition can briefly overlap unsubscribe/subscribe
+            // processing. Recheck after the server has processed the transition
+            // so a transiently missed snapshot does not leave a stale screen.
+            delay(500L)
+            repeat(2) {
+                if (_selectedSessionId.value != sessionId || !appInForeground) return@launch
+                _sessions.value.firstOrNull { it.sessionId == sessionId }?.let { session ->
+                    syncVisibleScreenSubscriptions(session, forceResync = true)
+                }
+                delay(1000L)
+            }
+        }
+    }
+
+    private fun cancelScreenSyncRetry() {
+        screenSyncRetryJob?.cancel()
+        screenSyncRetryJob = null
     }
 
     private fun visibleSessionsForDetail(selected: TerminalSession): List<TerminalSession> {
@@ -1079,35 +1165,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (subscription != null) {
                 wssClient.unsubscribeScreen(subscription.workspaceId, subscription.paneId)
             }
+            clearScreenSyncState(key)
             return
         }
 
         v3SubscribedScreens.values.forEach { subscription ->
             wssClient.unsubscribeScreen(subscription.workspaceId, subscription.paneId)
         }
-        v3SubscribedScreens.clear()
+        resetConnectionScopedScreenState()
     }
 
     private fun unsubscribeAllScreens() {
         v3SubscribedScreens.values.forEach { subscription ->
             wssClient.unsubscribeScreen(subscription.workspaceId, subscription.paneId)
         }
-        v3SubscribedScreens.clear()
+        resetConnectionScopedScreenState()
     }
 
     private fun v3ScreenKey(workspaceId: String, paneId: String): String {
         return "${workspaceId.length}:$workspaceId${paneId.length}:$paneId"
     }
 
-    private fun requestScreenResyncThrottled(workspaceId: String, paneId: String, lastSeq: Long) {
-        if (workspaceId.isBlank() || paneId.isBlank()) return
+    private fun requestScreenResyncThrottled(workspaceId: String, paneId: String, lastSeq: Long): Boolean {
+        if (workspaceId.isBlank() || paneId.isBlank()) return false
         val key = v3ScreenKey(workspaceId, paneId)
         val now = System.currentTimeMillis()
         val lastRequestedAt = v3ResyncRequestedAt[key] ?: 0L
-        if (now - lastRequestedAt < 1000L) return
+        if (now - lastRequestedAt < 1000L) return false
+        if (!wssClient.requestScreenResync(workspaceId, paneId, lastSeq)) return false
         v3ResyncRequestedAt[key] = now
-        wssClient.requestScreenResync(workspaceId, paneId, lastSeq)
         _terminalStreamStatus.value = "正在重新同步屏幕"
+        return true
     }
 
     private fun ackScreenThrottled(workspaceId: String, paneId: String, ackSeq: Long) {
@@ -1117,10 +1205,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (ackSeq <= lastAck) return
         val now = System.currentTimeMillis()
         val lastSentAt = v3ScreenAckSentAt[key] ?: 0L
-        v3ScreenAckSeqByPane[key] = ackSeq
         if (now - lastSentAt < 250L) return
-        v3ScreenAckSentAt[key] = now
-        wssClient.ackScreen(workspaceId, paneId, ackSeq)
+        if (wssClient.ackScreen(workspaceId, paneId, ackSeq)) {
+            v3ScreenAckSeqByPane[key] = ackSeq
+            v3ScreenAckSentAt[key] = now
+        }
+    }
+
+    private fun resetConnectionScopedScreenState() {
+        v3SubscribedScreens.clear()
+        v3ScreenSeqByPane.clear()
+        v3ResyncRequestedAt.clear()
+        v3HistoryRequestedAt.clear()
+        v3ScreenAckSeqByPane.clear()
+        v3ScreenAckSentAt.clear()
+    }
+
+    private fun clearScreenSyncState(key: String) {
+        v3ScreenSeqByPane.remove(key)
+        v3ResyncRequestedAt.remove(key)
+        v3HistoryRequestedAt.remove(key)
+        v3ScreenAckSeqByPane.remove(key)
+        v3ScreenAckSentAt.remove(key)
+    }
+
+    private fun restoreSelectedScreenAfterConnect() {
+        if (!appInForeground) return
+        val sessionId = _selectedSessionId.value ?: return
+        val session = _sessions.value.firstOrNull { it.sessionId == sessionId } ?: return
+        syncVisibleScreenSubscriptions(session, forceResync = true)
     }
 
     private fun extractPreview(data: String): String {

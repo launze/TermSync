@@ -344,7 +344,7 @@ func (sm *SessionManager) handleScreenHistoryRequest(deviceID string, msg models
 		return nil
 	}
 	sm.mu.RLock()
-	stream := sm.paneStreams[paneID]
+	stream, _ := sm.findScreenStreamLocked(msg.WorkspaceID, paneID)
 	sm.mu.RUnlock()
 	if stream == nil {
 		sm.sendError(deviceID, "screen_not_found", "Screen stream not found")
@@ -383,7 +383,7 @@ func (sm *SessionManager) handleScreenHistoryResponse(deviceID string, msg model
 		return nil
 	}
 	sm.mu.RLock()
-	stream := sm.paneStreams[paneID]
+	stream, _ := sm.findScreenStreamLocked(msg.WorkspaceID, paneID)
 	subscribed := false
 	if stream != nil {
 		_, subscribed = stream.Subscribers[target]
@@ -708,7 +708,7 @@ func (sm *SessionManager) handleScreenSubscribe(deviceID string, msg models.Mess
 	encoding := normalizeScreenEncoding(strField(msg.Payload, "encoding", strField(msg.Payload, "preferred_encoding", "")))
 
 	sm.mu.RLock()
-	stream := sm.paneStreams[paneID]
+	stream, _ := sm.findScreenStreamLocked(msg.WorkspaceID, paneID)
 	if stream == nil && msg.WorkspaceID != "" {
 		if ws := sm.workspaces[msg.WorkspaceID]; ws != nil {
 			stream = &ScreenStreamInfo{
@@ -731,7 +731,7 @@ func (sm *SessionManager) handleScreenSubscribe(deviceID string, msg models.Mess
 	}
 
 	sm.mu.Lock()
-	stream = sm.paneStreams[paneID]
+	stream, _ = sm.findScreenStreamLocked(msg.WorkspaceID, paneID)
 	if stream == nil {
 		stream = &ScreenStreamInfo{
 			WorkspaceID: msg.WorkspaceID,
@@ -740,7 +740,7 @@ func (sm *SessionManager) handleScreenSubscribe(deviceID string, msg models.Mess
 			Subscribers: map[string]*ScreenSubscriberState{},
 			UpdatedAt:   time.Now(),
 		}
-		sm.paneStreams[paneID] = stream
+		sm.paneStreams[screenStreamKey(msg.WorkspaceID, paneID)] = stream
 	}
 	stream.Subscribers[deviceID] = &ScreenSubscriberState{
 		SubscribedAt: time.Now(),
@@ -788,7 +788,7 @@ func (sm *SessionManager) handleScreenUnsubscribe(deviceID string, msg models.Me
 	}
 	sm.mu.Lock()
 	if paneID != "" {
-		if stream := sm.paneStreams[paneID]; stream != nil {
+		if stream, _ := sm.findScreenStreamLocked(msg.WorkspaceID, paneID); stream != nil {
 			delete(stream.Subscribers, deviceID)
 		}
 	} else {
@@ -811,7 +811,7 @@ func (sm *SessionManager) handleScreenSnapshot(deviceID string, msg models.Messa
 	}
 	workspaceID := msg.WorkspaceID
 	if workspaceID == "" {
-		workspaceID = sm.workspaceForPane(msg.PaneID)
+		workspaceID = sm.workspaceForOwnedPane(deviceID, msg.PaneID)
 	}
 	sm.mu.Lock()
 	if !sm.paneBelongsToWorkspaceLocked(workspaceID, msg.PaneID) {
@@ -819,7 +819,7 @@ func (sm *SessionManager) handleScreenSnapshot(deviceID string, msg models.Messa
 		sm.sendError(deviceID, "stale_pane", "Pane is not present in the current workspace layout")
 		return nil
 	}
-	stream := sm.paneStreams[msg.PaneID]
+	stream, _ := sm.findScreenStreamLocked(workspaceID, msg.PaneID)
 	if stream == nil {
 		stream = &ScreenStreamInfo{
 			WorkspaceID: workspaceID,
@@ -828,7 +828,7 @@ func (sm *SessionManager) handleScreenSnapshot(deviceID string, msg models.Messa
 			OwnerID:     deviceID,
 			Subscribers: map[string]*ScreenSubscriberState{},
 		}
-		sm.paneStreams[msg.PaneID] = stream
+		sm.paneStreams[screenStreamKey(workspaceID, msg.PaneID)] = stream
 	}
 	if stream.OwnerID != "" && stream.OwnerID != deviceID {
 		sm.mu.Unlock()
@@ -874,7 +874,7 @@ func (sm *SessionManager) handleScreenDelta(deviceID string, msg models.Message)
 	seq := int64Field(msg.Payload, "seq", 0)
 	workspaceID := msg.WorkspaceID
 	if workspaceID == "" {
-		workspaceID = sm.workspaceForPane(msg.PaneID)
+		workspaceID = sm.workspaceForOwnedPane(deviceID, msg.PaneID)
 	}
 
 	sm.mu.Lock()
@@ -883,7 +883,7 @@ func (sm *SessionManager) handleScreenDelta(deviceID string, msg models.Message)
 		sm.sendError(deviceID, "stale_pane", "Pane is not present in the current workspace layout")
 		return nil
 	}
-	stream := sm.paneStreams[msg.PaneID]
+	stream, _ := sm.findScreenStreamLocked(workspaceID, msg.PaneID)
 	if stream == nil {
 		stream = &ScreenStreamInfo{
 			WorkspaceID: workspaceID,
@@ -892,7 +892,7 @@ func (sm *SessionManager) handleScreenDelta(deviceID string, msg models.Message)
 			OwnerID:     deviceID,
 			Subscribers: map[string]*ScreenSubscriberState{},
 		}
-		sm.paneStreams[msg.PaneID] = stream
+		sm.paneStreams[screenStreamKey(workspaceID, msg.PaneID)] = stream
 	}
 	if stream.OwnerID != "" && stream.OwnerID != deviceID {
 		sm.mu.Unlock()
@@ -923,7 +923,7 @@ func (sm *SessionManager) handleScreenDelta(deviceID string, msg models.Message)
 		sm.sendToDevice(subscriber, msg)
 	}
 
-	sm.requestResyncForLaggingSubscribers(msg.PaneID, deviceID)
+	sm.requestResyncForLaggingSubscribers(workspaceID, msg.PaneID, deviceID)
 	return nil
 }
 
@@ -943,7 +943,7 @@ func (sm *SessionManager) handleScreenAck(deviceID string, msg models.Message) e
 	}
 
 	sm.mu.RLock()
-	stream := sm.paneStreams[paneID]
+	stream, _ := sm.findScreenStreamLocked(msg.WorkspaceID, paneID)
 	if stream == nil {
 		sm.mu.RUnlock()
 		sm.sendError(deviceID, "screen_not_found", "Screen stream not found")
@@ -957,7 +957,7 @@ func (sm *SessionManager) handleScreenAck(deviceID string, msg models.Message) e
 	}
 
 	sm.mu.Lock()
-	stream = sm.paneStreams[paneID]
+	stream, _ = sm.findScreenStreamLocked(msg.WorkspaceID, paneID)
 	if stream == nil {
 		sm.mu.Unlock()
 		sm.sendError(deviceID, "screen_not_found", "Screen stream not found")
@@ -965,8 +965,10 @@ func (sm *SessionManager) handleScreenAck(deviceID string, msg models.Message) e
 	}
 	state := stream.Subscribers[deviceID]
 	if state == nil {
-		state = &ScreenSubscriberState{SubscribedAt: time.Now()}
-		stream.Subscribers[deviceID] = state
+		// ACK is only meaningful for an active subscription. A delayed ACK
+		// arriving after screen.unsubscribe must not recreate the subscriber.
+		sm.mu.Unlock()
+		return nil
 	}
 	if ackSeq > state.LastAckSeq {
 		state.LastAckSeq = ackSeq
@@ -986,7 +988,7 @@ func (sm *SessionManager) handleScreenResyncRequest(deviceID string, msg models.
 	}
 	encoding := normalizeScreenEncoding(strField(msg.Payload, "encoding", ""))
 	sm.mu.RLock()
-	stream := sm.paneStreams[paneID]
+	stream, _ := sm.findScreenStreamLocked(msg.WorkspaceID, paneID)
 	if stream != nil {
 		if state := stream.Subscribers[deviceID]; state != nil && state.Encoding != "" {
 			encoding = state.Encoding
@@ -1003,7 +1005,7 @@ func (sm *SessionManager) handleScreenResyncRequest(deviceID string, msg models.
 		return nil
 	}
 	if snapshot != nil {
-		sm.markScreenSnapshotSent(paneID, deviceID)
+		sm.markScreenSnapshotSent(stream.WorkspaceID, paneID, deviceID)
 		sm.sendToDevice(deviceID, models.Message{
 			Type:        string(models.MsgScreenSnapshot),
 			V:           3,
@@ -1030,9 +1032,9 @@ func (sm *SessionManager) handleScreenResyncRequest(deviceID string, msg models.
 	return nil
 }
 
-func (sm *SessionManager) requestResyncForLaggingSubscribers(paneID, ownerID string) {
+func (sm *SessionManager) requestResyncForLaggingSubscribers(workspaceID, paneID, ownerID string) {
 	sm.mu.Lock()
-	stream := sm.paneStreams[paneID]
+	stream, _ := sm.findScreenStreamLocked(workspaceID, paneID)
 	if stream == nil || stream.OwnerID == "" {
 		sm.mu.Unlock()
 		return
@@ -1093,10 +1095,10 @@ func (sm *SessionManager) requestResyncForLaggingSubscribers(paneID, ownerID str
 	}
 }
 
-func (sm *SessionManager) markScreenSnapshotSent(paneID, deviceID string) {
+func (sm *SessionManager) markScreenSnapshotSent(workspaceID, paneID, deviceID string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	if stream := sm.paneStreams[paneID]; stream != nil {
+	if stream, _ := sm.findScreenStreamLocked(workspaceID, paneID); stream != nil {
 		if state := stream.Subscribers[deviceID]; state != nil {
 			state.NeedsResync = false
 			state.LastSentSeq = stream.LastSeq
@@ -1111,7 +1113,7 @@ func (sm *SessionManager) handleScreenClear(deviceID string, msg models.Message)
 		return nil
 	}
 	sm.mu.Lock()
-	stream := sm.paneStreams[msg.PaneID]
+	stream, _ := sm.findScreenStreamLocked(msg.WorkspaceID, msg.PaneID)
 	if stream == nil || stream.OwnerID != deviceID {
 		sm.mu.Unlock()
 		sm.sendError(deviceID, "permission_denied", "Only screen owner can clear stream")
@@ -1140,7 +1142,7 @@ func (sm *SessionManager) handleInputSend(deviceID string, msg models.Message) e
 	}
 
 	sm.mu.RLock()
-	stream := sm.paneStreams[paneID]
+	stream, _ := sm.findScreenStreamLocked(msg.WorkspaceID, paneID)
 	sm.mu.RUnlock()
 	if stream == nil {
 		sm.sendError(deviceID, "screen_not_found", "Pane stream not found")
@@ -1508,10 +1510,57 @@ func (sm *SessionManager) broadcastWorkspace(workspaceID string, msg models.Mess
 	}
 }
 
-func (sm *SessionManager) workspaceForPane(paneID string) string {
+func screenStreamKey(workspaceID, paneID string) string {
+	if workspaceID == "" {
+		return paneID
+	}
+	return workspaceID + "\x00" + paneID
+}
+
+// findScreenStreamLocked resolves a pane inside its workspace. The pane-only
+// fallback keeps messages from older clients working as long as the pane is
+// unambiguous.
+func (sm *SessionManager) findScreenStreamLocked(workspaceID, paneID string) (*ScreenStreamInfo, string) {
+	if paneID == "" {
+		return nil, ""
+	}
+	if workspaceID != "" {
+		key := screenStreamKey(workspaceID, paneID)
+		if stream := sm.paneStreams[key]; stream != nil {
+			return stream, key
+		}
+		if stream := sm.paneStreams[paneID]; stream != nil && stream.WorkspaceID == workspaceID {
+			return stream, paneID
+		}
+		return nil, ""
+	}
+	if stream := sm.paneStreams[paneID]; stream != nil {
+		return stream, paneID
+	}
+	var found *ScreenStreamInfo
+	var foundKey string
+	for key, stream := range sm.paneStreams {
+		if stream == nil || stream.PaneID != paneID {
+			continue
+		}
+		if found != nil && found != stream {
+			return nil, ""
+		}
+		found = stream
+		foundKey = key
+	}
+	return found, foundKey
+}
+
+func (sm *SessionManager) workspaceForOwnedPane(ownerID, paneID string) string {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
-	return sm.paneWorkspace[paneID]
+	for _, stream := range sm.paneStreams {
+		if stream != nil && stream.PaneID == paneID && stream.OwnerID == ownerID {
+			return stream.WorkspaceID
+		}
+	}
+	return ""
 }
 
 func (sm *SessionManager) workspaceOwnerLocked(workspaceID string) string {
@@ -1525,14 +1574,15 @@ func (sm *SessionManager) indexWorkspacePanesLocked(workspaceID, ownerID string,
 	currentPanes := map[string]bool{}
 	for _, paneID := range extractPaneIDs(snapshot) {
 		currentPanes[paneID] = true
-		sm.paneWorkspace[paneID] = workspaceID
-		if stream := sm.paneStreams[paneID]; stream != nil {
+		key := screenStreamKey(workspaceID, paneID)
+		sm.paneWorkspace[key] = workspaceID
+		if stream, _ := sm.findScreenStreamLocked(workspaceID, paneID); stream != nil {
 			stream.WorkspaceID = workspaceID
 			if stream.OwnerID == "" {
 				stream.OwnerID = ownerID
 			}
 		} else {
-			sm.paneStreams[paneID] = &ScreenStreamInfo{
+			sm.paneStreams[key] = &ScreenStreamInfo{
 				WorkspaceID: workspaceID,
 				PaneID:      paneID,
 				OwnerID:     ownerID,
@@ -1541,13 +1591,21 @@ func (sm *SessionManager) indexWorkspacePanesLocked(workspaceID, ownerID string,
 			}
 		}
 	}
-	for paneID, indexedWorkspaceID := range sm.paneWorkspace {
-		if indexedWorkspaceID != workspaceID || currentPanes[paneID] {
+	for key, indexedWorkspaceID := range sm.paneWorkspace {
+		if indexedWorkspaceID != workspaceID {
 			continue
 		}
-		delete(sm.paneWorkspace, paneID)
-		if stream := sm.paneStreams[paneID]; stream != nil && stream.WorkspaceID == workspaceID {
-			delete(sm.paneStreams, paneID)
+		stream := sm.paneStreams[key]
+		paneID := key
+		if stream != nil && stream.PaneID != "" {
+			paneID = stream.PaneID
+		}
+		if currentPanes[paneID] {
+			continue
+		}
+		delete(sm.paneWorkspace, key)
+		if stream != nil && stream.WorkspaceID == workspaceID {
+			delete(sm.paneStreams, key)
 		}
 	}
 }
@@ -1559,10 +1617,10 @@ func (sm *SessionManager) paneBelongsToWorkspaceLocked(workspaceID, paneID strin
 	if sm.workspaces[workspaceID] == nil {
 		return true
 	}
-	if sm.paneWorkspace[paneID] == workspaceID {
+	if sm.paneWorkspace[screenStreamKey(workspaceID, paneID)] == workspaceID {
 		return true
 	}
-	stream := sm.paneStreams[paneID]
+	stream, _ := sm.findScreenStreamLocked(workspaceID, paneID)
 	return stream != nil && stream.WorkspaceID == workspaceID
 }
 
