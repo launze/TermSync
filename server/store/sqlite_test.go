@@ -302,3 +302,49 @@ func TestConcurrentAccess(t *testing.T) {
 		}
 	}
 }
+
+func TestDesktopCanPairMobileAndPCReceiver(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	devices := []*models.Device{
+		{ID: "desktop-1", Name: "Sender", Token: "desktop-token", Type: "desktop"},
+		{ID: "mobile-1", Name: "Phone", Token: "mobile-token", Type: "mobile"},
+		{ID: "pc-1", Name: "Receiver", Token: "pc-token", Type: "pc_receiver"},
+	}
+	for _, device := range devices {
+		if err := store.CreateDevice(ctx, device); err != nil {
+			t.Fatalf("Failed to create %s: %v", device.ID, err)
+		}
+	}
+
+	for _, pairing := range []struct {
+		code     string
+		viewerID string
+	}{
+		{code: "111111", viewerID: "mobile-1"},
+		{code: "222222", viewerID: "pc-1"},
+	} {
+		if err := store.CreatePairingCode(ctx, "desktop-1", pairing.code, time.Now().Add(5*time.Minute)); err != nil {
+			t.Fatalf("Failed to create pairing code for %s: %v", pairing.viewerID, err)
+		}
+		if _, err := store.ConsumePairingCode(ctx, pairing.viewerID, pairing.code); err != nil {
+			t.Fatalf("Failed to pair %s: %v", pairing.viewerID, err)
+		}
+	}
+
+	viewers, err := store.ListPairedViewers(ctx, "desktop-1")
+	if err != nil {
+		t.Fatalf("Failed to list paired viewers: %v", err)
+	}
+	if len(viewers) != 2 {
+		t.Fatalf("Expected phone and PC receiver to remain paired, got %d viewers", len(viewers))
+	}
+	for _, viewerID := range []string{"mobile-1", "pc-1"} {
+		paired, err := store.IsPaired(ctx, "desktop-1", viewerID)
+		if err != nil || !paired {
+			t.Fatalf("Expected %s pairing to remain, paired=%v err=%v", viewerID, paired, err)
+		}
+	}
+}

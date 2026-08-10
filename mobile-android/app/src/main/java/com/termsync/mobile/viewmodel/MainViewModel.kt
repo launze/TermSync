@@ -406,6 +406,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     cancelSessionListRetry()
                 }
             }
+            "pane.meta" -> applyV3PaneMeta(msg)
             "screen.snapshot", "screen.delta" -> {
                 val paneId = msg.paneId.orEmpty()
                 val session = _sessions.value.firstOrNull { it.paneId == paneId || it.sessionId == msg.sessionId }
@@ -1308,6 +1309,44 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         return result
+    }
+
+    private fun applyV3PaneMeta(msg: WssMessage) {
+        val payload = msg.payload ?: return
+        val paneId = msg.paneId.orEmpty().ifBlank { payload.optString("pane_id") }
+        val sessionId = msg.sessionId.orEmpty()
+        val current = _sessions.value
+        val index = current.indexOfFirst { session ->
+            (paneId.isNotBlank() && session.paneId == paneId) ||
+                (sessionId.isNotBlank() && session.sessionId == sessionId)
+        }
+        if (index < 0) return
+
+        val previous = current[index]
+        fun stringValue(key: String, fallback: String): String =
+            if (payload.has(key) && !payload.isNull(key)) payload.optString(key, fallback) else fallback
+        fun intValue(key: String, fallback: Int): Int =
+            if (payload.has(key) && !payload.isNull(key)) payload.optInt(key, fallback) else fallback
+
+        val next = previous.copy(
+            title = stringValue("title", previous.title),
+            cols = intValue("cols", previous.cols),
+            rows = intValue("rows", previous.rows),
+            status = stringValue("status", previous.status),
+            activity = stringValue("activity", previous.activity),
+            taskState = stringValue("task_state", previous.taskState),
+            preview = stringValue("preview", previous.preview),
+            screenPreview = stringValue("screen_preview", previous.screenPreview),
+            lastActivityAt = payload.optLong("updated_at", System.currentTimeMillis()),
+            tabId = stringValue("tab_id", previous.tabId),
+            tabTitle = stringValue("tab_title", previous.tabTitle),
+            paneTitle = stringValue("pane_title", previous.paneTitle)
+        )
+        if (next == previous) return
+
+        val updated = current.toMutableList()
+        updated[index] = next
+        _sessions.value = sortSessionsForDisplay(updated)
     }
 
     private fun parseTerminalSplitNode(node: JSONObject?): TerminalSplitNode? {

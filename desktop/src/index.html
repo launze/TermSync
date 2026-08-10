@@ -5,10 +5,46 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TTY1 Terminal</title>
     <link rel="stylesheet" href="./vendor/xterm/xterm.css">
+    <link rel="preload" href="./assets/fonts/MapleMono-Regular.ttf.woff2" as="font" type="font/woff2" crossorigin>
     <style>
+        @font-face {
+            font-family: "Maple Mono";
+            src: url("./assets/fonts/MapleMono-Regular.ttf.woff2") format("woff2");
+            font-weight: 400;
+            font-style: normal;
+            font-display: block;
+        }
+        @font-face {
+            font-family: "Maple Mono";
+            src: url("./assets/fonts/MapleMono-Bold.ttf.woff2") format("woff2");
+            font-weight: 700;
+            font-style: normal;
+            font-display: block;
+        }
+        @font-face {
+            font-family: "Maple Mono";
+            src: url("./assets/fonts/MapleMono-Italic.ttf.woff2") format("woff2");
+            font-weight: 400;
+            font-style: italic;
+            font-display: block;
+        }
+        @font-face {
+            font-family: "Maple Mono";
+            src: url("./assets/fonts/MapleMono-BoldItalic.ttf.woff2") format("woff2");
+            font-weight: 700;
+            font-style: italic;
+            font-display: block;
+        }
+        @font-face {
+            font-family: "Maple Mono CN";
+            src: url("./assets/fonts/MapleMono-CN-Regular.ttf.woff2") format("woff2");
+            font-weight: 400;
+            font-style: normal;
+            font-display: block;
+        }
         :root {
             --ui-font: "Segoe UI Variable", "Microsoft YaHei UI", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-            --terminal-font: "Cascadia Mono", "Cascadia Code", "JetBrains Mono", "Maple Mono", "Sarasa Mono SC", "Microsoft YaHei Mono", "Consolas", "Courier New", monospace;
+            --terminal-font: "Maple Mono", "Maple Mono CN", "Cascadia Mono", "Cascadia Code", "JetBrains Mono", "Sarasa Mono SC", "Microsoft YaHei Mono", "Consolas", "Courier New", monospace;
         }
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -430,6 +466,90 @@
             flex: 1;
             min-height: 0;
         }
+        .favorite-command-bar {
+            display: flex;
+            align-items: center;
+            flex: 0 0 36px;
+            min-width: 0;
+            gap: 8px;
+            padding: 4px 8px;
+            background: #252526;
+            border-top: 1px solid #34363a;
+        }
+        .favorite-command-label {
+            flex: 0 0 auto;
+            color: #a9abad;
+            font-size: 11px;
+            white-space: nowrap;
+        }
+        .favorite-command-list {
+            display: flex;
+            align-items: center;
+            flex: 1;
+            min-width: 0;
+            gap: 6px;
+            overflow-x: auto;
+            overflow-y: hidden;
+            scrollbar-width: thin;
+        }
+        .favorite-command-list::-webkit-scrollbar {
+            height: 4px;
+        }
+        .favorite-command-list::-webkit-scrollbar-thumb {
+            background: #4a4d51;
+            border-radius: 4px;
+        }
+        .favorite-command-item {
+            flex: 0 0 auto;
+            height: 26px;
+            max-width: 240px;
+            padding: 0 10px;
+            overflow: hidden;
+            border: 1px solid #3f5550;
+            border-radius: 5px;
+            background: #26332f;
+            color: #b9efe3;
+            font: 12px var(--ui-font);
+            line-height: 24px;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            cursor: pointer;
+        }
+        .favorite-command-item:hover {
+            background: #30433d;
+            border-color: #4d756c;
+            color: #e4fff8;
+        }
+        .favorite-command-item.dangerous {
+            background: #3a2d1e;
+            border-color: #76542d;
+            color: #ffcb7a;
+        }
+        .favorite-command-item.dangerous:hover {
+            background: #493822;
+            border-color: #9a6d37;
+        }
+        .favorite-command-empty {
+            color: #777a7e;
+            font-size: 11px;
+            white-space: nowrap;
+        }
+        .favorite-command-open {
+            flex: 0 0 auto;
+            width: 28px;
+            height: 26px;
+            border: 1px solid #3f4348;
+            border-radius: 5px;
+            background: #2c3137;
+            color: #d4d4d4;
+            font-size: 14px;
+            line-height: 24px;
+            cursor: pointer;
+        }
+        .favorite-command-open:hover {
+            background: #373d45;
+            border-color: #545a62;
+        }
         .command-library-popover {
             position: fixed;
             display: none;
@@ -754,18 +874,60 @@
             box-sizing: border-box;
             box-shadow: 0 4px 16px rgba(0,0,0,0.5);
         }
+        .settings-modal {
+            width: min(940px, calc(100vw - 32px));
+            min-width: 0;
+            max-width: 940px;
+        }
+        .settings-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 24px;
+            align-items: start;
+        }
+        .settings-column {
+            min-width: 0;
+        }
+        .settings-column-title {
+            margin-bottom: 12px;
+            padding-bottom: 7px;
+            border-bottom: 1px solid #414141;
+            color: #f0f0f0;
+            font-size: 13px;
+            font-weight: 600;
+        }
+        .settings-modal .modal-buttons {
+            padding-top: 12px;
+            border-top: 1px solid #414141;
+        }
+        @media (max-width: 760px) {
+            .settings-modal {
+                width: calc(100vw - 20px);
+                padding: 16px;
+            }
+            .settings-grid {
+                grid-template-columns: minmax(0, 1fr);
+                gap: 8px;
+            }
+        }
         .modal h3 { color: #ffffff; margin-bottom: 16px; font-size: 16px; }
         .form-group { margin-bottom: 12px; }
         .form-group label {
             display: block; margin-bottom: 4px;
             color: #cccccc; font-size: 12px;
         }
-        .form-group input, .form-group select {
+        .form-group input, .form-group select, .form-group textarea {
             width: 100%; padding: 6px 8px;
             background-color: #3c3c3c; border: 1px solid #555;
             color: #cccccc; border-radius: 3px; font-size: 13px;
+            font-family: var(--ui-font);
         }
-        .form-group input:focus, .form-group select:focus {
+        .form-group textarea {
+            resize: vertical;
+            min-height: 58px;
+            line-height: 1.35;
+        }
+        .form-group input:focus, .form-group select:focus, .form-group textarea:focus {
             outline: none; border-color: #007acc;
         }
         .form-group small {
@@ -1167,6 +1329,12 @@
         <div class="terminal-area" id="terminalArea"></div>
     </div>
 
+    <div class="favorite-command-bar" id="favoriteCommandBar" aria-label="收藏命令">
+        <span class="favorite-command-label">收藏命令</span>
+        <div class="favorite-command-list" id="favoriteCommandList"></div>
+        <button class="favorite-command-open" id="favoriteCommandLibraryBtn" title="打开命令库" aria-label="打开命令库">⌘</button>
+    </div>
+
     <div class="command-library-popover" id="commandLibraryPopover"></div>
 
     <!-- Status Bar -->
@@ -1225,11 +1393,14 @@
 
     <!-- Settings Modal -->
     <div class="modal-overlay" id="settingsModal">
-        <div class="modal">
+        <div class="modal settings-modal">
             <h3>⚙ 设置</h3>
-            <div class="form-group">
+            <div class="settings-grid">
+                <div class="settings-column">
+                    <div class="settings-column-title">连接与配对</div>
+                    <div class="form-group">
                 <label>客户端模式</label>
-                <select id="settingClientMode" onchange="window.app.updateClientModeVisibility()">
+                <select id="settingClientMode" onpointerdown="openNativeSelect(this, event)" onchange="window.app.handleClientModeSelection()">
                     <option value="sender">PC 发送端</option>
                     <option value="receiver">PC 接收端</option>
                 </select>
@@ -1240,21 +1411,42 @@
                 <small>发送端生成配对码；每个手机或 PC 接收端各输入一次即可绑定。</small>
             </details>
             <div class="form-group" id="senderPairingGroup">
-                <label>发送端配对码</label>
+                <label>服务器配对码（手机）</label>
                 <input type="text" id="pairingCodeDisplay" class="readonly-output pairing-code" placeholder="点击生成" readonly />
-                <small id="pairingCodeHint">配对码有效期 5 分钟，在接收端输入后即可绑定。</small>
+                <small id="pairingCodeHint">通过当前服务器绑定手机，配对码有效期 5 分钟。</small>
                 <div class="inline-actions" style="margin-top:8px;">
-                    <button class="btn btn-primary" onclick="window.app.generatePairingCode()">生成配对码</button>
+                    <button class="btn btn-primary" onclick="window.app.generatePairingCode()">生成手机配对码</button>
+                </div>
+                <div style="height:12px;"></div>
+                <label style="display:flex;align-items:center;gap:8px;">
+                    <input type="checkbox" id="settingLanDirectEnabled" style="width:auto;" />
+                    允许局域网 PC 接入
+                </label>
+                <div class="inline-actions" style="margin-top:8px;">
+                    <input type="number" id="settingLanDirectPort" value="7390" min="1024" max="65535" style="width:100px;" title="局域网监听端口" />
+                    <textarea id="lanDirectEndpoint" class="readonly-output" placeholder="启动后显示局域网地址" readonly rows="3" style="flex:1;min-width:220px;"></textarea>
+                </div>
+                <input type="text" id="lanPairingCodeDisplay" class="readonly-output pairing-code" placeholder="点击生成 PC 配对码" readonly style="margin-top:8px;" />
+                <small id="lanDirectHint">手机继续走服务器连接；局域网 PC 使用这里的地址和独立配对码。</small>
+                <div class="inline-actions" style="margin-top:8px;">
+                    <button class="btn btn-primary" onclick="window.app.generateLanPairingCode()">生成 PC 配对码</button>
+                    <button class="btn btn-secondary" onclick="window.app.stopLanDirectServer()">停止局域网接入</button>
+                    <button class="btn btn-secondary" id="clearLanReceiversBtn" onclick="window.app.clearLanPairedReceivers()">解绑所有 PC</button>
                 </div>
             </div>
             <div class="form-group" id="receiverPairingGroup" style="display:none;">
                 <label>绑定发送端</label>
+                <input type="text" id="receiverLanAddress" placeholder="发送端局域网 IP，例如 192.168.1.20:7390" style="margin-bottom:8px;" />
                 <input type="text" id="receiverPairingCode" placeholder="输入发送端 6 位配对码" maxlength="6" />
-                <small id="receiverPairingHint">绑定成功后，PC 接收端可以同时和手机一样订阅发送端终端。</small>
+                <small id="receiverPairingHint">填写发送端显示的局域网地址和 PC 配对码；手机端连接不受影响。</small>
                 <div class="inline-actions" style="margin-top:8px;">
                     <button class="btn btn-primary" onclick="window.app.completeReceiverPairing()">绑定发送端</button>
+                    <button class="btn btn-secondary" id="receiverLanUnbindBtn" onclick="window.app.unbindLanReceiver()" style="display:none;">解绑局域网</button>
                 </div>
             </div>
+                </div>
+                <div class="settings-column">
+                    <div class="settings-column-title">终端与应用</div>
             <div class="form-group">
                 <label>默认 Shell</label>
                 <select id="settingShell" onpointerdown="openNativeSelect(this, event)" onchange="window.app.updateCustomShellVisibility()">
@@ -1312,6 +1504,8 @@
                 <div class="inline-actions" style="margin-top:8px;">
                     <button class="btn btn-secondary" id="desktopCheckUpdateBtn" onclick="window.app.checkDesktopUpdate()">检查更新</button>
                     <button class="btn btn-primary" id="desktopDownloadUpdateBtn" onclick="window.app.handleDesktopUpdateAction()" style="display:none;">下载更新</button>
+                </div>
+            </div>
                 </div>
             </div>
             <div class="modal-buttons">
@@ -1446,7 +1640,39 @@
         const XtermWebLinksAddon = window.WebLinksAddon?.WebLinksAddon;
         const XtermSerializeAddon = window.SerializeAddon?.SerializeAddon;
         const IS_WINDOWS_DESKTOP = typeof invoke !== 'undefined' && /\bWindows\b/i.test(navigator.userAgent);
-        const TERMINAL_FONT_FAMILY = '"Cascadia Mono", "Cascadia Code", "JetBrains Mono", "Maple Mono", "Sarasa Mono SC", "Microsoft YaHei Mono", "Consolas", "Courier New", monospace';
+        const TERMINAL_FONT_FAMILY = '"Maple Mono", "Maple Mono CN", "Cascadia Mono", "Cascadia Code", "JetBrains Mono", "Sarasa Mono SC", "Microsoft YaHei Mono", "Consolas", "Courier New", monospace';
+        const ensureTerminalFontLoaded = async () => {
+            if (!document.fonts?.load) return;
+            try {
+                await Promise.all([
+                    document.fonts.load('14px "Maple Mono"'),
+                    document.fonts.load('14px "Maple Mono CN"', '中文终端')
+                ]);
+            } catch (error) {
+                console.warn('[TTY1] Maple Mono 字体加载失败，将使用系统回退字体。', error);
+            }
+        };
+        const getTerminalSelectionText = (term) => {
+            if (!term?.hasSelection?.()) return '';
+            const selection = term.getSelectionPosition?.();
+            const buffer = term.buffer?.active;
+            if (!selection || !buffer) return term.getSelection?.() || '';
+
+            const lines = [];
+            for (let y = selection.start.y; y <= selection.end.y; y++) {
+                const line = buffer.getLine(y);
+                if (!line) continue;
+                const startColumn = y === selection.start.y ? selection.start.x : 0;
+                const endColumn = y === selection.end.y ? selection.end.x : line.length;
+                const text = line.translateToString(true, startColumn, endColumn).replace(/\u00a0/g, ' ');
+                if (y > selection.start.y && line.isWrapped && lines.length > 0) {
+                    lines[lines.length - 1] += text;
+                } else {
+                    lines.push(text);
+                }
+            }
+            return lines.join(IS_WINDOWS_DESKTOP ? '\r\n' : '\n');
+        };
         const CONNECTION_STEP_LABELS = {
             address: '服务器',
             identity: '身份',
@@ -1497,6 +1723,16 @@
                 return await navigator.clipboard.readText();
             }
             throw new Error('当前环境不支持直接读取系统剪贴板');
+        }
+
+        function sanitizeTerminalPasteText(value) {
+            return String(value ?? '')
+                .replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '')
+                .replace(/\r\n?|\n|\u2028|\u2029/g, ' ')
+                .replace(/[\t\f\v\u00A0\u2000-\u200A\u202F\u205F\u3000]+/g, ' ')
+                .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, '')
+                .replace(/ {2,}/g, ' ')
+                .trim();
         }
 
         async function saveClipboardImageToScreenshots(options = {}) {
@@ -2161,6 +2397,20 @@
             return value === 'receiver' ? 'receiver' : 'sender';
         }
 
+        function normalizeLanDirectUrl(value) {
+            let normalized = String(value || '').trim();
+            if (!normalized) return '';
+            if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(normalized)) normalized = 'ws://' + normalized;
+            normalized = normalized.replace(/^http:/i, 'ws:').replace(/^https:/i, 'wss:');
+            const url = new URL(normalized);
+            if (url.protocol !== 'ws:' && url.protocol !== 'wss:') {
+                throw new Error('局域网地址必须使用 ws:// 或 wss://');
+            }
+            if (!url.port) url.port = '7390';
+            if (!url.pathname || url.pathname === '/') url.pathname = '/ws';
+            return url.toString().replace(/\/$/, '');
+        }
+
         function getTerminalFontShortcutAction(event) {
             if (!event || !(event.ctrlKey || event.metaKey) || event.altKey) return null;
 
@@ -2216,7 +2466,12 @@
                     clientMode: 'sender',
                     serverUrl: DEFAULT_SERVER_URL, serverToken: '',
                     deviceName: DEFAULT_DESKTOP_DEVICE_NAME,
+                    senderToken: '', receiverToken: '',
+                    senderDeviceName: '', receiverDeviceName: '',
+                    senderServerUrl: '', receiverServerUrl: '',
                     pairedDesktopId: '', pairedDesktopName: '',
+                    lanDirectEnabled: true, lanDirectPort: 7390,
+                    receiverLanAddress: '', receiverLanToken: '',
                     autoConnect: true, autoReconnect: true,
                     reconnectInterval: 3000, maxReconnectAttempts: 10,
                     aiPreset: DEFAULT_AI_PRESET,
@@ -2246,6 +2501,22 @@
                         this.settings.deviceName = DEFAULT_DESKTOP_DEVICE_NAME;
                     }
                     this.settings.clientMode = normalizeClientMode(this.settings.clientMode);
+                    const activeMode = this.settings.clientMode;
+                    const tokenKey = activeMode === 'receiver' ? 'receiverToken' : 'senderToken';
+                    const nameKey = activeMode === 'receiver' ? 'receiverDeviceName' : 'senderDeviceName';
+                    const urlKey = activeMode === 'receiver' ? 'receiverServerUrl' : 'senderServerUrl';
+                    if (!String(this.settings[tokenKey] || '').trim() && String(this.settings.serverToken || '').trim()) {
+                        this.settings[tokenKey] = this.settings.serverToken;
+                    }
+                    if (!String(this.settings[nameKey] || '').trim() && String(this.settings.deviceName || '').trim()) {
+                        this.settings[nameKey] = this.settings.deviceName;
+                    }
+                    if (!String(this.settings[urlKey] || '').trim() && String(this.settings.serverUrl || '').trim()) {
+                        this.settings[urlKey] = this.settings.serverUrl;
+                    }
+                    this.settings.serverToken = this.getRoleToken(activeMode);
+                    this.settings.deviceName = this.getRoleDeviceName(activeMode);
+                    this.settings.serverUrl = this.getRoleServerUrl(activeMode);
                     const aiIsOldBlankDefault = this.settings.aiPreset === 'litellm'
                         && !String(this.settings.aiApiKey || '').trim()
                         && normalizeApiBaseUrl(this.settings.aiBaseUrl) === normalizeApiBaseUrl(AI_PRESETS.litellm.baseUrl)
@@ -2267,6 +2538,58 @@
                 this.settings[k] = k === 'fontSize'
                     ? normalizeTerminalFontSize(v)
                     : (k === 'clientMode' ? normalizeClientMode(v) : v);
+                const activeMode = normalizeClientMode(this.settings.clientMode);
+                if (k === 'serverToken') {
+                    this.settings[activeMode === 'receiver' ? 'receiverToken' : 'senderToken'] = v;
+                } else if (k === 'deviceName') {
+                    this.settings[activeMode === 'receiver' ? 'receiverDeviceName' : 'senderDeviceName'] = v;
+                } else if (k === 'serverUrl') {
+                    this.settings[activeMode === 'receiver' ? 'receiverServerUrl' : 'senderServerUrl'] = v;
+                }
+                this.save();
+            }
+            getRoleToken(mode) {
+                const normalized = normalizeClientMode(mode);
+                return String(this.settings[normalized === 'receiver' ? 'receiverToken' : 'senderToken'] || '').trim();
+            }
+            getRoleDeviceName(mode) {
+                const normalized = normalizeClientMode(mode);
+                const value = String(this.settings[normalized === 'receiver' ? 'receiverDeviceName' : 'senderDeviceName'] || '').trim();
+                return value || (normalized === 'receiver' ? DEFAULT_PC_RECEIVER_DEVICE_NAME : DEFAULT_DESKTOP_DEVICE_NAME);
+            }
+            getRoleServerUrl(mode) {
+                const normalized = normalizeClientMode(mode);
+                return normalizeServerUrl(this.settings[normalized === 'receiver' ? 'receiverServerUrl' : 'senderServerUrl'])
+                    || DEFAULT_SERVER_URL;
+            }
+            setRoleIdentity(mode, token, name) {
+                const normalized = normalizeClientMode(mode);
+                const tokenKey = normalized === 'receiver' ? 'receiverToken' : 'senderToken';
+                const nameKey = normalized === 'receiver' ? 'receiverDeviceName' : 'senderDeviceName';
+                this.settings[tokenKey] = String(token || '').trim();
+                this.settings[nameKey] = String(name || '').trim()
+                    || (normalized === 'receiver' ? DEFAULT_PC_RECEIVER_DEVICE_NAME : DEFAULT_DESKTOP_DEVICE_NAME);
+                if (normalizeClientMode(this.settings.clientMode) === normalized) {
+                    this.settings.serverToken = this.settings[tokenKey];
+                    this.settings.deviceName = this.settings[nameKey];
+                }
+                this.save();
+            }
+            setRoleServerUrl(mode, serverUrl) {
+                const normalized = normalizeClientMode(mode);
+                const urlKey = normalized === 'receiver' ? 'receiverServerUrl' : 'senderServerUrl';
+                this.settings[urlKey] = normalizeServerUrl(serverUrl) || DEFAULT_SERVER_URL;
+                if (normalizeClientMode(this.settings.clientMode) === normalized) {
+                    this.settings.serverUrl = this.settings[urlKey];
+                }
+                this.save();
+            }
+            setClientMode(mode) {
+                const normalized = normalizeClientMode(mode);
+                this.settings.clientMode = normalized;
+                this.settings.serverToken = this.getRoleToken(normalized);
+                this.settings.deviceName = this.getRoleDeviceName(normalized);
+                this.settings.serverUrl = this.getRoleServerUrl(normalized);
                 this.save();
             }
             getAll() { return { ...this.settings }; }
@@ -2393,9 +2716,14 @@
             }
             getActivePaneIds() { return Array.from(this.panes.keys()); }
             render() {
+                const focusedPane = document.activeElement?.closest?.('.terminal-pane');
+                const focusedPaneId = focusedPane ? Number(focusedPane.dataset.paneId) : null;
                 this.container.innerHTML = '';
                 const rootEl = this._renderNode(this.root, true);
                 this.container.appendChild(rootEl);
+                if (Number.isFinite(focusedPaneId)) {
+                    window.app?.terminals.get(focusedPaneId)?.focusSoon({ restore: true });
+                }
             }
             _renderNode(node, isRoot = false) {
                 if (node.type === 'leaf') return this._createPaneElement(node.paneId);
@@ -2517,6 +2845,7 @@
                 this.lastInputFingerprint = null;
                 this.lastInputAt = 0;
                 this.pendingFocusFrame = null;
+                this.pendingFocusMode = null;
                 this.cursorVisible = null;
                 this.remoteCellsFrame = null;
                 this.pendingWrites = [
@@ -2630,9 +2959,17 @@
                     const text = event.clipboardData?.getData('text');
                     if (!text || !this.term) return;
                     event.preventDefault();
-                    this.term.paste(text);
-                    this.focusSoon();
-                });
+                    event.stopImmediatePropagation();
+                    this.pasteSanitizedText(text);
+                }, true);
+
+                el.addEventListener('copy', (event) => {
+                    const text = getTerminalSelectionText(this.term);
+                    if (!text || !event.clipboardData) return;
+                    event.clipboardData.setData('text/plain', text);
+                    event.preventDefault();
+                    event.stopImmediatePropagation();
+                }, true);
 
                 this.resizeObserver = new ResizeObserver(() => this.queueResize());
                 this.resizeObserver.observe(el);
@@ -2698,7 +3035,7 @@
             sendRemoteKeySequence(sequence) {
                 window.app?.setActivePane?.(this.paneId);
                 this.focusSoon();
-                this.sendInput(sequence).finally(() => this.focusSoon());
+                this.sendInput(sequence);
             }
             keyToTerminalSequence(event) {
                 if (!event || event.ctrlKey || event.metaKey || event.altKey) return '';
@@ -2733,6 +3070,8 @@
             focus() {
                 if (window.app?.activePaneId !== this.paneId) return;
                 if (window.app?.isTitleEditing?.()) return;
+                if (window.app?.commandLibraryOpen) return;
+                if (document.querySelector('.modal-overlay.visible')) return;
                 this.term?.focus();
             }
             updateCursorVisibility(activePaneId = window.app?.activePaneId) {
@@ -2748,18 +3087,34 @@
                 };
                 this.term.refresh(0, Math.max(0, this.term.rows - 1));
             }
-            focusSoon() {
+            focusSoon(options = {}) {
                 if (window.app?.activePaneId !== this.paneId) return;
                 if (window.app?.isTitleEditing?.()) return;
-                if (this.pendingFocusFrame !== null) return;
+                if (window.app?.commandLibraryOpen) return;
+                const mode = options.restore ? 'restore' : 'explicit';
+                if (this.pendingFocusFrame !== null) {
+                    if (mode === 'explicit') this.pendingFocusMode = 'explicit';
+                    return;
+                }
+                this.pendingFocusMode = mode;
                 this.pendingFocusFrame = requestAnimationFrame(() => {
                     this.pendingFocusFrame = null;
+                    const pendingMode = this.pendingFocusMode;
+                    this.pendingFocusMode = null;
+                    if (pendingMode === 'restore') {
+                        const active = document.activeElement;
+                        const documentHasNewFocus = active
+                            && active !== document.body
+                            && active !== document.documentElement
+                            && !this.term?.element?.contains(active);
+                        if (documentHasNewFocus) return;
+                    }
                     this.focus();
                 });
             }
             async copySelection() {
                 if (!this.term || !this.term.hasSelection()) return;
-                const text = this.term.getSelection();
+                const text = getTerminalSelectionText(this.term);
                 if (!text) return;
                 try {
                     await writeClipboardText(text);
@@ -2776,16 +3131,25 @@
                 try {
                     this.focus();
                     const text = await readClipboardText();
-                    if (!text) {
-                        this.focusSoon();
-                        return;
-                    }
-                    this.term.paste(text);
-                    this.focusSoon();
+                    if (!text) return;
+                    this.pasteSanitizedText(text);
                 } catch (err) {
                     this.appendOutput('粘贴失败: ' + err, true);
-                    this.focusSoon();
                 }
+            }
+            pasteSanitizedText(text) {
+                if (!this.term) return false;
+                const original = String(text ?? '');
+                const sanitized = sanitizeTerminalPasteText(original);
+                if (!sanitized) {
+                    window.app?.showToast('剪贴板文本清洗后为空，未粘贴', 'warning');
+                    return false;
+                }
+                this.term.paste(sanitized);
+                if (sanitized !== original) {
+                    window.app?.showToast('已清洗剪贴板文本并合并为单行', 'success');
+                }
+                return true;
             }
             async pasteClipboardImagePath(options = {}) {
                 if (!this.term) return false;
@@ -2794,12 +3158,8 @@
                     const path = await saveClipboardImageToScreenshots({
                         silentNoImage: !!options.silentNoImage
                     });
-                    if (!path) {
-                        this.focusSoon();
-                        return false;
-                    }
+                    if (!path) return false;
                     this.term.paste(formatTerminalPath(path));
-                    this.focusSoon();
                     window.app?.showToast('已保存剪贴板图片并粘贴路径', 'success');
                     return true;
                 } catch (err) {
@@ -2807,7 +3167,6 @@
                         this.appendOutput('保存剪贴板图片失败: ' + err, true);
                         window.app?.showToast('保存剪贴板图片失败', 'error');
                     }
-                    this.focusSoon();
                     return false;
                 }
             }
@@ -3080,10 +3439,7 @@
                     ? Math.min(maxLines, Array.isArray(renderFrame.lines) ? renderFrame.lines.length : 0)
                     : (Array.isArray(renderFrame.lines) ? renderFrame.lines.length : 0);
                 const payload = '\x1b[2J\x1b[H' + (text || '') + this.remoteCursorSequence(renderFrame, renderedLineCount);
-                const shouldRefocus = this.remote && window.app?.activePaneId === this.paneId;
-                this.writeRaw(payload, () => {
-                    if (shouldRefocus) this.focusSoon();
-                });
+                this.writeRaw(payload);
                 return true;
             }
             async sendText(text) {
@@ -3110,7 +3466,6 @@
                             inputId: this.nextInputId(text)
                         });
                     }
-                    this.focus();
                     return true;
                 } catch (err) {
                     this.backendReady = false;
@@ -3122,7 +3477,6 @@
                                 input: text,
                                 inputId: this.nextInputId(text)
                             });
-                            this.focus();
                             return true;
                         } catch (retryErr) {
                             this.appendOutput('发送到本地终端失败: ' + retryErr, true);
@@ -3157,7 +3511,6 @@
                             inputId: this.nextInputId(data)
                         });
                     }
-                    this.focusSoon();
                     return true;
                 } catch (err) {
                     this.appendOutput('发送到本地终端失败: ' + err, true);
@@ -3239,6 +3592,7 @@
                     cancelAnimationFrame(this.pendingFocusFrame);
                     this.pendingFocusFrame = null;
                 }
+                this.pendingFocusMode = null;
                 if (this.resizeObserver) {
                     this.resizeObserver.disconnect();
                     this.resizeObserver = null;
@@ -3261,6 +3615,8 @@
                 this.nextTabId = 0;
                 this.serverConnected = false;
                 this.serverDeviceId = '';
+                this.lanDirectRunning = false;
+                this.lanConnectedPeers = [];
                 this.reconnectTimer = null;
                 this.reconnectAttempts = 0;
                 this.contextMenuTarget = null;
@@ -3288,6 +3644,8 @@
                 this.remoteReplayRequestedSessions = new Set();
                 this.v3WorkspaceId = '';
                 this.v3LayoutVersion = 0;
+                this.v3LayoutPublishChain = Promise.resolve();
+                this.v3StalePaneRecoveryTimer = null;
                 this.v3ScreenSeq = new Map();
                 this.v3OwnerScreenSeq = new Map();
                 this.v3OwnerDeltaBuffers = new Map();
@@ -3315,6 +3673,7 @@
                 this.lastSubmittedCommandKey = '';
                 this.lastSubmittedCommandAt = 0;
                 this.commandLibraryOpen = false;
+                this.commandLibraryAnchorId = 'commandLibraryBtn';
                 this.selectedCommandSectionKey = COMMAND_PANEL_DEFAULT_SECTION_KEY;
                 this.titleEditState = null;
                 this.aiPanelOpen = false;
@@ -3353,6 +3712,7 @@
                     hasToken: !!this.settings.get('serverToken'),
                     autoConnect: this.settings.get('autoConnect')
                 });
+                await ensureTerminalFontLoaded();
                 this.debug('tauri:apis', {
                     hasInvoke: typeof invoke !== 'undefined',
                     hasListen: typeof listen !== 'undefined'
@@ -3373,6 +3733,8 @@
                     const firstPaneId = this.splitTree.init();
                     this.createNewTab(firstPaneId);
                 }
+                await this.startLanDirectIfEnabled();
+                this.renderFavoriteCommandBar();
                 this.renderCommandLibrary();
                 this.setupGlobalListeners();
                 this.setupHistoryKeys();
@@ -3403,8 +3765,43 @@
                 return normalizeClientMode(this.settings.get('clientMode')) === 'receiver';
             }
 
+            receiverLanConnectionTarget(force = false) {
+                if (!force && !this.isReceiverMode()) return null;
+                const address = String(this.settings.get('receiverLanAddress') || '').trim();
+                if (!address) return null;
+                try {
+                    return {
+                        isLan: true,
+                        address,
+                        url: normalizeLanDirectUrl(address),
+                        token: String(
+                            this.settings.get('receiverLanToken')
+                            || this.settings.getRoleToken('receiver')
+                            || ''
+                        ).trim(),
+                        error: ''
+                    };
+                } catch (error) {
+                    return { isLan: true, address, url: '', token: '', error: String(error) };
+                }
+            }
+
+            isLanReceiverUrl(url) {
+                const target = this.receiverLanConnectionTarget();
+                if (!target?.url) return false;
+                try {
+                    return normalizeLanDirectUrl(url) === target.url;
+                } catch (_) {
+                    return false;
+                }
+            }
+
             deviceTypeForCurrentMode() {
                 return this.isReceiverMode() ? 'pc_receiver' : 'desktop';
+            }
+
+            hasSenderTransport() {
+                return this.serverConnected || this.lanDirectRunning;
             }
 
             ownerWorkspaceId() {
@@ -3451,43 +3848,46 @@
             }
 
             async publishV3LayoutSnapshot(reason = '') {
-                if (this.isReceiverMode() || !this.serverConnected || typeof invoke === 'undefined') return;
-                this.v3LayoutVersion += 1;
-                const workspaceId = this.ownerWorkspaceId();
-                const snapshot = this.buildV3LayoutSnapshot();
-                try {
-                    await invoke('publish_layout_snapshot', {
-                        workspaceId,
-                        snapshot,
-                        layoutVersion: this.v3LayoutVersion
-                    });
-                    this.debug('v3:layout:snapshot:sent', { reason, workspaceId, version: this.v3LayoutVersion });
-                    this.publishVisibleV3ScreenSnapshots(reason === 'connected' ? 'resync-request' : 'layout-snapshot');
-                } catch (err) {
-                    this.debug('v3:layout:snapshot:failed', { reason, error: String(err) });
-                }
+                if (this.isReceiverMode() || !this.hasSenderTransport() || typeof invoke === 'undefined') return;
+                return this.queueV3LayoutPublish('snapshot', reason);
             }
 
             async publishV3LayoutPatch(reason = '') {
-                if (this.isReceiverMode() || !this.serverConnected || typeof invoke === 'undefined') return;
-                this.v3LayoutVersion += 1;
-                const workspaceId = this.ownerWorkspaceId();
-                const snapshot = this.buildV3LayoutSnapshot();
-                try {
-                    await invoke('publish_layout_patch', {
-                        workspaceId,
-                        snapshot,
-                        layoutVersion: this.v3LayoutVersion,
-                        reason: reason || 'layout_change'
-                    });
-                    this.debug('v3:layout:patch:sent', { reason, workspaceId, version: this.v3LayoutVersion });
-                } catch (err) {
-                    this.debug('v3:layout:patch:failed', { reason, error: String(err) });
-                }
+                if (this.isReceiverMode() || !this.hasSenderTransport() || typeof invoke === 'undefined') return;
+                return this.queueV3LayoutPublish('patch', reason);
+            }
+
+            queueV3LayoutPublish(kind, reason = '') {
+                const publish = async () => {
+                    if (this.isReceiverMode() || !this.hasSenderTransport() || typeof invoke === 'undefined') return;
+                    this.v3LayoutVersion += 1;
+                    const version = this.v3LayoutVersion;
+                    const workspaceId = this.ownerWorkspaceId();
+                    const snapshot = this.buildV3LayoutSnapshot();
+                    try {
+                        if (kind === 'snapshot') {
+                            await invoke('publish_layout_snapshot', { workspaceId, snapshot, layoutVersion: version });
+                            this.publishVisibleV3ScreenSnapshots(reason === 'connected' ? 'resync-request' : 'layout-snapshot');
+                        } else {
+                            await invoke('publish_layout_patch', {
+                                workspaceId,
+                                snapshot,
+                                layoutVersion: version,
+                                reason: reason || 'layout_change'
+                            });
+                        }
+                        this.debug('v3:layout:' + kind + ':sent', { reason, workspaceId, version });
+                    } catch (err) {
+                        this.debug('v3:layout:' + kind + ':failed', { reason, error: String(err) });
+                    }
+                };
+                const queued = this.v3LayoutPublishChain.then(publish, publish);
+                this.v3LayoutPublishChain = queued.catch(() => {});
+                return queued;
             }
 
             publishVisibleV3ScreenSnapshots(reason = '') {
-                if (this.isReceiverMode() || !this.serverConnected) return;
+                if (this.isReceiverMode() || !this.hasSenderTransport()) return;
                 const paneIds = new Set();
                 for (const tab of this.tabs.values()) {
                     for (const paneId of tab.panes || []) paneIds.add(Number(paneId));
@@ -3643,10 +4043,18 @@
                 this.v3SnapshotTimers.delete(paneKey);
             }
 
+            isOwnerPaneInCurrentLayout(paneId) {
+                const numericPaneId = Number(paneId);
+                return Number.isFinite(numericPaneId)
+                    && this.terminals.has(numericPaneId)
+                    && !!this.findTabByPaneId(numericPaneId);
+            }
+
             scheduleV3ScreenDelta(paneId, sessionId, data) {
-                if (this.isReceiverMode() || !this.serverConnected || typeof invoke === 'undefined') return;
+                if (this.isReceiverMode() || !this.hasSenderTransport() || typeof invoke === 'undefined') return;
                 if (!sessionId || !data) return;
                 const paneKey = String(paneId);
+                if (!this.isOwnerPaneInCurrentLayout(paneKey)) return;
                 const existing = this.v3OwnerDeltaBuffers.get(paneKey);
                 if (existing) {
                     existing.data += data;
@@ -3666,7 +4074,8 @@
                 const paneKey = String(paneId);
                 const pending = this.v3OwnerDeltaBuffers.get(paneKey);
                 this.v3OwnerDeltaBuffers.delete(paneKey);
-                if (!pending?.sessionId || !pending.data || this.isReceiverMode() || !this.serverConnected || typeof invoke === 'undefined') return;
+                if (!pending?.sessionId || !pending.data || this.isReceiverMode() || !this.hasSenderTransport() || typeof invoke === 'undefined') return;
+                if (!this.isOwnerPaneInCurrentLayout(paneKey)) return;
                 try {
                     const prevSeq = this.v3OwnerScreenSeq.get(paneKey) || 0;
                     const seq = prevSeq + 1;
@@ -3694,8 +4103,9 @@
             }
 
             scheduleV3ScreenCellsFrame(paneId, reason = '') {
-                if (this.isReceiverMode() || !this.serverConnected || typeof invoke === 'undefined') return;
+                if (this.isReceiverMode() || !this.hasSenderTransport() || typeof invoke === 'undefined') return;
                 const paneIdText = String(paneId);
+                if (!this.isOwnerPaneInCurrentLayout(paneIdText)) return;
                 if (this.v3OwnerCellsTimers.has(paneIdText)) {
                     this.v3OwnerCellsDirty.add(paneIdText);
                     return;
@@ -3713,8 +4123,9 @@
             }
 
             async publishV3ScreenCellsFrame(paneId, reason = '') {
-                if (this.isReceiverMode() || !this.serverConnected || typeof invoke === 'undefined') return;
+                if (this.isReceiverMode() || !this.hasSenderTransport() || typeof invoke === 'undefined') return;
                 const paneIdText = String(paneId);
+                if (!this.isOwnerPaneInCurrentLayout(paneIdText)) return;
                 const terminal = this.terminals.get(Number(paneId));
                 if (!terminal || !terminal.sessionId) return;
                 const viewportRows = Number(terminal.term?.rows) || 24;
@@ -3746,8 +4157,9 @@
             }
 
             async publishV3ScreenSnapshot(paneId, reason = '') {
-                if (this.isReceiverMode() || !this.serverConnected || typeof invoke === 'undefined') return;
+                if (this.isReceiverMode() || !this.hasSenderTransport() || typeof invoke === 'undefined') return;
                 const paneIdText = String(paneId);
+                if (!this.isOwnerPaneInCurrentLayout(paneIdText)) return;
                 const terminal = this.terminals.get(Number(paneId));
                 if (!terminal || !terminal.sessionId) return;
                 const seq = this.v3OwnerScreenSeq.get(paneIdText) || 0;
@@ -3793,9 +4205,10 @@
             }
 
             scheduleV3ScreenSnapshot(paneId, reason = '') {
-                if (this.isReceiverMode() || !this.serverConnected || typeof invoke === 'undefined') return;
+                if (this.isReceiverMode() || !this.hasSenderTransport() || typeof invoke === 'undefined') return;
                 if (reason === 'output') return;
                 const paneIdText = String(paneId);
+                if (!this.isOwnerPaneInCurrentLayout(paneIdText)) return;
                 const seq = this.v3OwnerScreenSeq.get(paneIdText) || 0;
                 const lastSeq = this.v3SnapshotPublishedSeq.get(paneIdText) || -1;
                 const lastAt = this.v3SnapshotLastAt.get(paneIdText) || 0;
@@ -3981,6 +4394,7 @@
             }
 
             shouldConnectOnStartup() {
+                if (this.receiverLanConnectionTarget()) return true;
                 return !!normalizeServerUrl(this.settings.get('serverUrl'));
             }
 
@@ -4139,7 +4553,34 @@
                     this.selectedCommandSectionKey = (this.commandLibrary.sections || [])[0]?.key || COMMAND_PANEL_DEFAULT_SECTION_KEY;
                 }
                 this.persistCommandCatalog();
+                this.renderFavoriteCommandBar();
                 this.renderCommandLibrary();
+            }
+
+            renderFavoriteCommandBar() {
+                const list = document.getElementById('favoriteCommandList');
+                if (!list) return;
+                const favorites = this.commandLibrary.favorites || [];
+                if (favorites.length === 0) {
+                    list.innerHTML = '<span class="favorite-command-empty">暂无收藏，可在命令库中添加</span>';
+                } else {
+                    list.innerHTML = favorites.map((shortcut) => (
+                        '<button class="favorite-command-item'
+                            + (shortcut.dangerous ? ' dangerous' : '')
+                            + '" data-favorite-command="'
+                            + escapeHtml(shortcut.command)
+                            + '" title="执行：'
+                            + escapeHtml(shortcut.command)
+                            + '">'
+                            + escapeHtml(shortcut.title)
+                            + '</button>'
+                    )).join('');
+                }
+                list.querySelectorAll('[data-favorite-command]').forEach((element) => {
+                    element.addEventListener('click', () => {
+                        this.submitCommand(element.dataset.favoriteCommand || '');
+                    });
+                });
             }
 
             recordCommandUsage(command) {
@@ -4286,6 +4727,9 @@
 
             toggleCommandLibrary(event) {
                 event?.stopPropagation();
+                if (event?.currentTarget?.id) {
+                    this.commandLibraryAnchorId = event.currentTarget.id;
+                }
                 if (this.commandLibraryOpen) {
                     this.closeCommandLibrary();
                 } else {
@@ -4309,10 +4753,17 @@
             positionCommandLibraryPopover() {
                 if (!this.commandLibraryOpen) return;
                 const menu = document.getElementById('commandLibraryPopover');
-                const button = document.getElementById('commandLibraryBtn');
+                const button = document.getElementById(this.commandLibraryAnchorId)
+                    || document.getElementById('commandLibraryBtn');
                 if (!menu || !button) return;
                 const rect = button.getBoundingClientRect();
-                this.placeFloatingMenu(menu, rect.right, rect.bottom + 8, { alignRight: true });
+                const openAbove = button.id === 'favoriteCommandLibraryBtn';
+                this.placeFloatingMenu(
+                    menu,
+                    rect.right,
+                    openAbove ? rect.top - 8 : rect.bottom + 8,
+                    { alignRight: true, alignBottom: openAbove }
+                );
             }
 
             refreshCommandInputActions() {
@@ -6418,7 +6869,7 @@
 
             scheduleSessionMetaSend(sessionId, immediate) {
                 if (this.isReceiverMode()) return;
-                if (!this.serverConnected || typeof invoke === 'undefined') return;
+                if (!this.hasSenderTransport() || typeof invoke === 'undefined') return;
                 const existing = this.sessionMetaSendTimers.get(sessionId);
                 if (existing) clearTimeout(existing);
                 if (immediate) {
@@ -6435,31 +6886,45 @@
 
             async flushSessionMetaSend(sessionId, force) {
                 if (this.isReceiverMode()) return;
-                if (!this.serverConnected || typeof invoke === 'undefined') return;
+                if (!this.hasSenderTransport() || typeof invoke === 'undefined') return;
                 const state = this.sessionActivity.get(sessionId);
                 if (!state) return;
                 const paneId = this.paneIdFromSession(sessionId);
+                if (paneId === null) return;
                 const terminal = paneId === null ? null : this.terminals.get(paneId);
                 if (terminal?.serializeScreenPreviewText) {
                     state.screenPreview = terminal.serializeScreenPreviewText(10, 1600) || state.screenPreview || '';
                 }
                 const layout = paneId === null ? null : this.buildSessionLayoutMeta(paneId);
+                const tab = paneId === null ? null : this.findTabByPaneId(paneId);
                 const payload = {
                     title: state.title || '',
+                    tab_id: layout?.tab_id === undefined ? '' : String(layout.tab_id),
+                    tab_title: layout?.tab_title || tab?.title || '',
+                    pane_title: layout?.pane_title || (paneId === null ? '' : this.getPaneTitle(paneId, tab)),
+                    cwd: terminal?.cwd || '',
+                    status: terminal?.backendReady === false ? 'offline' : 'active',
+                    cols: terminal?.lastCols || 80,
+                    rows: terminal?.lastRows || 24,
                     activity: state.activity || '',
                     preview: state.preview || '',
-                    screenPreview: state.screenPreview || '',
-                    taskState: state.taskState || 'idle',
-                    layout
+                    screen_preview: state.screenPreview || '',
+                    task_state: state.taskState || 'idle',
+                    updated_at: Date.now()
                 };
-                const nextKey = JSON.stringify(payload);
+                const nextKey = JSON.stringify({ ...payload, updated_at: 0 });
                 if (!force && nextKey === state.lastSentKey) return;
                 try {
-                    await this.publishV3LayoutPatch('meta:' + sessionId);
+                    await invoke('publish_pane_meta', {
+                        workspaceId: this.ownerWorkspaceId(),
+                        paneId: String(paneId),
+                        sessionId,
+                        payload
+                    });
                     state.lastSentKey = nextKey;
                     this.debug('session:meta:sent', {
                         sessionId: sessionId,
-                        taskState: payload.taskState,
+                        taskState: payload.task_state,
                         activity: payload.activity
                     });
                 } catch (err) {
@@ -6479,7 +6944,7 @@
             }
 
             async syncActiveSessionsWithLayout() {
-                if (this.isReceiverMode() || !this.serverConnected || typeof invoke === 'undefined') return;
+                if (this.isReceiverMode() || !this.hasSenderTransport() || typeof invoke === 'undefined') return;
                 try {
                     await this.publishV3LayoutPatch('sync-active-layout');
                     await this.syncAllSessionActivity();
@@ -6508,6 +6973,8 @@
                 const snapshot = payload?.snapshot || payload || {};
                 const tabs = Array.isArray(snapshot.tabs) ? snapshot.tabs : [];
                 const ownerId = snapshot.owner_device_id || this.settings.get('pairedDesktopId') || 'desktop';
+                const previousActiveTabId = this.activeTabId;
+                const previousActiveLayout = this.remoteLayoutSignature(this.tabs.get(previousActiveTabId)?.root);
                 this.v3WorkspaceId = workspaceId || snapshot.workspace_id || this.v3WorkspaceId;
                 this.debug('v3:layout:snapshot:apply', {
                     workspaceId: this.v3WorkspaceId,
@@ -6579,7 +7046,10 @@
                 }
 
                 this.renderTabs();
-                this.renderActiveTab();
+                const activeLayout = this.remoteLayoutSignature(this.tabs.get(this.activeTabId)?.root);
+                if (this.activeTabId !== previousActiveTabId || activeLayout !== previousActiveLayout) {
+                    this.renderActiveTab();
+                }
                 const activeTab = this.tabs.get(this.activeTabId);
                 if (activeTab) {
                     const remoteActivePaneText = String(sortedTabs.find((item) => this.remoteTabKeyForV3Tab(ownerId, item) === activeTab.remoteKey)?.active_pane_id || '');
@@ -6592,6 +7062,48 @@
                     if (focusPaneId !== null && focusPaneId !== undefined) this.setActivePane(focusPaneId);
                 }
                 this.syncVisibleV3ScreenSubscriptions(this.v3WorkspaceId);
+                this.updateStatusBar();
+            }
+
+            applyV3PaneMeta(message) {
+                const workspaceId = String(message.workspace_id || this.v3WorkspaceId || '');
+                const paneIdText = String(message.pane_id || message.payload?.pane_id || '');
+                const paneId = this.localPaneIdForRemote(workspaceId, paneIdText) ?? Number(paneIdText);
+                const terminal = Number.isFinite(paneId) ? this.terminals.get(paneId) : null;
+                if (!terminal) return;
+
+                const payload = message.payload || {};
+                const sessionId = String(message.session_id || terminal.sessionId || 'remote-' + paneIdText);
+                const previous = this.remoteSessions.get(sessionId) || {};
+                const snapshot = {
+                    ...previous,
+                    session_id: sessionId,
+                    title: payload.title ?? previous.title ?? '远程终端',
+                    cols: Number(payload.cols) || previous.cols || 80,
+                    rows: Number(payload.rows) || previous.rows || 24,
+                    status: payload.status ?? previous.status ?? 'active',
+                    cwd: payload.cwd ?? previous.cwd ?? '',
+                    activity: payload.activity ?? previous.activity ?? '',
+                    preview: payload.preview ?? previous.preview ?? '',
+                    screen_preview: payload.screen_preview ?? previous.screen_preview ?? '',
+                    task_state: payload.task_state ?? previous.task_state ?? 'idle',
+                    layout: {
+                        ...(previous.layout || {}),
+                        tab_id: payload.tab_id ?? previous.layout?.tab_id ?? '',
+                        tab_title: payload.tab_title ?? previous.layout?.tab_title ?? '',
+                        pane_id: paneIdText,
+                        pane_title: payload.pane_title ?? previous.layout?.pane_title ?? payload.title ?? ''
+                    }
+                };
+                this.remoteSessions.set(sessionId, snapshot);
+                this.sessionPaneMap.set(sessionId, paneId);
+                terminal.remote = true;
+                terminal.sessionId = sessionId;
+                terminal.setWorkingDirectory(snapshot.cwd);
+                terminal.setBackendReady(snapshot.status !== 'closed' && snapshot.status !== 'offline');
+                terminal.lastCols = snapshot.cols;
+                terminal.lastRows = snapshot.rows;
+                this.applyRemoteSessionMetadata(snapshot);
                 this.updateStatusBar();
             }
 
@@ -6650,10 +7162,7 @@
                     return;
                 }
                 terminal.remoteCellsFrame = null;
-                const shouldRefocus = terminal.remote && this.activePaneId === terminal.paneId;
-                terminal.appendChunk(data, false, () => {
-                    if (shouldRefocus) terminal.focusSoon();
-                });
+                terminal.appendChunk(data, false);
                 if (sessionId) {
                     this.appendReplayBuffer(sessionId, data);
                     this.applySessionOutput(sessionId, data, null);
@@ -7170,6 +7679,7 @@
                 if (paneId === null) return;
                 const title = snapshot.title || '远程终端';
                 const tab = this.findTabByPaneId(paneId);
+                let tabNeedsRender = false;
                 if (tab) {
                     const nextTabTitle = normalizeEditableTitle(snapshot.layout?.tab_title || title, title);
                     const nextPaneTitle = normalizeEditableTitle(snapshot.layout?.pane_title || title, defaultPaneTitle(paneId));
@@ -7177,16 +7687,32 @@
                     if (titleChanged) {
                         tab.title = nextTabTitle;
                         this.setPaneTitleValue(tab, paneId, nextPaneTitle, 'auto');
-                        this.renderTabs();
+                        tabNeedsRender = true;
                     }
                     if (tab.id === this.activeTabId) this.syncPaneTitleElements(tab);
                 }
                 const state = this.ensureSessionActivity(paneId, title);
+                const previousStateKey = JSON.stringify([
+                    state.title,
+                    state.activity,
+                    state.preview,
+                    state.screenPreview,
+                    state.taskState
+                ]);
                 state.title = title;
-                state.activity = snapshot.activity || state.activity || '远程终端已就绪';
-                state.preview = snapshot.preview || state.preview || '';
-                state.taskState = snapshot.task_state || state.taskState || 'idle';
+                state.activity = snapshot.activity ?? state.activity ?? '远程终端已就绪';
+                state.preview = snapshot.preview ?? state.preview ?? '';
+                state.screenPreview = snapshot.screen_preview ?? state.screenPreview ?? '';
+                state.taskState = snapshot.task_state ?? state.taskState ?? 'idle';
                 state.lastUpdatedAt = Date.now();
+                const nextStateKey = JSON.stringify([
+                    state.title,
+                    state.activity,
+                    state.preview,
+                    state.screenPreview,
+                    state.taskState
+                ]);
+                if (tabNeedsRender || nextStateKey !== previousStateKey) this.renderTabs();
             }
 
             async openOrUpdateRemoteSession(snapshot) {
@@ -7288,11 +7814,16 @@
                 await listen('server-message', (event) => {
                     this.handleServerMessage(event.payload || {});
                 });
+
+                await listen('lan-peer-state', (event) => {
+                    this.handleLanPeerState(event.payload || {});
+                });
             }
 
             async handleServerStatus(payload) {
                 this.debug('server:status', payload);
                 const state = payload.state || 'disconnected';
+                const isLanConnection = this.isLanReceiverUrl(payload.server_url || this.settings.get('serverUrl'));
                 if (state === 'connecting') {
                     this.connectionPending = true;
                     this.updateConnectionStatus('connecting');
@@ -7319,9 +7850,11 @@
                     this.updateStatusBar();
                     this.setConnectionGuide({
                         phase: 'success',
-                        title: '服务器连接成功',
+                        title: isLanConnection ? '局域网连接成功' : '服务器连接成功',
                         detail: payload.message || (this.isReceiverMode()
-                            ? '设备认证完成，可以查看已配对发送端的终端。'
+                            ? (isLanConnection
+                                ? '已重新连接局域网发送端，可以查看和控制远程终端。'
+                                : '设备认证完成，可以查看已配对发送端的终端。')
                             : '设备认证完成，接收端可以看到这台电脑的终端。'),
                         steps: { address: 'done', identity: 'done', socket: 'done', auth: 'done' },
                         actions: [],
@@ -7333,7 +7866,7 @@
                         await this.publishV3LayoutSnapshot('connected');
                     }
                     if (payload.message) this.showToast(payload.message, 'success');
-                    else this.showToast('已连接到服务器', 'success');
+                    else this.showToast(isLanConnection ? '已连接局域网发送端' : '已连接到服务器', 'success');
                     return;
                 }
 
@@ -7424,6 +7957,10 @@
                     }
                     return;
                 }
+                if (payload.type === 'pane.meta') {
+                    if (this.isReceiverMode()) this.applyV3PaneMeta(payload);
+                    return;
+                }
                 if (payload.type === 'screen.snapshot' || payload.type === 'screen.delta') {
                     if (this.isReceiverMode()) this.applyV3ScreenMessage(payload);
                     return;
@@ -7469,6 +8006,18 @@
                     return;
                 }
                 if (payload.type === 'error' && payload.payload && payload.payload.message) {
+                    if (payload.payload.code === 'stale_pane' && !this.isReceiverMode()) {
+                        if (!this.v3StalePaneRecoveryTimer) {
+                            this.v3StalePaneRecoveryTimer = setTimeout(() => {
+                                this.v3StalePaneRecoveryTimer = null;
+                                this.publishV3LayoutSnapshot('stale-pane-recovery');
+                            }, 100);
+                        }
+                        this.debug('v3:screen:stale-pane-recovery', {
+                            workspaceId: payload.workspace_id || this.ownerWorkspaceId()
+                        });
+                        return;
+                    }
                     this.showToast(payload.payload.message, 'error');
                 }
             }
@@ -7505,12 +8054,16 @@
 
             async registerDesktopDevice() {
                 const serverUrl = document.getElementById('settingServerUrl').value.trim() || this.settings.get('serverUrl');
+                const selectedMode = normalizeClientMode(document.getElementById('settingClientMode')?.value || this.settings.get('clientMode'));
                 const deviceName = document.getElementById('settingDeviceName').value.trim()
-                    || this.settings.get('deviceName')
-                    || (this.isReceiverMode() ? DEFAULT_PC_RECEIVER_DEVICE_NAME : DEFAULT_DESKTOP_DEVICE_NAME);
+                    || this.settings.getRoleDeviceName(selectedMode);
                 if (!serverUrl) { this.showToast('请先填写服务器地址', 'warning'); return; }
                 try {
-                    const result = await this.registerDesktopDeviceFor(serverUrl, deviceName, this.deviceTypeForCurrentMode());
+                    const result = await this.registerDesktopDeviceFor(
+                        serverUrl,
+                        deviceName,
+                        selectedMode === 'receiver' ? 'pc_receiver' : 'desktop'
+                    );
                     this.showToast('设备身份已准备: ' + result.device.name, 'success');
                 } catch (err) {
                     console.error('Register device failed:', err);
@@ -7519,21 +8072,28 @@
             }
 
             async registerDesktopDeviceFor(serverUrl, deviceName, deviceType = 'desktop') {
+                const identityMode = deviceType === 'pc_receiver' ? 'receiver' : 'sender';
                 const result = await invoke('register_device', {
                     serverUrl: serverUrl,
                     name: deviceName || (deviceType === 'pc_receiver' ? DEFAULT_PC_RECEIVER_DEVICE_NAME : DEFAULT_DESKTOP_DEVICE_NAME),
                     deviceType: deviceType
                 });
-                this.settings.set('serverUrl', serverUrl);
-                this.settings.set('deviceName', result.device.name);
-                this.settings.set('serverToken', result.device.token);
-                this.settings.set('clientMode', deviceType === 'pc_receiver' ? 'receiver' : 'sender');
+                this.settings.setRoleServerUrl(identityMode, serverUrl);
+                this.settings.setRoleIdentity(identityMode, result.device.token, result.device.name);
                 const nameInput = document.getElementById('settingDeviceName');
                 const tokenInput = document.getElementById('settingDeviceToken');
                 const modeInput = document.getElementById('settingClientMode');
-                if (nameInput) nameInput.value = result.device.name;
-                if (tokenInput) tokenInput.value = result.device.token;
-                if (modeInput) modeInput.value = this.settings.get('clientMode');
+                if (modeInput && normalizeClientMode(modeInput.value) === identityMode) {
+                    if (nameInput) nameInput.value = result.device.name;
+                    if (tokenInput) tokenInput.value = result.device.token;
+                    if (this.settingsIdentityDraft) {
+                        this.settingsIdentityDraft[identityMode] = {
+                            name: result.device.name,
+                            token: result.device.token,
+                            serverUrl: serverUrl
+                        };
+                    }
+                }
                 this.updateClientModeVisibility();
                 this.refreshConnectionInputs();
                 return result;
@@ -7542,7 +8102,7 @@
             async generatePairingCode() {
                 const serverUrl = document.getElementById('settingServerUrl').value.trim() || this.settings.get('serverUrl');
                 const tokenInput = document.getElementById('settingDeviceToken');
-                let token = tokenInput.value.trim() || this.settings.get('serverToken');
+                let token = tokenInput.value.trim() || this.settings.getRoleToken('sender');
                 if (!serverUrl) { this.showToast('请先填写服务器地址', 'warning'); return; }
                 if (!token) {
                     try {
@@ -7571,15 +8131,129 @@
                 }
             }
 
+            renderLanDirectStatus(status = {}) {
+                this.lanDirectRunning = !!status.running;
+                const endpoint = document.getElementById('lanDirectEndpoint');
+                const code = document.getElementById('lanPairingCodeDisplay');
+                const hint = document.getElementById('lanDirectHint');
+                const clearButton = document.getElementById('clearLanReceiversBtn');
+                const endpoints = Array.isArray(status.websocket_urls) && status.websocket_urls.length > 0
+                    ? status.websocket_urls
+                    : (status.websocket_url ? [status.websocket_url] : []);
+                if (endpoint) endpoint.value = endpoints.join('\n');
+                if (code) code.value = status.pairing_code || '';
+                if (clearButton) clearButton.disabled = !(status.paired_receivers > 0);
+                if (hint) {
+                    hint.textContent = status.running
+                        ? '局域网接入已启动，共 ' + endpoints.length + ' 个可用地址；请选择与接收端同网段的地址。已配对 '
+                            + (status.paired_receivers || 0)
+                            + ' 台，在线 ' + (status.connected_receivers || 0) + ' 台。手机继续使用服务器连接。'
+                        : '局域网接入未启动；手机的服务器连接不受影响。';
+                }
+            }
+
+            async startLanDirectIfEnabled() {
+                if (this.isReceiverMode() || !this.settings.get('lanDirectEnabled') || typeof invoke === 'undefined') return null;
+                try {
+                    const status = await this.ensureLanDirectServer(
+                        Number(this.settings.get('lanDirectPort')) || 7390,
+                        this.settings.getRoleDeviceName('sender')
+                    );
+                    this.renderLanDirectStatus(status);
+                    await this.publishV3LayoutSnapshot('lan-direct-start');
+                    return status;
+                } catch (err) {
+                    this.lanDirectRunning = false;
+                    this.renderLanDirectStatus({ running: false });
+                    this.debug('lan-direct:start:failed', { error: String(err) });
+                    return null;
+                }
+            }
+
+            async ensureLanDirectServer(port, ownerName) {
+                const current = await invoke('get_lan_direct_status');
+                if (current?.running && Number(current.port) !== Number(port)) {
+                    await invoke('stop_lan_direct_server');
+                }
+                return invoke('start_lan_direct_server', { port, ownerName });
+            }
+
+            async refreshLanDirectStatus() {
+                if (typeof invoke === 'undefined') return;
+                try {
+                    this.renderLanDirectStatus(await invoke('get_lan_direct_status'));
+                } catch (err) {
+                    this.debug('lan-direct:status:failed', { error: String(err) });
+                }
+            }
+
+            async generateLanPairingCode() {
+                const enabled = document.getElementById('settingLanDirectEnabled');
+                const portInput = document.getElementById('settingLanDirectPort');
+                if (enabled) enabled.checked = true;
+                const port = Math.max(1024, Math.min(65535, Number(portInput?.value) || 7390));
+                this.settings.set('lanDirectEnabled', true);
+                this.settings.set('lanDirectPort', port);
+                try {
+                    await this.ensureLanDirectServer(
+                        port,
+                        document.getElementById('settingDeviceName')?.value.trim()
+                            || this.settings.getRoleDeviceName('sender')
+                    );
+                    const status = await invoke('generate_lan_pairing_code');
+                    this.renderLanDirectStatus(status);
+                    await this.publishV3LayoutSnapshot('lan-pairing-code');
+                    this.showToast('局域网 PC 配对码已生成: ' + status.pairing_code, 'success');
+                } catch (err) {
+                    this.showToast('启动局域网接入失败: ' + err, 'error');
+                }
+            }
+
+            async stopLanDirectServer(updateSetting = true) {
+                if (updateSetting) this.settings.set('lanDirectEnabled', false);
+                const enabled = document.getElementById('settingLanDirectEnabled');
+                if (enabled && updateSetting) enabled.checked = false;
+                try {
+                    this.renderLanDirectStatus(await invoke('stop_lan_direct_server'));
+                    this.lanConnectedPeers = [];
+                    this.renderPeerStatus();
+                    this.showToast('局域网 PC 接入已停止', 'success');
+                } catch (err) {
+                    this.showToast('停止局域网接入失败: ' + err, 'error');
+                }
+            }
+
+            async clearLanPairedReceivers() {
+                if (typeof invoke === 'undefined') return;
+                if (!window.confirm('确定解绑所有局域网 PC？在线接收端会立即断开，旧 token 将失效。')) return;
+                try {
+                    const status = await invoke('clear_lan_paired_receivers');
+                    this.renderLanDirectStatus(status);
+                    this.lanConnectedPeers = [];
+                    this.renderPeerStatus();
+                    this.showToast('已解绑所有局域网 PC', 'success');
+                } catch (err) {
+                    this.showToast('解绑局域网 PC 失败: ' + err, 'error');
+                }
+            }
+
             async completeReceiverPairing() {
-                const serverUrl = document.getElementById('settingServerUrl').value.trim() || this.settings.get('serverUrl');
+                const lanAddressInput = document.getElementById('receiverLanAddress');
+                let serverUrl = document.getElementById('settingServerUrl').value.trim() || this.settings.get('serverUrl');
+                try {
+                    if (lanAddressInput?.value.trim()) serverUrl = normalizeLanDirectUrl(lanAddressInput.value);
+                } catch (err) {
+                    this.showToast(String(err), 'warning');
+                    return;
+                }
                 const tokenInput = document.getElementById('settingDeviceToken');
                 const codeInput = document.getElementById('receiverPairingCode');
                 const code = (codeInput?.value || '').trim();
-                let token = tokenInput.value.trim() || this.settings.get('serverToken');
+                const isLanPairing = !!lanAddressInput?.value.trim();
+                let token = isLanPairing ? '' : (tokenInput.value.trim() || this.settings.getRoleToken('receiver'));
                 if (!serverUrl) { this.showToast('请先填写服务器地址', 'warning'); return; }
                 if (!/^\d{6}$/.test(code)) { this.showToast('请输入 6 位配对码', 'warning'); return; }
-                if (!token || this.settings.get('clientMode') !== 'receiver') {
+                if (!token) {
                     try {
                         const deviceName = document.getElementById('settingDeviceName').value.trim()
                             || this.settings.get('deviceName')
@@ -7598,21 +8272,95 @@
                         code
                     });
                     const pairing = result.pairing || {};
-                    this.settings.set('clientMode', 'receiver');
-                    this.settings.set('serverUrl', serverUrl);
-                    this.settings.set('serverToken', token);
+                    this.settings.setRoleServerUrl('receiver', serverUrl);
+                    this.settings.set('receiverLanAddress', isLanPairing ? lanAddressInput?.value.trim() || '' : '');
+                    this.settings.set('receiverLanToken', isLanPairing ? token : '');
+                    this.settings.setRoleIdentity(
+                        'receiver',
+                        token,
+                        document.getElementById('settingDeviceName').value.trim() || this.settings.getRoleDeviceName('receiver')
+                    );
+                    this.settings.setClientMode('receiver');
                     this.settings.set('pairedDesktopId', pairing.desktop_id || '');
                     this.settings.set('pairedDesktopName', pairing.desktop_name || '');
+                    if (this.settingsIdentityDraft) {
+                        this.settingsIdentityDraft.receiver = {
+                            name: document.getElementById('settingDeviceName').value.trim()
+                                || this.settings.getRoleDeviceName('receiver'),
+                            token,
+                            serverUrl
+                        };
+                    }
                     if (tokenInput) tokenInput.value = token;
                     if (codeInput) codeInput.value = '';
                     document.getElementById('receiverPairingHint').textContent =
                         '已绑定发送端: ' + (pairing.desktop_name || pairing.desktop_id || '未知发送端');
                     this.updateClientModeVisibility();
                     this.showToast('已绑定发送端: ' + (pairing.desktop_name || 'PC 发送端'), 'success');
-                    if (this.serverConnected) await this.refreshRemoteWorkspaces();
+                    if (this.serverConnected || this.connectionPending) await this.disconnect();
+                    await this.connect();
                 } catch (err) {
                     this.showToast('绑定发送端失败: ' + err, 'error');
                 }
+            }
+
+            async unbindLanReceiver() {
+                const target = this.receiverLanConnectionTarget(true);
+                if (!target) {
+                    this.showToast('当前没有局域网绑定', 'warning');
+                    return;
+                }
+                if (!window.confirm('确定解绑当前局域网发送端？本机保存的地址和 token 将被清除。')) return;
+
+                if (this.isReceiverMode() && (this.serverConnected || this.connectionPending)) {
+                    await this.disconnect();
+                }
+
+                let remoteRevoked = false;
+                if (typeof invoke !== 'undefined' && target.url && target.token) {
+                    try {
+                        await invoke('unbind_lan_receiver', {
+                            serverUrl: target.url,
+                            token: target.token
+                        });
+                        remoteRevoked = true;
+                    } catch (err) {
+                        this.debug('lan-direct:receiver-unbind:remote-failed', { error: String(err) });
+                    }
+                }
+
+                const receiverName = this.settings.getRoleDeviceName('receiver');
+                if (this.settings.getRoleToken('receiver') === target.token) {
+                    this.settings.setRoleIdentity('receiver', '', receiverName);
+                    this.settings.setRoleServerUrl('receiver', DEFAULT_SERVER_URL);
+                }
+                this.settings.set('receiverLanAddress', '');
+                this.settings.set('receiverLanToken', '');
+                this.settings.set('pairedDesktopId', '');
+                this.settings.set('pairedDesktopName', '');
+                if (this.settingsIdentityDraft) {
+                    this.settingsIdentityDraft.receiver = {
+                        name: receiverName,
+                        token: this.settings.getRoleToken('receiver'),
+                        serverUrl: this.settings.getRoleServerUrl('receiver')
+                    };
+                }
+
+                const addressInput = document.getElementById('receiverLanAddress');
+                const tokenInput = document.getElementById('settingDeviceToken');
+                const hint = document.getElementById('receiverPairingHint');
+                const button = document.getElementById('receiverLanUnbindBtn');
+                if (addressInput) addressInput.value = '';
+                if (tokenInput && !this.settings.getRoleToken('receiver')) tokenInput.value = '';
+                if (hint) hint.textContent = '填写发送端显示的局域网地址和 PC 配对码后即可绑定。';
+                if (button) button.style.display = 'none';
+                this.updateClientModeVisibility();
+                this.showToast(
+                    remoteRevoked
+                        ? '局域网绑定已从两端解除'
+                        : '本机绑定已清除；请在发送端执行“解绑所有 PC”以撤销旧授权',
+                    remoteRevoked ? 'success' : 'warning'
+                );
             }
 
             async ensureTerminalBackendReady(paneId) {
@@ -7751,6 +8499,9 @@
             }
 
             setupGlobalListeners() {
+                document.getElementById('favoriteCommandLibraryBtn')?.addEventListener('click', (event) => {
+                    this.toggleCommandLibrary(event);
+                });
                 document.addEventListener('click', (event) => {
                     if (event.target.closest('.context-menu, .split-menu, .pane-action')) {
                         return;
@@ -8000,6 +8751,7 @@
                 }
                 for (const pid of tab.panes) {
                     if (options.remoteSync !== false) this.destroyBackendSession(pid);
+                    if (!this.isReceiverMode()) this.cleanupV3ScreenState(this.ownerWorkspaceId(), pid);
                     this.forgetRemotePaneMapping(this.v3WorkspaceId, this.remotePaneIdForLocal(pid), pid);
                     this.terminals.get(pid)?.dispose();
                     this.splitTree.panes.delete(pid);
@@ -8163,6 +8915,7 @@
                 const closingActiveTab = this.activeTabId === tab.id;
                 this.splitTree.setRoot(tab.root);
                 if (options.remoteSync !== false) this.destroyBackendSession(paneId);
+                if (!this.isReceiverMode()) this.cleanupV3ScreenState(this.ownerWorkspaceId(), paneId);
                 this.forgetRemotePaneMapping(this.v3WorkspaceId, this.remotePaneIdForLocal(paneId), paneId);
                 this.splitTree.closePane(paneId);
                 this.terminals.get(paneId)?.dispose();
@@ -8340,6 +9093,7 @@
                 for (const paneId of Array.from(tab.panes)) {
                     if (paneId === keepPaneId) continue;
                     this.destroyBackendSession(paneId);
+                    this.cleanupV3ScreenState(this.ownerWorkspaceId(), paneId);
                     this.terminals.get(paneId)?.dispose();
                     this.terminals.delete(paneId);
                     this.splitTree.panes.delete(paneId);
@@ -8452,14 +9206,21 @@
             }
 
             async connect(options = {}) {
-                const url = (this.settings.get('serverUrl') || '').trim();
-                let token = (this.settings.get('serverToken') || '').trim();
-                if (this.connectionPending) {
-                    this.debug('connection:skip-pending', { url: url });
-                    this.showToast('连接请求已经发出，请等待服务器响应', 'warning');
+                const lanTarget = this.receiverLanConnectionTarget();
+                if (lanTarget?.error) {
+                    this.showToast('局域网地址无效: ' + lanTarget.error, 'error');
+                    this.debug('connection:lan-target-invalid', { address: lanTarget.address, error: lanTarget.error });
                     return;
                 }
-                this.debug('connection:request', { url, tokenLength: token.length });
+                const url = String(lanTarget?.url || this.settings.get('serverUrl') || '').trim();
+                let token = String(lanTarget?.token || this.settings.get('serverToken') || '').trim();
+                const connectionName = lanTarget ? '局域网发送端' : '服务器';
+                if (this.connectionPending) {
+                    this.debug('connection:skip-pending', { url: url });
+                    this.showToast('连接请求已经发出，请等待响应', 'warning');
+                    return;
+                }
+                this.debug('connection:request', { url, tokenLength: token.length, transport: lanTarget ? 'lan' : 'server' });
                 if (!url) {
                     this.setConnectionGuide({
                         phase: 'error',
@@ -8473,12 +9234,23 @@
                 }
                 this.setConnectionGuide({
                     phase: 'warning',
-                    title: options.forceGuide ? '正在重新连接服务器' : '正在连接服务器',
-                    detail: '正在检查服务器地址并准备桌面身份。',
+                    title: options.forceGuide ? '正在重新连接' + connectionName : '正在连接' + connectionName,
+                    detail: '正在检查连接地址并准备桌面身份。',
                     steps: { address: 'active', identity: token ? 'done' : 'pending', socket: 'pending', auth: 'pending' },
                     actions: []
                 });
                 if (!token) {
+                    if (lanTarget) {
+                        this.setConnectionGuide({
+                            phase: 'error',
+                            title: '局域网绑定信息不完整',
+                            detail: '已保存局域网地址，但接收端 token 缺失，请使用新的 PC 配对码重新绑定。',
+                            steps: { address: 'done', identity: 'error', socket: 'pending', auth: 'pending' },
+                            actions: [{ id: 'settings', label: '打开设置', primary: true }]
+                        });
+                        this.showToast('局域网 token 缺失，请重新绑定发送端', 'error');
+                        return;
+                    }
                     if (typeof invoke === 'undefined') {
                         const detail = 'Tauri API 未注入，当前页面不是桌面应用上下文。';
                         this.setConnectionGuide({
@@ -8548,6 +9320,7 @@
                 }
                 this.settings.set('serverUrl', url);
                 this.settings.set('serverToken', token);
+                if (lanTarget) this.settings.set('receiverLanToken', token);
                 this.manualDisconnect = false;
                 this.connectionPending = true;
                 if (this.reconnectTimer) {
@@ -8558,7 +9331,7 @@
                 try {
                     this.setConnectionGuide({
                         phase: 'warning',
-                        title: '正在建立服务器连接',
+                        title: '正在建立' + connectionName + '连接',
                         detail: '桌面身份已准备，正在连接 WebSocket 并等待认证。',
                         steps: { address: 'done', identity: 'done', socket: 'active', auth: 'pending' }
                     });
@@ -8694,10 +9467,40 @@
                 this.updateClientModeVisibility();
             }
 
+            handleLanPeerState(payload) {
+                const hadOnlineReceiver = this.lanConnectedPeers.some((peer) => peer.online);
+                const peers = Array.isArray(payload?.peers) ? payload.peers : [];
+                this.lanConnectedPeers = peers.map((peer) => ({
+                    id: String(peer?.id || ''),
+                    name: String(peer?.name || peer?.id || '').trim(),
+                    type: 'pc_receiver',
+                    online: !!peer?.online,
+                    transport: 'lan'
+                })).filter((peer) => peer.id || peer.name);
+                this.renderPeerStatus();
+                this.refreshLanDirectStatus();
+                if (!hadOnlineReceiver && this.lanConnectedPeers.some((peer) => peer.online)) {
+                    this.publishV3LayoutSnapshot('lan-receiver-connected');
+                    this.publishVisibleV3ScreenSnapshots('resync-request');
+                }
+            }
+
+            allConnectedPeers() {
+                const peers = [...this.connectedPeers, ...this.lanConnectedPeers];
+                const byId = new Map();
+                for (const peer of peers) {
+                    const key = peer.id || peer.name;
+                    const previous = byId.get(key);
+                    byId.set(key, previous ? { ...previous, ...peer, online: previous.online || peer.online } : peer);
+                }
+                return Array.from(byId.values());
+            }
+
             renderPeerStatus() {
                 const el = document.getElementById('peerStatus');
                 if (!el) return;
-                const onlinePeers = this.connectedPeers.filter((peer) => peer.online);
+                const allPeers = this.allConnectedPeers();
+                const onlinePeers = allPeers.filter((peer) => peer.online);
                 const labelFor = (peer) => peer.name || peer.id || '未命名设备';
                 const names = onlinePeers.map(labelFor);
 
@@ -8715,7 +9518,7 @@
                     text = names.length > 0
                         ? '接收端: ' + names.slice(0, 2).join(', ') + (names.length > 2 ? ' +' + (names.length - 2) : '')
                         : '无在线接收端';
-                    const pairedCount = this.connectedPeers.length;
+                    const pairedCount = allPeers.length;
                     title = names.length > 0
                         ? '在线接收端: ' + names.join(', ')
                         : (pairedCount > 0 ? '已配对接收端均不在线' : '暂无已连接接收端');
@@ -8896,18 +9699,33 @@
 
             showSettings() {
                 const modal = document.getElementById('settingsModal');
-                document.getElementById('settingClientMode').value = this.settings.get('clientMode');
+                const currentMode = normalizeClientMode(this.settings.get('clientMode'));
+                document.getElementById('settingClientMode').value = currentMode;
                 document.getElementById('settingShell').value = this.settings.get('shell');
                 document.getElementById('settingCustomShell').value = this.settings.get('customShell');
                 document.getElementById('settingFontSize').value = this.settings.get('fontSize');
-                const serverUrl = normalizeServerUrl(this.settings.get('serverUrl'));
-                document.getElementById('settingServerUrl').value = isCustomServerUrl(serverUrl) ? serverUrl : '';
-                document.getElementById('settingDeviceName').value = this.settings.get('deviceName');
-                document.getElementById('settingDeviceToken').value = this.settings.get('serverToken');
+                this.settingsIdentityDraft = {
+                    sender: {
+                        name: this.settings.getRoleDeviceName('sender'),
+                        token: this.settings.getRoleToken('sender'),
+                        serverUrl: this.settings.getRoleServerUrl('sender')
+                    },
+                    receiver: {
+                        name: this.settings.getRoleDeviceName('receiver'),
+                        token: this.settings.getRoleToken('receiver'),
+                        serverUrl: this.settings.getRoleServerUrl('receiver')
+                    }
+                };
+                this.settingsModalIdentityMode = currentMode;
+                this.renderSettingsIdentity(currentMode);
                 document.getElementById('settingAutoConnect').value = this.settings.get('autoConnect').toString();
                 document.getElementById('settingAutoReconnect').value = this.settings.get('autoReconnect').toString();
+                document.getElementById('settingLanDirectEnabled').checked = !!this.settings.get('lanDirectEnabled');
+                document.getElementById('settingLanDirectPort').value = Number(this.settings.get('lanDirectPort')) || 7390;
+                document.getElementById('receiverLanAddress').value = this.settings.get('receiverLanAddress') || '';
                 document.getElementById('pairingCodeDisplay').value = '';
-                document.getElementById('pairingCodeHint').textContent = '配对码有效期 5 分钟，在接收端输入后即可绑定。';
+                document.getElementById('pairingCodeHint').textContent = '通过当前服务器绑定手机，配对码有效期 5 分钟。';
+                this.refreshLanDirectStatus();
                 this.renderDesktopUpdate();
                 this.checkDesktopUpdate(true);
                 this.updateCustomShellVisibility();
@@ -8915,26 +9733,41 @@
                 modal.classList.add('visible');
             }
 
-            closeSettings() { document.getElementById('settingsModal').classList.remove('visible'); }
+            closeSettings() {
+                document.getElementById('settingsModal').classList.remove('visible');
+                this.settingsIdentityDraft = null;
+                this.settingsModalIdentityMode = null;
+            }
 
             saveSettings() {
                 const previousMode = this.currentWorkspaceMode();
                 const nextMode = normalizeClientMode(document.getElementById('settingClientMode').value);
-                this.settings.set('clientMode', nextMode);
+                this.captureSettingsIdentityDraft();
+                for (const mode of ['sender', 'receiver']) {
+                    const identity = this.settingsIdentityDraft?.[mode];
+                    if (identity) {
+                        this.settings.setRoleIdentity(mode, identity.token, identity.name);
+                        this.settings.setRoleServerUrl(mode, identity.serverUrl);
+                    }
+                }
+                this.settings.setClientMode(nextMode);
                 this.settings.set('shell', document.getElementById('settingShell').value);
                 this.settings.set('customShell', document.getElementById('settingCustomShell').value);
                 this.setTerminalFontSize(document.getElementById('settingFontSize').value);
-                const customServerUrl = normalizeServerUrl(document.getElementById('settingServerUrl').value);
-                this.settings.set('serverUrl', customServerUrl || DEFAULT_SERVER_URL);
-                this.settings.set('deviceName', document.getElementById('settingDeviceName').value.trim() || (this.isReceiverMode() ? DEFAULT_PC_RECEIVER_DEVICE_NAME : DEFAULT_DESKTOP_DEVICE_NAME));
-                this.settings.set('serverToken', document.getElementById('settingDeviceToken').value.trim());
                 this.settings.set('autoConnect', document.getElementById('settingAutoConnect').value === 'true');
                 this.settings.set('autoReconnect', document.getElementById('settingAutoReconnect').value === 'true');
+                const lanEnabled = !!document.getElementById('settingLanDirectEnabled').checked;
+                const lanPort = Math.max(1024, Math.min(65535, Number(document.getElementById('settingLanDirectPort').value) || 7390));
+                this.settings.set('lanDirectEnabled', lanEnabled);
+                this.settings.set('lanDirectPort', lanPort);
+                this.settings.set('receiverLanAddress', document.getElementById('receiverLanAddress').value.trim());
                 this.refreshConnectionInputs();
                 for (const [, terminal] of this.terminals) {
                     terminal.shell = this.settings.get('shell');
                 }
                 this.closeSettings();
+                if (nextMode === 'sender' && lanEnabled) this.startLanDirectIfEnabled();
+                else if (this.lanDirectRunning) this.stopLanDirectServer(false);
                 this.showToast(
                     previousMode !== nextMode
                         ? '设置已保存，重启后会加载对应模式的终端布局'
@@ -9106,26 +9939,66 @@
                 document.getElementById('customShellGroup').style.display = shell === 'custom' ? 'block' : 'none';
             }
 
+            captureSettingsIdentityDraft() {
+                if (!this.settingsIdentityDraft || !this.settingsModalIdentityMode) return;
+                this.settingsIdentityDraft[this.settingsModalIdentityMode] = {
+                    name: document.getElementById('settingDeviceName')?.value.trim() || '',
+                    token: document.getElementById('settingDeviceToken')?.value.trim() || '',
+                    serverUrl: normalizeServerUrl(document.getElementById('settingServerUrl')?.value) || DEFAULT_SERVER_URL
+                };
+            }
+
+            renderSettingsIdentity(mode) {
+                const normalized = normalizeClientMode(mode);
+                const identity = this.settingsIdentityDraft?.[normalized] || {
+                    name: this.settings.getRoleDeviceName(normalized),
+                    token: this.settings.getRoleToken(normalized),
+                    serverUrl: this.settings.getRoleServerUrl(normalized)
+                };
+                const nameInput = document.getElementById('settingDeviceName');
+                const tokenInput = document.getElementById('settingDeviceToken');
+                const serverUrlInput = document.getElementById('settingServerUrl');
+                if (nameInput) nameInput.value = identity.name;
+                if (tokenInput) tokenInput.value = identity.token;
+                if (serverUrlInput) serverUrlInput.value = isCustomServerUrl(identity.serverUrl) ? identity.serverUrl : '';
+            }
+
+            handleClientModeSelection() {
+                this.captureSettingsIdentityDraft();
+                const mode = normalizeClientMode(document.getElementById('settingClientMode')?.value);
+                this.settingsModalIdentityMode = mode;
+                this.renderSettingsIdentity(mode);
+                this.updateClientModeVisibility();
+            }
+
             updateClientModeVisibility() {
                 const mode = normalizeClientMode(document.getElementById('settingClientMode')?.value || this.settings.get('clientMode'));
                 const senderGroup = document.getElementById('senderPairingGroup');
                 const receiverGroup = document.getElementById('receiverPairingGroup');
+                const receiverLanUnbindButton = document.getElementById('receiverLanUnbindBtn');
                 if (senderGroup) senderGroup.style.display = mode === 'sender' ? '' : 'none';
                 if (receiverGroup) receiverGroup.style.display = mode === 'receiver' ? '' : 'none';
+                if (receiverLanUnbindButton) {
+                    const hasLanBinding = !!String(this.settings.get('receiverLanAddress') || '').trim()
+                        && !!String(this.settings.get('receiverLanToken') || this.settings.getRoleToken('receiver') || '').trim();
+                    receiverLanUnbindButton.style.display = mode === 'receiver' && hasLanBinding ? '' : 'none';
+                }
                 const pairedName = this.settings.get('pairedDesktopName') || this.settings.get('pairedDesktopId');
                 const receiverHint = document.getElementById('receiverPairingHint');
                 if (receiverHint) {
-                    const onlineSender = this.connectedPeers.find((peer) => peer.online && peer.type === 'desktop');
+                    const onlineSender = this.allConnectedPeers().find((peer) => peer.online && peer.type === 'desktop');
                     receiverHint.textContent = pairedName
                         ? '已绑定发送端: ' + (onlineSender?.name || pairedName) + (onlineSender ? ' (在线)' : '')
-                        : '绑定成功后，PC 接收端可以同时和手机一样订阅发送端终端。';
+                        : '填写发送端显示的局域网地址和 PC 配对码后即可绑定。';
                 }
             }
 
             updateStatusBar() {
                 document.getElementById('statusMode').textContent = this.isReceiverMode()
                     ? (this.serverConnected ? 'PC 接收端' : '接收端离线')
-                    : (this.serverConnected ? '服务器模式' : '本地终端');
+                    : (this.serverConnected
+                        ? (this.lanDirectRunning ? '服务器 + 局域网' : '服务器模式')
+                        : (this.lanDirectRunning ? '局域网发送端' : '本地终端'));
                 document.getElementById('statusTabs').textContent = '标签: ' + this.tabs.size;
                 document.getElementById('statusShell').textContent = this.isReceiverMode() ? 'remote' : this.settings.get('shell');
                 const activeTerminal = this.terminals.get(this.activePaneId);

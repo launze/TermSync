@@ -23,6 +23,7 @@ use uuid::Uuid;
 use crate::api_client::{
     self, CompletePairingResponse, PairingCodeResponse, RegisterDeviceResponse, ReleaseInfo,
 };
+use crate::lan_direct::{LanDirectState, LanDirectStatus};
 use crate::pty_manager::{PtyManager, SessionDescriptor};
 use crate::wss_client::{ServerStatusSnapshot, WssClientState};
 
@@ -285,6 +286,50 @@ pub async fn complete_pairing(
 }
 
 #[command]
+pub async fn start_lan_direct_server(
+    port: u16,
+    owner_name: String,
+    app: AppHandle,
+    state: State<'_, LanDirectState>,
+) -> Result<LanDirectStatus, String> {
+    state.start(app, port, owner_name).await
+}
+
+#[command]
+pub async fn stop_lan_direct_server(
+    state: State<'_, LanDirectState>,
+) -> Result<LanDirectStatus, String> {
+    Ok(state.stop().await)
+}
+
+#[command]
+pub async fn get_lan_direct_status(
+    state: State<'_, LanDirectState>,
+) -> Result<LanDirectStatus, String> {
+    Ok(state.status().await)
+}
+
+#[command]
+pub async fn generate_lan_pairing_code(
+    state: State<'_, LanDirectState>,
+) -> Result<LanDirectStatus, String> {
+    state.generate_pairing_code().await
+}
+
+#[command]
+pub async fn clear_lan_paired_receivers(
+    state: State<'_, LanDirectState>,
+) -> Result<LanDirectStatus, String> {
+    state.clear_paired_receivers().await
+}
+
+#[command]
+pub async fn unbind_lan_receiver(server_url: String, token: String) -> Result<String, String> {
+    api_client::unbind_lan_receiver(server_url, token).await?;
+    Ok("LAN receiver unbound".to_string())
+}
+
+#[command]
 pub async fn publish_layout_snapshot(
     workspace_id: String,
     snapshot: Value,
@@ -317,6 +362,28 @@ pub async fn publish_layout_patch(
         .send_layout_patch(workspace_id, snapshot, layout_version, reason.as_deref())
         .await?;
     Ok("Layout patch published".to_string())
+}
+
+#[command]
+pub async fn publish_pane_meta(
+    workspace_id: String,
+    pane_id: String,
+    session_id: Option<String>,
+    payload: Value,
+    state: State<'_, WssClientState>,
+) -> Result<String, String> {
+    let workspace_id = workspace_id.trim();
+    let pane_id = pane_id.trim();
+    if workspace_id.is_empty() {
+        return Err("workspace_id is required".to_string());
+    }
+    if pane_id.is_empty() {
+        return Err("pane_id is required".to_string());
+    }
+    state
+        .send_pane_meta(workspace_id, pane_id, session_id.as_deref(), payload)
+        .await?;
+    Ok("Pane metadata published".to_string())
 }
 
 #[command]

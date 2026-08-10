@@ -1,6 +1,6 @@
 [package]
 name = "termsync-desktop"
-version = "0.1.16"
+version = "0.1.19"
 description = "TermSync Cross-Platform Terminal Client"
 authors = ["TermSync Team"]
 edition = "2021"
@@ -35,6 +35,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 sysinfo = "0.30"
 arboard = "3.6"
 image = { version = "0.25", default-features = false, features = ["png"] }
+axum = { version = "0.7", features = ["json", "ws"] }
+if-addrs = "0.15"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

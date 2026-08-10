@@ -1,3 +1,4 @@
+use crate::lan_direct::LanDirectState;
 use crate::pty_manager::PtyManager;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use futures::{SinkExt, StreamExt};
@@ -56,14 +57,24 @@ struct InnerState {
     task: Option<JoinHandle<()>>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct WssClientState {
     inner: Arc<Mutex<InnerState>>,
     client_instance_id: Arc<String>,
     connection_generation: Arc<AtomicU64>,
+    lan_direct: LanDirectState,
 }
 
 impl WssClientState {
+    pub fn new(lan_direct: LanDirectState) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(InnerState::default())),
+            client_instance_id: Arc::new(format!("desktop-{}", uuid::Uuid::new_v4())),
+            connection_generation: Arc::new(AtomicU64::new(0)),
+            lan_direct,
+        }
+    }
+
     pub async fn connect(
         &self,
         app: AppHandle,
@@ -271,6 +282,23 @@ impl WssClientState {
         .await
     }
 
+    pub async fn send_pane_meta(
+        &self,
+        workspace_id: &str,
+        pane_id: &str,
+        session_id: Option<&str>,
+        payload: Value,
+    ) -> Result<(), String> {
+        self.send_json(v3_message(
+            "pane.meta",
+            Some(workspace_id),
+            Some(pane_id),
+            session_id,
+            payload,
+        ))
+        .await
+    }
+
     pub async fn send_layout_action_request(
         &self,
         workspace_id: &str,
@@ -323,7 +351,11 @@ impl WssClientState {
         .await
     }
 
-    pub async fn unsubscribe_screen(&self, workspace_id: &str, pane_id: &str) -> Result<(), String> {
+    pub async fn unsubscribe_screen(
+        &self,
+        workspace_id: &str,
+        pane_id: &str,
+    ) -> Result<(), String> {
         self.send_json(v3_message(
             "screen.unsubscribe",
             Some(workspace_id),
@@ -614,18 +646,25 @@ impl WssClientState {
                 .and_then(Value::as_str)
                 .unwrap_or("-")
         ));
+        let lan_available = self.lan_direct.publish_owner_message(value.clone()).await;
         let sender = {
             let inner = self.inner.lock().await;
             if !inner.connected {
+                if lan_available {
+                    return Ok(());
+                }
                 return Err("Server is not connected".to_string());
             }
             inner.sender.clone()
         };
 
-        sender
-            .ok_or_else(|| "Server is not connected".to_string())?
-            .send(OutboundMessage::Json(value))
-            .map_err(|_| "Failed to queue websocket message".to_string())
+        match sender {
+            Some(sender) => sender
+                .send(OutboundMessage::Json(value))
+                .map_err(|_| "Failed to queue websocket message".to_string()),
+            None if lan_available => Ok(()),
+            None => Err("Server is not connected".to_string()),
+        }
     }
 
     async fn disconnect_internal(&self, app: Option<&AppHandle>) {
@@ -793,4 +832,52 @@ fn new_client_message_id() -> String {
     static NEXT_MESSAGE_ID: AtomicU64 = AtomicU64::new(1);
     let seq = NEXT_MESSAGE_ID.fetch_add(1, Ordering::Relaxed);
     format!("desktop-{}-{}", current_timestamp_millis(), seq)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn owner_message_is_sent_to_cloud_and_lan() {
+        let lan_direct = LanDirectState::default();
+        let mut lan_receiver = lan_direct.add_test_receiver().await;
+        let state = WssClientState::new(lan_direct);
+        let (cloud_sender, mut cloud_receiver) = mpsc::unbounded_channel();
+        {
+            let mut inner = state.inner.lock().await;
+            inner.connected = true;
+            inner.sender = Some(cloud_sender);
+        }
+
+        state
+            .send_pane_meta(
+                "owner:default",
+                "pane-1",
+                Some("session-1"),
+                json!({ "activity": "running", "task_state": "running" }),
+            )
+            .await
+            .expect("pane metadata dual publish should succeed");
+
+        let Some(OutboundMessage::Json(cloud_message)) = cloud_receiver.recv().await else {
+            panic!("expected cloud JSON message")
+        };
+        assert_eq!(
+            cloud_message.get("type").and_then(Value::as_str),
+            Some("pane.meta")
+        );
+        let Some(axum::extract::ws::Message::Text(lan_text)) = lan_receiver.recv().await else {
+            panic!("expected LAN text message")
+        };
+        let lan_message: Value = serde_json::from_str(&lan_text).unwrap();
+        assert_eq!(
+            lan_message.get("type").and_then(Value::as_str),
+            Some("pane.meta")
+        );
+        assert_eq!(
+            lan_message.get("pane_id").and_then(Value::as_str),
+            Some("pane-1")
+        );
+    }
 }

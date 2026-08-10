@@ -28,6 +28,7 @@ function Get-ContentType([string]$path) {
         '.jpg'  { 'image/jpeg' }
         '.jpeg' { 'image/jpeg' }
         '.ico'  { 'image/x-icon' }
+        '.woff2' { 'font/woff2' }
         default { 'application/octet-stream' }
     }
 }

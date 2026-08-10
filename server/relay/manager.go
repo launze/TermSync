@@ -19,6 +19,7 @@ type WorkspaceInfo struct {
 	OwnerID     string
 	Version     int64
 	Snapshot    map[string]interface{}
+	PaneMeta    map[string]models.Message
 	Subscribers map[string]bool
 	UpdatedAt   time.Time
 }
@@ -111,7 +112,8 @@ type SessionManager struct {
 	// recentInputs suppresses accidental duplicate input.send delivery.
 	recentInputs map[string]time.Time
 
-	recentMessageIDs map[string]time.Time
+	recentMessageIDs  map[string]time.Time
+	stalePaneWarnings map[string]bool
 
 	inboundStats map[string]*inboundTrafficStats
 }
@@ -131,6 +133,7 @@ func NewSessionManager(store *store.Store) *SessionManager {
 		paneWorkspace:     make(map[string]string),
 		recentInputs:      make(map[string]time.Time),
 		recentMessageIDs:  make(map[string]time.Time),
+		stalePaneWarnings: make(map[string]bool),
 		inboundStats:      make(map[string]*inboundTrafficStats),
 	}
 }
@@ -299,6 +302,8 @@ func (sm *SessionManager) HandleMessage(deviceID string, msgData []byte) error {
 		return sm.handleLayoutSnapshot(deviceID, msg)
 	case models.MsgLayoutPatch:
 		return sm.handleLayoutPatch(deviceID, msg)
+	case models.MsgPaneMeta:
+		return sm.handlePaneMeta(deviceID, msg)
 	case models.MsgLayoutActionRequest:
 		return sm.handleLayoutActionRequest(deviceID, msg)
 	case models.MsgLayoutActionResult:
@@ -517,9 +522,8 @@ func (sm *SessionManager) handleWorkspaceSubscribe(deviceID string, msg models.M
 	ws.Subscribers[deviceID] = true
 	snapshot := clonePayload(ws.Snapshot)
 	version := ws.Version
-	sm.mu.Unlock()
-
-	sm.sendToDevice(deviceID, models.Message{
+	replay := make([]models.Message, 0, 1+len(ws.PaneMeta))
+	replay = append(replay, models.Message{
 		Type:        string(models.MsgLayoutSnapshot),
 		V:           3,
 		ID:          newMessageID(),
@@ -530,6 +534,18 @@ func (sm *SessionManager) handleWorkspaceSubscribe(deviceID string, msg models.M
 			"snapshot":       snapshot,
 		},
 	})
+	for _, paneID := range extractPaneIDs(snapshot) {
+		if meta, ok := ws.PaneMeta[paneID]; ok {
+			meta.Payload = clonePayload(meta.Payload)
+			replay = append(replay, meta)
+		}
+	}
+	conn := sm.deviceConnections[deviceID]
+	sender := sm.deviceSenders[deviceID]
+	for _, replayMessage := range replay {
+		sm.enqueueToDevice(deviceID, conn, sender, replayMessage)
+	}
+	sm.mu.Unlock()
 	return nil
 }
 
@@ -573,6 +589,7 @@ func (sm *SessionManager) handleLayoutSnapshot(deviceID string, msg models.Messa
 		ws = &WorkspaceInfo{
 			WorkspaceID: msg.WorkspaceID,
 			OwnerID:     deviceID,
+			PaneMeta:    make(map[string]models.Message),
 			Subscribers: make(map[string]bool),
 		}
 		sm.workspaces[msg.WorkspaceID] = ws
@@ -637,6 +654,58 @@ func (sm *SessionManager) handleLayoutPatch(deviceID string, msg models.Message)
 	if msg.ID == "" {
 		msg.ID = newMessageID()
 	}
+	for _, subscriber := range subscribers {
+		sm.sendToDevice(subscriber, msg)
+	}
+	return nil
+}
+
+func (sm *SessionManager) handlePaneMeta(deviceID string, msg models.Message) error {
+	if msg.WorkspaceID == "" {
+		sm.sendError(deviceID, "missing_workspace_id", "pane.meta requires workspace_id")
+		return nil
+	}
+	if msg.PaneID == "" {
+		sm.sendError(deviceID, "missing_pane_id", "pane.meta requires pane_id")
+		return nil
+	}
+	if !sm.isOwnerDevice(deviceID) {
+		sm.sendError(deviceID, "permission_denied", "Only desktop owner can publish pane.meta")
+		return nil
+	}
+
+	sm.mu.Lock()
+	ws := sm.workspaces[msg.WorkspaceID]
+	if ws == nil || ws.OwnerID != deviceID {
+		sm.mu.Unlock()
+		sm.sendError(deviceID, "workspace_not_found", "Workspace not found for owner")
+		return nil
+	}
+	if !sm.paneBelongsToWorkspaceLocked(msg.WorkspaceID, msg.PaneID) {
+		sm.mu.Unlock()
+		sm.sendError(deviceID, "pane_not_found", "pane.meta references a pane outside the workspace")
+		return nil
+	}
+	if msg.Payload == nil {
+		msg.Payload = map[string]interface{}{}
+	}
+	msg.V = 3
+	if msg.ID == "" {
+		msg.ID = newMessageID()
+	}
+	if msg.Timestamp == 0 {
+		msg.Timestamp = time.Now().Unix()
+	}
+	if ws.PaneMeta == nil {
+		ws.PaneMeta = make(map[string]models.Message)
+	}
+	stored := msg
+	stored.Payload = clonePayload(msg.Payload)
+	ws.PaneMeta[msg.PaneID] = stored
+	ws.UpdatedAt = time.Now()
+	subscribers := keysExcept(ws.Subscribers, deviceID)
+	sm.mu.Unlock()
+
 	for _, subscriber := range subscribers {
 		sm.sendToDevice(subscriber, msg)
 	}
@@ -815,8 +884,11 @@ func (sm *SessionManager) handleScreenSnapshot(deviceID string, msg models.Messa
 	}
 	sm.mu.Lock()
 	if !sm.paneBelongsToWorkspaceLocked(workspaceID, msg.PaneID) {
+		notify := sm.markStalePaneWarningLocked(deviceID, workspaceID, msg.PaneID)
 		sm.mu.Unlock()
-		sm.sendError(deviceID, "stale_pane", "Pane is not present in the current workspace layout")
+		if notify {
+			sm.sendError(deviceID, "stale_pane", "Pane is not present in the current workspace layout")
+		}
 		return nil
 	}
 	stream, _ := sm.findScreenStreamLocked(workspaceID, msg.PaneID)
@@ -879,8 +951,11 @@ func (sm *SessionManager) handleScreenDelta(deviceID string, msg models.Message)
 
 	sm.mu.Lock()
 	if !sm.paneBelongsToWorkspaceLocked(workspaceID, msg.PaneID) {
+		notify := sm.markStalePaneWarningLocked(deviceID, workspaceID, msg.PaneID)
 		sm.mu.Unlock()
-		sm.sendError(deviceID, "stale_pane", "Pane is not present in the current workspace layout")
+		if notify {
+			sm.sendError(deviceID, "stale_pane", "Pane is not present in the current workspace layout")
+		}
 		return nil
 	}
 	stream, _ := sm.findScreenStreamLocked(workspaceID, msg.PaneID)
@@ -1262,7 +1337,15 @@ func (sm *SessionManager) sendToDevice(deviceID string, msg models.Message) {
 	if !ok || conn == nil || sender == nil {
 		return
 	}
+	sm.enqueueToDevice(deviceID, conn, sender, msg)
+}
 
+// enqueueToDevice uses an already resolved connection. Callers may use it
+// while sm.mu is held to keep a replay batch ordered before live broadcasts.
+func (sm *SessionManager) enqueueToDevice(deviceID string, conn *websocket.Conn, sender *deviceSender, msg models.Message) {
+	if conn == nil || sender == nil {
+		return
+	}
 	if msg.V == 0 {
 		msg.V = 3
 	}
@@ -1574,6 +1657,7 @@ func (sm *SessionManager) indexWorkspacePanesLocked(workspaceID, ownerID string,
 	currentPanes := map[string]bool{}
 	for _, paneID := range extractPaneIDs(snapshot) {
 		currentPanes[paneID] = true
+		delete(sm.stalePaneWarnings, stalePaneWarningKey(ownerID, workspaceID, paneID))
 		key := screenStreamKey(workspaceID, paneID)
 		sm.paneWorkspace[key] = workspaceID
 		if stream, _ := sm.findScreenStreamLocked(workspaceID, paneID); stream != nil {
@@ -1608,6 +1692,26 @@ func (sm *SessionManager) indexWorkspacePanesLocked(workspaceID, ownerID string,
 			delete(sm.paneStreams, key)
 		}
 	}
+	if ws := sm.workspaces[workspaceID]; ws != nil {
+		for paneID := range ws.PaneMeta {
+			if !currentPanes[paneID] {
+				delete(ws.PaneMeta, paneID)
+			}
+		}
+	}
+}
+
+func stalePaneWarningKey(deviceID, workspaceID, paneID string) string {
+	return deviceID + "\x1f" + workspaceID + "\x1f" + paneID
+}
+
+func (sm *SessionManager) markStalePaneWarningLocked(deviceID, workspaceID, paneID string) bool {
+	key := stalePaneWarningKey(deviceID, workspaceID, paneID)
+	if sm.stalePaneWarnings[key] {
+		return false
+	}
+	sm.stalePaneWarnings[key] = true
+	return true
 }
 
 func (sm *SessionManager) paneBelongsToWorkspaceLocked(workspaceID, paneID string) bool {

@@ -71,6 +71,7 @@ const (
 	MsgWorkspaceUnsubscribe  MsgType = "workspace.unsubscribe"
 	MsgLayoutSnapshot        MsgType = "layout.snapshot"
 	MsgLayoutPatch           MsgType = "layout.patch"
+	MsgPaneMeta              MsgType = "pane.meta"
 	MsgLayoutActionRequest   MsgType = "layout.action_request"
 	MsgLayoutActionResult    MsgType = "layout.action_result"
 	MsgScreenSubscribe       MsgType = "screen.subscribe"

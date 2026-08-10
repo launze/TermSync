@@ -3,6 +3,7 @@
 
 mod api_client;
 mod commands;
+mod lan_direct;
 mod pty_manager;
 mod wss_client;
 
@@ -52,8 +53,15 @@ fn main() {
             commands::register_device,
             commands::generate_pairing_code,
             commands::complete_pairing,
+            commands::start_lan_direct_server,
+            commands::stop_lan_direct_server,
+            commands::get_lan_direct_status,
+            commands::generate_lan_pairing_code,
+            commands::clear_lan_paired_receivers,
+            commands::unbind_lan_receiver,
             commands::publish_layout_snapshot,
             commands::publish_layout_patch,
+            commands::publish_pane_meta,
             commands::subscribe_workspace,
             commands::subscribe_screen,
             commands::unsubscribe_screen,
@@ -83,7 +91,9 @@ fn main() {
         .setup(|app| {
             // Initialize app state
             log_debug("setup:start");
-            app.manage(wss_client::WssClientState::default());
+            let lan_direct = lan_direct::LanDirectState::default();
+            app.manage(wss_client::WssClientState::new(lan_direct.clone()));
+            app.manage(lan_direct);
             app.manage(pty_manager::PtyManager::default());
             if let Some(window) = app.get_webview_window("main") {
                 log_debug(&format!("setup:window-ready label={}", window.label()));

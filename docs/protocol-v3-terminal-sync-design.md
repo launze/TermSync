@@ -1,23 +1,23 @@
 # TermSync Protocol v3 终端同步协议设计
 
-更新时间: 2026-06-21
+更新时间: 2026-08-08
 
-状态: v3-only 改造进行中。服务端已切换为 v3-only，不再兼容旧 `session.*` / `terminal.*` WebSocket 协议；桌面端和 Android 已接入 v3 auth、workspace/layout、snapshot-backed layout.patch、screen snapshot/delta、resync、screen.ack 和 input.send 的基础链路。桌面 owner 已对 screen delta 做短窗口合并，在写入 PTY 前按 `input_id` 二次去重，并接入 xterm serialize addon 生成 VT screen snapshot。PC receiver 已改为按 v3 layout snapshot 直接同步 tab/pane/root，支持协议字符串 `pane_id` 到本地 numeric pane 的稳定映射，并且只为当前可见 tab 的 pane 订阅 screen，切换/移除 pane 时发送 `screen.unsubscribe`。Android 已改为详情页只订阅当前 pane screen，提供同标签 pane 切换入口，首页按 v3 `tab.root` 显示可点击 split tree 预览，并在后台退订 screen、回前台重新订阅恢复 snapshot。精细 layout diff、Android 详情页多 pane 同屏渲染、cell-level 快照仍属于后续完善项。
+状态: v3-only 改造进行中。服务端已切换为 v3-only，不再兼容旧 `session.*` / `terminal.*` WebSocket 协议；桌面端和 Android 已接入 v3 auth、workspace/layout、pane metadata、screen snapshot/delta、resync、screen.ack 和 input.send 的基础链路。高频 activity、task_state、preview 等状态通过 `pane.meta` 独立同步，不再伪装成 `layout.patch`，从协议层避免接收端反复重挂 xterm DOM 和输入失焦。桌面 owner 的同一条消息会同时分发到云端 WSS 和局域网直连订阅者；两条传输都缓存最新布局和 pane metadata，供 PC 接收端或手机晚加入时恢复。精细 layout diff、Android 详情页多 pane 同屏渲染、cell-level 快照仍属于后续完善项。
 
 本文用于替代当前 v2 中“输出追加 + 回放 + viewer resize owner PTY”的协议思路。目标是让 PC 接收端和 Android 手机端统一为 viewer，并稳定支持 Codex、vim、top、fzf、tmux、less 等 TUI 程序。
 
 ## 0. 当前落地状态
 
-更新时间: 2026-06-21
+更新时间: 2026-08-08
 
 | 模块 | 状态 |
 |------|------|
 | Server auth | 已要求 v3，旧客户端不再通过协议协商 |
 | Server connection | 已加入 `connection_id`、`client_instance_id`、旧连接 retired 检查 |
-| Server layout | 已支持 `workspace.list`、`workspace.subscribe`、`layout.snapshot/patch`、`layout.action_request` |
+| Server layout/meta | 已支持 `workspace.list`、`workspace.subscribe`、`layout.snapshot/patch`、`layout.action_request` 和独立的 `pane.meta` 缓存/重放 |
 | Server screen | 已支持 `screen.subscribe`、`screen.snapshot`、`screen.delta`、`screen.ack`、`screen.resync_request` 的基础路由、缓存、ack lag 降级和 outbound backlog 降级 |
 | Server input | 已支持 `input.send`、`input_id` 去重和 owner 转发 |
-| Desktop owner | 连接时发布 `layout.snapshot`，日常变更发布 snapshot-backed `layout.patch`，合并发布 `screen.delta`，用 xterm serialize 生成 `screen.snapshot`，并处理 `input.send` / `layout.action_request` / `screen.resync_request` |
+| Desktop owner | 结构变化发布 `layout.snapshot/patch`，活动状态发布 `pane.meta`，两者同时扇出到云端与 LAN；终端输出合并为 `screen.delta`，并用 xterm serialize 生成 `screen.snapshot` |
 | PC receiver | 已使用 v3 workspace/screen/input 基础链路，已按 seq 断档请求 resync 并发送 screen ack；`layout.snapshot/patch` 已按 v3 tab/pane/root 直接应用，协议 `pane_id` 与本地 pane id 解耦，只订阅当前可见 tab 的 pane，切换/移除时会 `screen.unsubscribe` |
 | Android | 已使用 v3 auth、workspace/layout、screen snapshot/delta、resync、screen ack、input.send；列表按 tab/pane 分组并按 `tab.root` 渲染 split tree 预览，详情页只订阅当前 pane 并可在同标签 pane 间切换，后台会 `screen.unsubscribe`，前台重新订阅 |
 | 未完成 | 精细 layout diff patch、Android 详情页多 pane 同屏渲染、cell-level 快照、队列内旧 delta 精细丢弃 |
@@ -128,6 +128,9 @@ xterm serialize addon 能把 terminal framebuffer 序列化成可重新 `write()
 8. 每个 pane 的 screen stream 必须单调递增 seq。
 9. viewer 发现 seq 缺口只能 resync，不能猜测补写。
 10. 同一设备新连接成功后，server 必须踢掉旧连接或将旧连接标记 retired，旧连接消息一律丢弃。
+11. `layout.snapshot/patch` 只表达 tab、split、pane 生命周期等结构变化；高频标题、activity、task_state、preview、cwd、rows/cols 走 `pane.meta`。
+12. 网络消息不得改变 viewer 的本地焦点；只有用户点击、键盘导航或 DOM 结构移动后的条件恢复可以调用 terminal focus。
+13. 云端和 LAN 同时可用时，owner 消息必须分别投递，不能把其中一条链路当作另一条的 fallback。
 
 ## 3.2 为什么不能只做“重复不发”
 
@@ -364,6 +367,7 @@ server 规则:
 | `layout.patch` | owner/server -> viewer | 增量布局变化 |
 | `layout.action_request` | viewer -> server -> owner | viewer 请求 owner 执行动作 |
 | `layout.action_result` | owner/server -> viewer | 请求结果 |
+| `pane.meta` | owner -> server/LAN -> viewer | pane 的非结构化、可覆盖元数据 |
 
 布局动作枚举:
 
@@ -384,6 +388,7 @@ server 规则:
 - viewer 发 `layout.action_request`，不得直接发布 `layout.patch`。
 - owner 执行动作后发布新的 `layout.patch` 或 `layout.snapshot`。
 - viewer 收到 layout 更新时只更新布局 DOM；不清空 screen，不 replay。
+- `layout.snapshot/patch` 不承载周期性 activity/preview 刷新；否则接收端会不断重建布局并使 xterm hidden textarea 失焦。
 
 ### 7.3 Screen
 
@@ -500,13 +505,16 @@ owner 应用后再发布 `pty.create` / `pty.close` 和 layout patch。
 
 | 类型 | 方向 | 说明 |
 |------|------|------|
-| `pane.meta` | owner -> server/viewer | cwd/program/title/task_state/activity/preview |
-| `pane.meta.patch` | owner/server -> viewer | 元数据变化 |
+| `pane.meta` | owner -> server/LAN -> viewer | title/tab_title/pane_title/cwd/status/cols/rows/activity/task_state/preview/screen_preview/updated_at |
 
 原则:
 
 - metadata 不驱动 xterm screen 重绘。
-- metadata 不触发 layout DOM 重建，除非标题显示实际变化。
+- `pane.meta` 是按 `workspace_id + pane_id` 覆盖的最新状态，不增加 `layout_version`。
+- server 和 LAN 只接受 owner 发布；viewer 发布必须被拒绝。
+- metadata 只原位更新 session model 和 tab/pane chrome，不能触发 terminal layout DOM 重建。
+- 新 viewer 执行 `workspace.subscribe` 后，必须先收到 `layout.snapshot`，再按布局 pane 顺序收到缓存的 `pane.meta`。
+- pane 从布局删除时必须同步删除缓存 metadata，禁止晚加入 viewer 恢复已关闭 pane 的旧状态。
 - TUI 装饰行、状态栏、spinner 不应频繁改变 task_state。
 - shell integration 可用于 cwd/command detection，但不是 screen truth。
 

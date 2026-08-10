@@ -156,6 +156,21 @@ pub async fn complete_pairing(
         .map_err(|e| format!("Failed to parse pairing completion response: {e}"))
 }
 
+pub async fn unbind_lan_receiver(server_url: String, token: String) -> Result<(), String> {
+    let client = http_client()?;
+    let url = format!("{}/api/pairing/unbind", server_base_url(&server_url)?);
+
+    client
+        .post(url)
+        .json(&serde_json::json!({ "token": token }))
+        .send()
+        .await
+        .map_err(|e| format!("LAN unbind request failed: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("LAN unbind request failed: {e}"))?;
+    Ok(())
+}
+
 pub async fn fetch_latest_release(
     server_url: String,
     platform: &str,

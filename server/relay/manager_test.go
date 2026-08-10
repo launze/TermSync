@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -193,6 +194,120 @@ func TestLayoutSnapshotCreatesWorkspaceAndIndexesPanes(t *testing.T) {
 	}
 }
 
+func TestPaneMetaBroadcastsWithoutChangingLayoutAndReplaysToNewSubscriber(t *testing.T) {
+	sm, cleanup := newTestManager(t)
+	defer cleanup()
+	seedDevice(t, sm, "desktop-1", "desktop-token", "desktop")
+	seedDevice(t, sm, "mobile-1", "mobile-token", "mobile")
+	seedDevice(t, sm, "pc-1", "pc-token", "pc_receiver")
+	seedPairing(t, sm, "desktop-1", "mobile-1")
+	seedPairing(t, sm, "desktop-1", "pc-1")
+
+	if err := sm.HandleMessage("desktop-1", marshalMsg(t, models.Message{
+		Type:        string(models.MsgLayoutSnapshot),
+		V:           3,
+		ID:          "layout-meta-test",
+		WorkspaceID: "desktop-1:default",
+		Payload: map[string]interface{}{
+			"layout_version": 7.0,
+			"snapshot": map[string]interface{}{
+				"tabs": []interface{}{
+					map[string]interface{}{
+						"tab_id": "tab-1",
+						"panes": []interface{}{
+							map[string]interface{}{"pane_id": "pane-1", "session_id": "session-1"},
+						},
+					},
+				},
+			},
+		},
+	})); err != nil {
+		t.Fatalf("layout.snapshot failed: %v", err)
+	}
+
+	mobileSender := newDeviceSender(nil)
+	sm.deviceConnections["mobile-1"] = &websocket.Conn{}
+	sm.deviceSenders["mobile-1"] = mobileSender
+	sm.workspaces["desktop-1:default"].Subscribers["mobile-1"] = true
+
+	meta := models.Message{
+		Type:        string(models.MsgPaneMeta),
+		V:           3,
+		ID:          "pane-meta-1",
+		WorkspaceID: "desktop-1:default",
+		PaneID:      "pane-1",
+		SessionID:   "session-1",
+		Payload: map[string]interface{}{
+			"task_state": "running",
+			"activity":   "正在执行测试",
+		},
+	}
+	if err := sm.HandleMessage("desktop-1", marshalMsg(t, meta)); err != nil {
+		t.Fatalf("pane.meta failed: %v", err)
+	}
+	if got := readQueuedMessage(t, mobileSender); got.Type != string(models.MsgPaneMeta) {
+		t.Fatalf("mobile received %q, want pane.meta", got.Type)
+	}
+	workspace := sm.workspaces["desktop-1:default"]
+	if workspace.Version != 7 {
+		t.Fatalf("pane.meta changed layout version to %d", workspace.Version)
+	}
+	if workspace.PaneMeta["pane-1"].Payload["task_state"] != "running" {
+		t.Fatal("latest pane metadata was not cached")
+	}
+
+	pcSender := newDeviceSender(nil)
+	sm.deviceConnections["pc-1"] = &websocket.Conn{}
+	sm.deviceSenders["pc-1"] = pcSender
+	if err := sm.HandleMessage("pc-1", marshalMsg(t, models.Message{
+		Type:        string(models.MsgWorkspaceSubscribe),
+		V:           3,
+		ID:          "pc-workspace-subscribe",
+		WorkspaceID: "desktop-1:default",
+	})); err != nil {
+		t.Fatalf("workspace.subscribe failed: %v", err)
+	}
+	if got := readQueuedMessage(t, pcSender); got.Type != string(models.MsgLayoutSnapshot) {
+		t.Fatalf("first replay message = %q, want layout.snapshot", got.Type)
+	}
+	if got := readQueuedMessage(t, pcSender); got.Type != string(models.MsgPaneMeta) || got.PaneID != "pane-1" {
+		t.Fatalf("second replay message = %#v, want pane.meta for pane-1", got)
+	}
+}
+
+func TestPaneMetaRejectsViewerPublisher(t *testing.T) {
+	sm, cleanup := newTestManager(t)
+	defer cleanup()
+	seedDevice(t, sm, "desktop-1", "desktop-token", "desktop")
+	seedDevice(t, sm, "pc-1", "pc-token", "pc_receiver")
+	seedPairing(t, sm, "desktop-1", "pc-1")
+	sm.workspaces["desktop-1:default"] = &WorkspaceInfo{
+		WorkspaceID: "desktop-1:default",
+		OwnerID:     "desktop-1",
+		PaneMeta:    map[string]models.Message{},
+		Subscribers: map[string]bool{"pc-1": true},
+	}
+	pcSender := newDeviceSender(nil)
+	sm.deviceConnections["pc-1"] = &websocket.Conn{}
+	sm.deviceSenders["pc-1"] = pcSender
+
+	if err := sm.HandleMessage("pc-1", marshalMsg(t, models.Message{
+		Type:        string(models.MsgPaneMeta),
+		V:           3,
+		WorkspaceID: "desktop-1:default",
+		PaneID:      "pane-1",
+		Payload:     map[string]interface{}{"activity": "forged"},
+	})); err != nil {
+		t.Fatalf("viewer pane.meta should be rejected without transport error: %v", err)
+	}
+	if got := readQueuedMessage(t, pcSender); got.Type != string(models.MsgError) {
+		t.Fatalf("viewer received %q, want error", got.Type)
+	}
+	if len(sm.workspaces["desktop-1:default"].PaneMeta) != 0 {
+		t.Fatal("viewer pane.meta must not mutate workspace metadata")
+	}
+}
+
 func TestLayoutPatchUpdatesWorkspaceSnapshot(t *testing.T) {
 	sm, cleanup := newTestManager(t)
 	defer cleanup()
@@ -310,6 +425,62 @@ func TestLayoutPatchRemovesStalePaneStreams(t *testing.T) {
 	}
 	if _, ok := sm.paneStreams["pane-1"]; ok {
 		t.Fatal("stale screen.delta must not recreate removed pane stream")
+	}
+}
+
+func TestStalePaneErrorIsSentOnlyOnceUntilPaneReturnsToLayout(t *testing.T) {
+	sm, cleanup := newTestManager(t)
+	defer cleanup()
+	seedDevice(t, sm, "desktop-1", "desktop-token", "desktop")
+
+	sender := newDeviceSender(nil)
+	sm.deviceConnections["desktop-1"] = &websocket.Conn{}
+	sm.deviceSenders["desktop-1"] = sender
+	sm.workspaces["desktop-1:default"] = &WorkspaceInfo{
+		WorkspaceID: "desktop-1:default",
+		OwnerID:     "desktop-1",
+		Version:     1,
+		Snapshot:    map[string]interface{}{"root": map[string]interface{}{"pane_id": "pane-2"}},
+		Subscribers: map[string]bool{},
+	}
+	sm.indexWorkspacePanesLocked("desktop-1:default", "desktop-1", sm.workspaces["desktop-1:default"].Snapshot)
+
+	staleDelta := models.Message{
+		Type:        string(models.MsgScreenDelta),
+		V:           3,
+		WorkspaceID: "desktop-1:default",
+		PaneID:      "pane-1",
+		SessionID:   "session-1",
+		Payload:     map[string]interface{}{"seq": 1.0, "data": "YQ=="},
+	}
+	for i := 0; i < 2; i++ {
+		staleDelta.ID = fmt.Sprintf("stale-delta-%d", i)
+		if err := sm.HandleMessage("desktop-1", marshalMsg(t, staleDelta)); err != nil {
+			t.Fatalf("stale screen.delta failed: %v", err)
+		}
+	}
+	if got := readQueuedMessage(t, sender); strField(got.Payload, "code", "") != "stale_pane" {
+		t.Fatalf("error code = %q, want stale_pane", strField(got.Payload, "code", ""))
+	}
+	select {
+	case unexpected := <-sender.queue:
+		t.Fatalf("duplicate stale pane error was queued: %s", unexpected)
+	default:
+	}
+
+	sm.mu.Lock()
+	sm.indexWorkspacePanesLocked("desktop-1:default", "desktop-1", map[string]interface{}{
+		"root": map[string]interface{}{"pane_id": "pane-1"},
+	})
+	delete(sm.paneWorkspace, screenStreamKey("desktop-1:default", "pane-1"))
+	delete(sm.paneStreams, screenStreamKey("desktop-1:default", "pane-1"))
+	sm.mu.Unlock()
+	staleDelta.ID = "stale-delta-after-return"
+	if err := sm.HandleMessage("desktop-1", marshalMsg(t, staleDelta)); err != nil {
+		t.Fatalf("stale screen.delta after layout return failed: %v", err)
+	}
+	if got := readQueuedMessage(t, sender); strField(got.Payload, "code", "") != "stale_pane" {
+		t.Fatalf("error code after reset = %q, want stale_pane", strField(got.Payload, "code", ""))
 	}
 }
 
